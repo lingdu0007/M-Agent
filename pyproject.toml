@@ -1,0 +1,14 @@
+[project]
+name = "hello-agent"
+version = "0.1.0"
+description = "A small learning-oriented Agent framework."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
