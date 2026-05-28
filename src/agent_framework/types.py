@@ -66,3 +66,4 @@ class AgentResult:
     output: str
     messages: List[Message]
     steps: int
+    structured_output: Optional[Any] = None

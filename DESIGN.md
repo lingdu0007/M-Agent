@@ -20,11 +20,12 @@
 
 当前非目标：
 
-1. 不做复杂多 Agent 编排。
+1. 不做复杂自由对话式多 Agent 编排。
 2. 不做可视化工作流。
 3. 不做生产级权限系统。
-4. 不做向量数据库和 RAG 检索。
+4. 不做生产级向量数据库和高级 RAG 检索。
 5. 不把框架绑死在某一个模型供应商上。
+6. 不在第一版 eval 里引入不可复现的 judge 模型评分。
 
 ## 2. Agent 框架的核心问题
 
@@ -50,6 +51,13 @@ User Input
 | `Tool` | 如何把 Python 函数暴露给模型 | `tools.py` |
 | `Agent` | 如何组合模型、工具、指令和 memory | `agent.py` |
 | `Memory` | 如何保存和恢复对话历史 | `memory.py` |
+| `SessionMemory` | 如何隔离多个会话的历史 | `session_memory.py` |
+| `Guardrail` | 如何在工具执行前做安全策略检查 | `guardrails.py` |
+| `OutputSchema` | 如何约束最终回答的数据结构 | `structured_output.py` |
+| `RAG` | 如何检索知识片段并交给 Agent | `rag.py` |
+| `Workflow` | 如何组织多步骤任务 | `workflow.py` |
+| `MultiAgentTeam` | 如何让多个 Agent 受控协作 | `multi_agent.py` |
+| `Eval` | 如何衡量 Agent 输出质量并做回归检查 | `evals.py` |
 | `builtin_tools` | 如何提供安全的内置工具 | `builtin_tools.py` |
 
 ## 3. 主流框架如何设计
@@ -80,6 +88,13 @@ agent_framework/
   models.py        模型适配层
   tools.py         工具注册和 schema 生成
   memory.py        memory 接口和实现
+  session_memory.py 多会话 memory
+  guardrails.py    工具调用安全策略
+  structured_output.py 结构化输出解析和校验
+  rag.py           本地文档切块、索引和检索
+  workflow.py      多步骤任务编排
+  multi_agent.py   受控多 Agent 协作
+  evals.py         确定性评测和报告
   types.py         Message、ToolCall、AgentResult
   builtin_tools.py 安全内置工具
   config.py        .env 加载
@@ -241,21 +256,37 @@ clear()
 | 层级 | 含义 | 当前是否实现 |
 | --- | --- | --- |
 | Short-term memory | 当前会话历史 | 已实现 |
-| Session persistence | 多会话隔离和恢复 | 未实现 |
+| Session persistence | 多会话隔离和恢复 | 已实现基础版 |
 | Long-term memory | 用户偏好、长期事实 | 未实现 |
-| Semantic memory | 向量检索、RAG | 未实现 |
+| Semantic memory | 向量检索、RAG | 基础 RAG 已实现，向量检索未实现 |
 | Task state | 工作流执行到哪一步 | 未实现 |
 
 当前 memory 保存的是消息历史，不是“智能记忆”。它能回答“刚才说过什么”，但还不会自动提炼长期偏好。
 
-下一步应该加：
+多会话 memory 已经作为独立接口实现：
 
 ```text
 SessionMemory
-  session_id
+  load(session_id)
+  save(session_id, messages)
+  clear(session_id)
   list_sessions()
   delete_session()
 ```
+
+已有实现：
+
+| 实现 | 用途 |
+| --- | --- |
+| `InMemorySessionMemory` | 测试和临时多会话 |
+| `JsonDirectorySessionMemory` | 一个 session 一个 JSON 文件 |
+
+为什么 `SessionMemory` 不直接合并进 `Memory`：
+
+- 单会话 memory 和多会话 memory 的职责不同。
+- `Memory` 只回答“当前历史是什么”。
+- `SessionMemory` 还要回答“有哪些会话、删除哪个会话、当前请求属于哪个会话”。
+- 分开后，Agent 可以兼容简单场景和多用户场景。
 
 ## 9. Builtin File Tools 设计
 
@@ -325,6 +356,7 @@ Tracer
 ```text
 agent.run.start
 memory.load
+session.load
 model.call.start
 model.call.end
 model.call.error
@@ -332,6 +364,7 @@ tool.call.start
 tool.call.end
 tool.call.error
 memory.save
+session.save
 agent.run.end
 ```
 
@@ -357,7 +390,387 @@ TraceEvent
 
 这会让 trace 更接近 OpenTelemetry，也更适合多 Agent 和 workflow。
 
-## 11. 配置设计
+## 11. Guardrails 设计
+
+Guardrails 是 Agent 的安全策略层。它不负责执行工具，也不负责模型推理，只负责回答一个问题：
+
+```text
+这个工具调用是否允许执行？
+```
+
+当前抽象：
+
+```text
+Guardrail
+  check_tool_call(tool_name, arguments) -> GuardrailDecision
+
+GuardrailDecision
+  allowed
+  reason
+  rule
+```
+
+已有规则：
+
+| 规则 | 用途 |
+| --- | --- |
+| `ToolAllowlistGuardrail` | 只允许指定工具 |
+| `ToolDenylistGuardrail` | 禁止指定工具 |
+| `SensitiveArgumentGuardrail` | 阻止敏感参数 key 或 value |
+
+为什么放在工具执行前：
+
+- 工具是 Agent 能力边界，也是风险边界。
+- 模型可能请求不应该执行的工具。
+- 参数里可能包含 secret、token、私密路径或危险命令。
+- 被阻止的结果仍会作为 tool message 回给模型，模型可以解释为什么不能完成。
+
+当前简化：
+
+- 只有同步检查，没有人工审批。
+- 只检查工具名和参数，不检查最终回答。
+- 不支持按用户、项目、环境区分权限。
+- 不支持风险分级。
+
+后续演进：
+
+```text
+Guardrail
+  check_input(prompt)
+  check_tool_call(tool_name, arguments)
+  check_tool_result(tool_name, result)
+  check_output(answer)
+
+Decision
+  allow
+  block
+  require_approval
+```
+
+## 12. Structured Output 设计
+
+Structured Output 解决的问题是：Agent 的最终回答如果要被程序继续处理，不能只是一段自然语言。
+
+当前抽象：
+
+```text
+OutputSchema
+  name
+  description
+  schema
+
+AgentResult
+  output
+  structured_output
+```
+
+当前流程：
+
+```text
+Agent.run(prompt, output_schema)
+  -> 把 schema 追加到 system instructions
+  -> 模型返回最终回答
+  -> 框架解析 JSON
+  -> 框架按 schema 校验
+  -> result.structured_output = parsed object
+```
+
+为什么先做框架级解析，而不是直接依赖模型供应商原生 structured output：
+
+- 当前框架要保持模型适配层可替换。
+- 有些 OpenAI-compatible 服务不完全支持原生 structured output。
+- 教学阶段更容易看清楚“声明 schema、模型输出、框架校验”的关系。
+
+主流框架通常有两种做法：
+
+| 做法 | 优点 | 缺点 |
+| --- | --- | --- |
+| 模型原生 structured output | 稳定性更高，模型端约束更强 | 依赖具体供应商能力 |
+| 框架解析和校验 | 可移植，适合多模型 | 模型仍可能输出无效 JSON |
+
+当前简化：
+
+- 只支持 JSON。
+- 只实现 JSON schema 的基础类型、required、properties、items、enum。
+- 校验失败直接抛 `StructuredOutputError`。
+- 没有自动重试修复。
+
+后续演进：
+
+```text
+StructuredOutput
+  -> provider-native schema
+  -> validation retry
+  -> pydantic/dataclass schema generation
+  -> partial parsing
+  -> typed AgentResult[T]
+```
+
+## 13. RAG 设计
+
+RAG 是 Retrieval-Augmented Generation。它解决的问题是：模型本身不知道你的项目文档、代码说明或私有知识库，需要先检索相关片段，再基于片段回答。
+
+主流 RAG 通常分成几层：
+
+```text
+Document Loader
+  -> Chunker
+  -> Embedding / Index
+  -> Retriever
+  -> Context Builder
+  -> Generator
+```
+
+当前抽象：
+
+```text
+DocumentChunk
+  id
+  source
+  text
+  start_line
+  end_line
+
+KeywordRagIndex
+  add_text()
+  from_directory()
+  search()
+  get()
+
+RAG tools
+  search_knowledge(query, top_k)
+  read_knowledge_chunk(chunk_id)
+```
+
+为什么先做关键词检索，而不是直接做向量数据库：
+
+- 关键词检索无依赖，便于理解 RAG 的模块边界。
+- 当前目标是先把 loader、chunk、retriever、tool 这条链路跑通。
+- 后续换成 embedding/vector store 时，不应该改 Agent 主循环。
+
+当前简化：
+
+- 不使用 embedding。
+- 不做 rerank。
+- 不做引用去重。
+- 不做增量索引。
+- 只索引常见文本文件后缀。
+
+安全边界：
+
+- 默认忽略 `.env`。
+- 默认忽略 `data/`，避免索引 memory 和 session 历史。
+- 默认忽略 `.venv`、`.git`、缓存目录和构建目录。
+- 默认跳过过大文件。
+
+后续演进：
+
+```text
+RAG
+  -> embedding retriever
+  -> vector store
+  -> reranker
+  -> citation builder
+  -> incremental index
+  -> hybrid search
+```
+
+## 14. Workflow 设计
+
+Workflow 是 Agent 之上的编排层。Agent 负责一次推理循环，Workflow 负责组织多个步骤完成一个任务。
+
+当前抽象：
+
+```text
+WorkflowContext = dict
+
+StepResult
+  updates
+  next_step
+  stop
+
+FunctionStep
+  run(context)
+
+AgentStep
+  agent.run(prompt(context))
+
+Workflow
+  start
+  steps
+  max_steps
+```
+
+为什么 Workflow 不放进 Agent：
+
+- Agent 的职责是推理和工具调用。
+- Workflow 的职责是任务编排和状态流转。
+- 混在一起会让 Agent 既像模型包装器，又像流程引擎，边界会变差。
+
+这对应 LangGraph 这类框架里的状态图思想，但当前版本只保留最小能力：
+
+- 顺序执行。
+- 条件跳转。
+- 提前结束。
+- 防无限循环。
+- trace 事件。
+
+当前简化：
+
+- 没有并行步骤。
+- 没有持久化 checkpoint。
+- 没有人工审批节点。
+- 没有可视化图。
+- 没有失败重试策略。
+
+后续演进：
+
+```text
+Workflow
+  -> checkpoint
+  -> retry policy
+  -> human approval step
+  -> parallel branches
+  -> graph visualization
+```
+
+## 15. Multi-Agent 设计
+
+Multi-Agent 解决的问题是：复杂任务通常需要不同角色分工，而不是让一个 Agent 同时承担研究、审查、写作和决策。
+
+主流框架里常见几种做法：
+
+| 模式 | 代表 | 特点 |
+| --- | --- | --- |
+| 顺序角色协作 | CrewAI 风格 | 研究员、审阅者、写作者按任务顺序协作 |
+| 自由对话 | AutoGen 风格 | 多个 Agent 互相发消息，灵活但更难控制 |
+| Handoff | OpenAI Agents SDK 风格 | 一个 Agent 决定把任务交给另一个 Agent |
+
+当前实现选择第一种：受控顺序团队。
+
+当前抽象：
+
+```text
+TeamMember
+  name
+  role
+  agent
+  prompt(context)
+  output_key
+
+MultiAgentTeam
+  members
+  run(task, context)
+
+MultiAgentResult
+  task
+  final_output
+  context
+  member_outputs
+  agent_results
+```
+
+为什么不先做自由对话：
+
+- 自由多 Agent 容易无限循环。
+- 角色之间的消息边界更难调试。
+- 新手阶段更需要可预测、可测试的执行顺序。
+- Workflow 已经提供了顺序编排的基础，顺序团队更自然。
+
+当前简化：
+
+- 不支持 Agent 自主选择 handoff。
+- 不支持多轮 Agent 间辩论。
+- 不支持并行角色执行。
+- 不支持投票或裁判 Agent。
+
+后续演进：
+
+```text
+MultiAgent
+  -> handoff rules
+  -> debate loop
+  -> judge / critic agent
+  -> parallel team branches
+  -> role-specific memory
+```
+
+## 16. Eval 设计
+
+Eval 解决的问题是：Agent 看起来能回答，不代表它在稳定变好。每次改模型、prompt、工具、memory 或 workflow，都可能让旧任务悄悄退化。Eval 提供一组可重复运行的样例和判断规则，用来做质量测量和回归保护。
+
+主流 Agent 框架里的 eval 通常有几种层次：
+
+| 类型 | 适合检查什么 | 风险 |
+| --- | --- | --- |
+| 确定性断言 | 精确答案、关键词、结构化字段 | 覆盖不了主观质量 |
+| LLM-as-judge | 写作质量、完整性、推理过程 | 成本更高，结果可能波动 |
+| 轨迹评测 | 是否调用正确工具、调用顺序是否合理 | 需要稳定 trace/tool-call 数据 |
+| 人工评审 | 高风险、强主观任务 | 慢，不适合每次回归 |
+
+当前实现选择确定性断言。
+
+当前抽象：
+
+```text
+EvalCase
+  name
+  prompt
+  expected_output
+  expected_keywords
+  expected_structured
+  expected_tool_calls
+  output_schema
+
+Evaluator
+  evaluate(case, result) -> EvalCheck
+
+EvalRunner
+  target(case)
+  evaluators
+  run(cases) -> EvalReport
+```
+
+已有 evaluator：
+
+| Evaluator | 用途 |
+| --- | --- |
+| `ExactMatchEvaluator` | 最终输出必须和期望文本完全一致 |
+| `ContainsKeywordsEvaluator` | 最终输出必须包含指定关键词 |
+| `StructuredFieldEvaluator` | `structured_output` 中指定字段必须匹配 |
+| `ToolTrajectoryEvaluator` | 工具调用数量、顺序和参数子集必须匹配 |
+
+Tool trajectory eval 检查的是模型请求过哪些工具，而不是工具最终返回了什么。当前实现直接读取 `AgentResult.messages` 里的 assistant `tool_calls`，这是 Agent 运行结果里最直接的事实来源。
+
+为什么 Eval 不放进 `Agent`：
+
+- Agent 的职责是执行推理循环。
+- Eval 的职责是测量质量。
+- 同一个 Agent 可以被不同 eval suite 测试。
+- Workflow、Multi-Agent 也应该能被评测，而不是只有单 Agent 能评测。
+
+当前简化：
+
+- 没有 LLM-as-judge。
+- 工具轨迹只检查工具名和参数子集，不检查工具返回值质量。
+- 工具轨迹来自 `AgentResult.messages`，还没有做 trace/span 级别断言。
+- 没有 HTML 报告。
+- 没有数据集文件加载。
+- 没有统计置信区间。
+
+后续演进：
+
+```text
+Eval
+  -> dataset loader
+  -> tool result evaluator
+  -> trace/span trajectory evaluator
+  -> LLM judge evaluator
+  -> JSON/HTML report
+  -> CI regression gate
+```
+
+## 17. 配置设计
 
 当前配置来自 `.env`：
 
@@ -391,7 +804,7 @@ ProviderConfig
 load_config("agent.toml")
 ```
 
-## 12. 当前设计取舍
+## 18. 当前设计取舍
 
 ### 为什么不用 LangGraph 起步
 
@@ -409,7 +822,7 @@ OpenAI Agents SDK 已经有成熟抽象，但我们当前目标是学习和自�
 
 这是最容易验证、最不容易误导的 memory。长期记忆和语义记忆需要抽取、去重、检索、遗忘策略，过早做会让设计复杂化。
 
-## 13. 设计原则
+## 19. 设计原则
 
 1. 接口稳定，实现可替换。
 2. Agent 负责组合，不负责所有细节。
@@ -420,16 +833,14 @@ OpenAI Agents SDK 已经有成熟抽象，但我们当前目标是学习和自�
 7. 每增加一个危险能力，先设计权限和审计。
 8. 测试优先覆盖运行时契约，而不是只测示例。
 
-## 14. 后续路线
+## 20. 后续路线
 
 推荐演进顺序：
 
-1. `SessionMemory`: 支持多会话和会话列表。
-2. `Guardrails`: 工具权限、危险操作确认、路径和大小限制。
-3. `Structured Output`: 用 schema 校验模型最终输出。
-4. `RAG`: 文档切分、索引、检索、引用来源。
-5. `Workflow`: 状态图、条件分支、人工审批。
-6. `Multi-Agent`: 基于稳定 workflow 做角色分工。
-7. `Eval`: 为 Agent 行为写可重复评测。
+1. `Eval`: 增加工具结果评测、trace/span 轨迹评测、LLM-as-judge 和报告导出。
+2. `RAG`: 加入 embedding、vector store、rerank 和 citation。
+3. `Workflow`: 增加 checkpoint、retry、human approval 和并行分支。
+4. `Trace`: 增加 trace id、span id、duration、token usage。
+5. `Guardrails`: 从工具调用前扩展到输入、工具结果和最终输出。
 
-Trace 已经完成最小版本。下一步最建议做 `SessionMemory`，因为当前 `JsonFileMemory` 只有一个历史文件，不能自然区分多个会话。
+Trace、SessionMemory、工具调用前 Guardrails、Structured Output、基础 RAG、Workflow、Multi-Agent 和确定性 Eval 都已经完成最小版本。后续重点应该从“能跑”转向“跑得稳、可恢复、可审计、可比较”。
