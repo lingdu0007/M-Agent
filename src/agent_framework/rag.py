@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
+from ._project_content import ProjectContent
 from .tools import Tool, tool
 
 
@@ -65,14 +66,13 @@ class KeywordRagIndex:
         overlap: int = 160,
     ) -> "KeywordRagIndex":
         index = cls(chunk_size=chunk_size, overlap=overlap)
-        base = Path(root).resolve()
+        project_content = ProjectContent(root)
+        base = project_content.root
         allowed_suffixes = set(suffixes or DEFAULT_TEXT_SUFFIXES)
         ignored = set(ignores)
 
-        for path in sorted(base.rglob("*")):
-            if any(part in ignored or part.endswith(".egg-info") for part in path.parts):
-                continue
-            if not path.is_file() or path.suffix not in allowed_suffixes:
+        for path in project_content.iter_files(ignored):
+            if path.suffix not in allowed_suffixes:
                 continue
             if path.stat().st_size > max_file_size:
                 continue

@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Iterable, List
 
+from ._project_content import ProjectContent
 from .tools import Tool, tool
 
 
@@ -16,7 +17,8 @@ DEFAULT_IGNORES = {
 
 
 def make_file_tools(root: Path, ignores: Iterable[str] = DEFAULT_IGNORES) -> List[Tool]:
-    base = root.resolve()
+    project_content = ProjectContent(root)
+    base = project_content.root
     ignored = set(ignores)
 
     @tool(description="List files under the allowed project root.")
@@ -25,7 +27,7 @@ def make_file_tools(root: Path, ignores: Iterable[str] = DEFAULT_IGNORES) -> Lis
         limit = _bounded_int(max_results, default=50, minimum=1, maximum=200)
         results = []
 
-        for path in _iter_files(base, ignored):
+        for path in project_content.iter_files(ignored):
             relative = path.relative_to(base).as_posix()
             if pattern_lower and pattern_lower not in relative.lower():
                 continue
@@ -37,7 +39,7 @@ def make_file_tools(root: Path, ignores: Iterable[str] = DEFAULT_IGNORES) -> Lis
 
     @tool(description="Read a UTF-8 text file under the allowed project root.")
     def read_text_file(path: str, max_chars: int = 4000) -> str:
-        target = _safe_path(base, path)
+        target = project_content.resolve_file(path)
         if not target.is_file():
             raise ValueError(f"Not a file: {path}")
 
@@ -55,7 +57,7 @@ def make_file_tools(root: Path, ignores: Iterable[str] = DEFAULT_IGNORES) -> Lis
 
         limit = _bounded_int(max_results, default=20, minimum=1, maximum=100)
         matches = []
-        for path in _iter_files(base, ignored):
+        for path in project_content.iter_files(ignored):
             if path.stat().st_size > 1_000_000:
                 continue
             try:
@@ -77,23 +79,6 @@ def make_file_tools(root: Path, ignores: Iterable[str] = DEFAULT_IGNORES) -> Lis
         return "\n".join(matches) if matches else "No matches."
 
     return [list_files, read_text_file, search_text]
-
-
-def _iter_files(root: Path, ignores: set) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if any(part in ignores or part.endswith(".egg-info") for part in path.parts):
-            continue
-        if path.is_file():
-            yield path
-
-
-def _safe_path(root: Path, path: str) -> Path:
-    target = (root / path).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(f"Path outside project root: {path}") from exc
-    return target
 
 
 def _bounded_int(value: int, *, default: int, minimum: int, maximum: int) -> int:
