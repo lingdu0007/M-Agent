@@ -1,4 +1,18 @@
-# Hello Agent
+# M-Agent
+
+M-Agent is an embeddable Agent Application Runtime for Python. Its primary
+public distribution is `m-agent`, and its public runtime package is
+`m_agent`. Runtime Integrators should start with
+[the Durable Run guide](docs/durable-run.md): the async-first `Runner`
+executes explicitly supplied Agent Runs, while applications retain ownership
+of workers, queues, polling, scheduling, and lease takeover.
+
+The legacy learning framework remains in `agent_framework` with the existing
+examples below. It is retained as existing repository behavior, not as the
+primary M-Agent runtime interface; this Ticket does not introduce a migration
+or compatibility policy for it.
+
+## Legacy Learning Framework Reference
 
 这是一个给新手学习用的最小 Agent 框架。目标不是复制大型框架，而是先把 Agent 的核心机制跑通：
 

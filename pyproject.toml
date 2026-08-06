@@ -1,7 +1,7 @@
 [project]
-name = "hello-agent"
+name = "m-agent"
 version = "0.1.0"
-description = "A small learning-oriented Agent framework."
+description = "An embeddable Agent Application Runtime for Python."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
