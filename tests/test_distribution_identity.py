@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -11,6 +14,13 @@ from pathlib import Path
 
 
 _ROOT = Path(__file__).resolve().parents[1]
+_RUNTIME_DEPENDENCIES = (
+    "annotated_types",
+    "pydantic",
+    "pydantic_core",
+    "typing_extensions",
+    "typing_inspection",
+)
 
 
 def _clean_environment() -> dict[str, str]:
@@ -40,10 +50,29 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str]) -> str:
     return completed.stdout
 
 
+def _copy_locked_runtime_dependencies(target: Path) -> None:
+    """Provision interpreter-matched dependencies without a second resolve."""
+    for name in _RUNTIME_DEPENDENCIES:
+        module = importlib.import_module(name)
+        package_paths = getattr(module, "__path__", None)
+        if package_paths:
+            source = Path(next(iter(package_paths))).resolve()
+        else:
+            source = Path(module.__file__ or "").resolve()
+        destination = target / source.name
+        if source.is_dir():
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, destination)
+
+
 _CLEAN_RUNNER_PROBE = """
 import asyncio
 from importlib.metadata import metadata
+from pathlib import Path
+import sys
 
+import m_agent
 from m_agent import (
     AgentDefinition,
     DefinitionRegistry,
@@ -56,6 +85,7 @@ from m_agent import (
 
 
 async def main():
+    assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
     registry = DefinitionRegistry()
     registry.register(
         AgentDefinition(
@@ -109,17 +139,38 @@ class DistributionIdentityTests(unittest.TestCase):
 
             environment_dir = temporary_root / "environment"
             _run(
-                ["uv", "venv", "--offline", "--no-project", str(environment_dir)],
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
                 cwd=temporary_root,
                 env=clean_environment,
             )
             python = environment_dir / "bin" / "python"
+            target_site = Path(
+                _run(
+                    [
+                        str(python),
+                        "-c",
+                        "import site; print(site.getsitepackages()[0])",
+                    ],
+                    cwd=temporary_root,
+                    env=clean_environment,
+                ).strip()
+            )
+            _copy_locked_runtime_dependencies(target_site)
             _run(
                 [
                     "uv",
                     "pip",
                     "install",
                     "--offline",
+                    "--no-deps",
                     "--python",
                     str(python),
                     str(wheels[0]),

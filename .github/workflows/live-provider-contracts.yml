@@ -1,0 +1,30 @@
+name: Live provider contracts
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_live_requests:
+        description: Type RUN_LIVE_PROVIDER_CONTRACTS to allow provider requests
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  live-provider-contracts:
+    if: inputs.confirm_live_requests == 'RUN_LIVE_PROVIDER_CONTRACTS'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      M_AGENT_RUN_LIVE_TESTS: "1"
+      M_AGENT_OPENAI_API_KEY: ${{ secrets.M_AGENT_OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: uv sync --frozen --extra dev
+      - name: Run explicitly opted-in live contracts
+        run: uv run --frozen --extra dev pytest -m live -q tests/test_live_model_adapters.py

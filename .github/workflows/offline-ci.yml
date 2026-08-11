@@ -1,0 +1,56 @@
+name: Offline CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: Python ${{ matrix.python-version }} offline
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    env:
+      M_AGENT_RUN_LIVE_TESTS: "0"
+      M_AGENT_OPENAI_API_KEY: ambient-credential-must-not-be-used
+      OPENAI_API_KEY: ambient-credential-must-not-be-used
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Durable Run deterministic gate
+        run: >-
+          uv run --frozen --extra dev pytest -m "not live" -q
+          tests/test_m_agent_resume.py
+          tests/test_m_agent_lease.py
+          tests/test_m_agent_retry.py
+          tests/test_m_agent_stream_cancel.py
+          tests/test_m_agent_telemetry.py
+          tests/test_m_agent_resolution.py
+          tests/test_m_agent_tool_recovery.py
+          tests/test_durable_support_agent_example.py
+      - name: Complete offline pytest suite
+        run: uv run --frozen --extra dev pytest -m "not live" -q
+      - name: Unittest discovery with ambient credentials
+        run: uv run --frozen --extra dev python -m unittest discover -s tests -v
+      - name: Direct live module remains opted out
+        run: uv run --frozen --extra dev python tests/test_live_model_adapters.py
+      - name: Durable Support Agent acceptance
+        run: uv run --frozen python examples/durable_support_agent/run_acceptance.py
+      - name: Compile Python sources
+        run: uv run --frozen python -m compileall -q src examples benchmarks tests
+      - name: Validate lock without network
+        run: uv lock --check --offline
