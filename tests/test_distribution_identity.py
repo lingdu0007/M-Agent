@@ -131,16 +131,19 @@ import tempfile
 import m_agent
 from m_agent.adapters import DeterministicModelAdapter, InMemoryRunStore, PlaintextPayloadCodec
 from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
-from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+from m_agent.testing import AcceptanceCheck, AcceptanceManifest, installed_identity
 
 assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+identity = installed_identity()
+assert identity["environment"]["installation"] == "wheel"
+assert identity["source_commit"] not in {"development", "unavailable"}
 manifest = AcceptanceManifest(
     pack_version="0.3.0",
     profile="0.3",
-    source_commit="wheel-probe",
-    artifact_digest="wheel-probe",
+    source_commit=identity["source_commit"],
+    artifact_digest=identity["artifact_digest"],
     fixture_digest="fixture",
-    environment={"python": f"{sys.version_info.major}.{sys.version_info.minor}"},
+    environment=identity["environment"],
     scenarios=("core-lifecycle",),
     required_checks=(
         AcceptanceCheck(
@@ -173,12 +176,39 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     )
     assert completed.returncode == 0, completed.stderr
     completed = subprocess.run(
+        [sys.executable, "-I", "-m", "m_agent.testing", "inspect", "--manifest", str(manifest_path), "--bundle", str(bundle_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    completed = subprocess.run(
         [sys.executable, "-I", "-m", "m_agent.testing", "verify", "--manifest", str(manifest_path), "--bundle", str(bundle_path)],
         text=True,
         capture_output=True,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+    completed = subprocess.run(
+        [sys.executable, "-I", "-m", "m_agent.testing", "render", "--manifest", str(manifest_path), "--bundle", str(bundle_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    for update in (
+        {"source_commit": "counterfeit-source"},
+        {"artifact_digest": "sha256:" + "0" * 64},
+        {"environment": {**identity["environment"], "os": "counterfeit"}},
+    ):
+        manifest_path.write_text(manifest.model_copy(update=update).model_dump_json())
+        completed = subprocess.run(
+            [sys.executable, "-I", "-m", "m_agent.testing", "run", "--manifest", str(manifest_path), "--output", str(bundle_path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 2, completed.stderr
 assert metadata("m-agent")["Name"] == "m-agent"
 print("m-agent Foundation wheel contract passed")
 """

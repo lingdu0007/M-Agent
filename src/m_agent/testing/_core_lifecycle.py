@@ -62,7 +62,6 @@ async def run_core_lifecycle() -> tuple[
                 else AcceptanceCheckStatus.FAIL
             ),
             evidence_level=EvidenceLevel.CONTRACT,
-            detail="public Definition/Runner lifecycle",
         ),
         AcceptanceCheckResult(
             check_id="core.lifecycle.unknown-definition",
@@ -72,17 +71,19 @@ async def run_core_lifecycle() -> tuple[
                 else AcceptanceCheckStatus.FAIL
             ),
             evidence_level=EvidenceLevel.CONTRACT,
-            detail="unknown Definition has no implicit fallback",
         ),
     )
     return (
         results,
         {
-            "run_status": terminal.status.value,
+            "run_succeeded": terminal.status is RunStatus.SUCCEEDED,
             "step_count": len(inspection.steps),
             "attempt_count": len(inspection.attempts),
             "checkpoint_count": len(inspection.checkpoints),
             "unknown_definition_rejected": unknown_definition_rejected,
         },
-        {"model": "deterministic", "network": "disabled"},
+        {
+            "model_digest": "sha256:" + "d" * 64,
+            "network_disabled": True,
+        },
     )

@@ -18,6 +18,7 @@ from ._pack import (
     ScenarioEvidenceBundle,
 )
 from ._dependencies import find_runtime_dependency_violations
+from ._identity import installed_identity
 
 __all__ = [
     "AcceptanceCheck",
@@ -33,6 +34,7 @@ __all__ = [
     "EXIT_SUBJECT_FAILURE",
     "EXIT_SUCCESS",
     "find_runtime_dependency_violations",
+    "installed_identity",
     "PackExecution",
     "PackExecutionStatus",
     "ScenarioEvidenceBundle",

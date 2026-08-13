@@ -13,6 +13,17 @@ from pathlib import Path
 
 
 class LayeredRuntimePublicApiTests(unittest.TestCase):
+    @staticmethod
+    def _installed_manifest_identity() -> tuple[str, str, dict[str, str]]:
+        from m_agent.testing import installed_identity
+
+        identity = installed_identity()
+        return (
+            str(identity["source_commit"]),
+            str(identity["artifact_digest"]),
+            dict(identity["environment"]),
+        )
+
     def test_root_facade_and_runtime_namespace_complete_one_lifecycle(self) -> None:
         """An integrator can use only public imports for a deterministic Run."""
         from m_agent import (
@@ -139,7 +150,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                     execution.assert_matches(changed)
 
     def test_manifest_digest_is_canonical_and_not_python_repr(self) -> None:
-        from m_agent.testing import AcceptanceManifest
+        from m_agent.testing import AcceptanceCheck, AcceptanceManifest
 
         first = AcceptanceManifest(
             pack_version="0.3.0",
@@ -149,6 +160,13 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             fixture_digest="fixture",
             environment={"os": "linux", "python": "3.11"},
             scenarios=("core-lifecycle",),
+            required_checks=(
+                AcceptanceCheck(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
         )
         second = first.model_copy(
             update={"environment": {"python": "3.11", "os": "linux"}}
@@ -194,15 +212,14 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                     check_id="core.lifecycle",
                     status="PASS",
                     evidence_level=EvidenceLevel.CONTRACT,
-                    detail="one terminal Run was inspected",
                 ),
             ),
-            evidence_view={"run_status": "SUCCEEDED", "step_count": 1},
-            independent_evidence={"fixture": "deterministic-model"},
+            evidence_view={"run_succeeded": True, "step_count": 1},
+            independent_evidence={"fixture_digest": "sha256:" + "f" * 64},
         )
         bundle.verify(manifest, execution)
         tampered = bundle.model_copy(
-            update={"evidence_view": {"run_status": "FAILED", "step_count": 1}}
+            update={"evidence_view": {"run_succeeded": False, "step_count": 1}}
         )
         with self.assertRaises(BundleIntegrityError):
             tampered.verify(manifest, execution)
@@ -223,6 +240,64 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 evidence_view={"raw_prompt": "must not persist"},
                 independent_evidence={},
             )
+
+    def test_bundle_rejects_unstructured_evidence_and_check_text(self) -> None:
+        """Public Bundles retain only structural evidence and digest references."""
+        from pydantic import ValidationError
+
+        from m_agent.testing import (
+            AcceptanceCheck,
+            AcceptanceCheckResult,
+            AcceptanceManifest,
+            EvidenceLevel,
+            PackExecution,
+            ScenarioEvidenceBundle,
+        )
+
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit="source",
+            artifact_digest="artifact",
+            fixture_digest="fixture",
+            environment={"python": "3.11"},
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                AcceptanceCheck(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
+        )
+        execution = PackExecution.create(manifest, execution_id="exec-1")
+        clean_check = AcceptanceCheckResult(
+            check_id="core.lifecycle",
+            status="PASS",
+            evidence_level=EvidenceLevel.CONTRACT,
+        )
+        with self.assertRaises(ValidationError):
+            AcceptanceCheckResult(
+                check_id="core.lifecycle",
+                status="PASS",
+                evidence_level=EvidenceLevel.CONTRACT,
+                detail="Authorization: Bearer secret",
+        )
+        for evidence_view, independent_evidence in (
+            ({"input": "raw prompt"}, {}),
+            ({}, {"header": "Bearer secret"}),
+            ({"Authorization: Bearer secret": True}, {}),
+        ):
+            with self.subTest(evidence_view=evidence_view):
+                with self.assertRaises(ValueError):
+                    ScenarioEvidenceBundle.create(
+                        manifest=manifest,
+                        execution=execution,
+                        scenario="core-lifecycle",
+                        checks=(clean_check,),
+                        evidence_view=evidence_view,
+                        independent_evidence=independent_evidence,
+                    )
         with self.assertRaises(ValueError):
             ScenarioEvidenceBundle.create(
                 manifest=manifest,
@@ -280,6 +355,22 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 ),
             )
 
+    def test_manifest_requires_at_least_one_frozen_required_check(self) -> None:
+        """A Pack without declared required coverage cannot become PASSED."""
+        from pydantic import ValidationError
+
+        from m_agent.testing import AcceptanceManifest
+
+        with self.assertRaises(ValidationError):
+            AcceptanceManifest(
+                pack_version="0.3.0",
+                profile="0.3",
+                source_commit="source",
+                artifact_digest="artifact",
+                fixture_digest="fixture",
+                environment={"python": "3.11"},
+                scenarios=("core-lifecycle",),
+            )
     def test_all_layers_are_public_and_runtime_reverse_dependency_fails(self) -> None:
         from m_agent import adapters, companion, runtime, testing
         from m_agent.testing import find_runtime_dependency_violations
@@ -304,16 +395,29 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("m_agent.provider", violations[0])
 
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source_root = Path(temporary_directory)
+            runtime_directory = source_root / "m_agent" / "runtime"
+            runtime_directory.mkdir(parents=True)
+            (runtime_directory / "__init__.py").write_text(
+                "from ..adapters import DeterministicModelAdapter\n"
+            )
+            violations = find_runtime_dependency_violations(source_root)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("m_agent.adapters", violations[0])
+
     def test_cli_assigns_a_distinct_exit_code_to_tampered_bundle(self) -> None:
         from m_agent.testing import AcceptanceCheck, AcceptanceManifest
 
+        source_commit, artifact_digest, environment = self._installed_manifest_identity()
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
+            source_commit=source_commit,
+            artifact_digest=artifact_digest,
             fixture_digest="fixture",
-            environment={"python": "3.11"},
+            environment=environment,
             scenarios=("core-lifecycle",),
             required_checks=(
                 AcceptanceCheck(
@@ -370,6 +474,135 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             )
         self.assertEqual(verified.returncode, 5)
         self.assertIn("Bundle integrity error", verified.stderr)
+
+    def test_cli_rejects_manifest_that_does_not_match_installed_identity(self) -> None:
+        """A Manifest cannot self-certify a different artifact or host."""
+        from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit="counterfeit-source",
+            artifact_digest="sha256:" + "0" * 64,
+            fixture_digest="fixture",
+            environment={
+                "distribution": "m-agent",
+                "version": "0.0.0",
+                "python": "0.0.0",
+                "os": "counterfeit",
+                "architecture": "counterfeit",
+                "installation": "wheel",
+            },
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                AcceptanceCheck(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+                AcceptanceCheck(
+                    check_id="core.lifecycle.unknown-definition",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.DefinitionRegistry",
+                ),
+                AcceptanceCheck(
+                    check_id="core.lifecycle.bundle-tamper",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.testing.ScenarioEvidenceBundle",
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(manifest.model_dump_json())
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "m_agent.testing",
+                    "run",
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(root / "bundle.json"),
+                ],
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("installed identity", completed.stderr)
+
+    def test_cli_render_rejects_a_tampered_bundle_before_display(self) -> None:
+        from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+
+        source_commit, artifact_digest, environment = self._installed_manifest_identity()
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit=source_commit,
+            artifact_digest=artifact_digest,
+            fixture_digest="fixture",
+            environment=environment,
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                AcceptanceCheck(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+                AcceptanceCheck(
+                    check_id="core.lifecycle.unknown-definition",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.DefinitionRegistry",
+                ),
+                AcceptanceCheck(
+                    check_id="core.lifecycle.bundle-tamper",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.testing.ScenarioEvidenceBundle",
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = root / "manifest.json"
+            bundle_path = root / "bundle.json"
+            manifest_path.write_text(manifest.model_dump_json())
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "m_agent.testing",
+                    "run",
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(bundle_path),
+                ],
+                check=True,
+            )
+            bundle = json.loads(bundle_path.read_text())
+            bundle["checks"][0]["status"] = "FAIL"
+            bundle_path.write_text(json.dumps(bundle))
+            for command in ("inspect", "render"):
+                with self.subTest(command=command):
+                    displayed = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "m_agent.testing",
+                            command,
+                            "--manifest",
+                            str(manifest_path),
+                            "--bundle",
+                            str(bundle_path),
+                        ],
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(displayed.returncode, 5)
+                    self.assertIn("Bundle integrity error", displayed.stderr)
 
     def test_cli_rejects_an_incomplete_foundation_manifest(self) -> None:
         from m_agent.testing import AcceptanceCheck, AcceptanceManifest
@@ -460,8 +693,16 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 self.assertIs(completed.status, expected_status)
                 self.assertEqual(completed.exit_code, expected_exit)
 
-    def test_offline_cli_runs_inspects_verifies_and_renders_core_lifecycle(self) -> None:
-        from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+    def test_pack_marks_mismatched_required_evidence_level_as_harness_error(self) -> None:
+        """A CONTRACT result cannot satisfy a required HOST declaration."""
+        from m_agent.testing import (
+            AcceptanceCheck,
+            AcceptanceCheckResult,
+            AcceptanceManifest,
+            EvidenceLevel,
+            PackExecution,
+            PackExecutionStatus,
+        )
 
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
@@ -470,6 +711,42 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             artifact_digest="artifact",
             fixture_digest="fixture",
             environment={"python": "3.11"},
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                AcceptanceCheck(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                    evidence_level=EvidenceLevel.HOST,
+                ),
+            ),
+        )
+
+        completed = PackExecution.create(manifest, execution_id="exec-1").complete(
+            manifest,
+            (
+                AcceptanceCheckResult(
+                    check_id="core.lifecycle",
+                    status="PASS",
+                    evidence_level=EvidenceLevel.CONTRACT,
+                ),
+            ),
+        )
+
+        self.assertIs(completed.status, PackExecutionStatus.ERROR)
+        self.assertEqual(completed.exit_code, 3)
+
+    def test_offline_cli_runs_inspects_verifies_and_renders_core_lifecycle(self) -> None:
+        from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+
+        source_commit, artifact_digest, environment = self._installed_manifest_identity()
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit=source_commit,
+            artifact_digest=artifact_digest,
+            fixture_digest="fixture",
+            environment=environment,
             scenarios=("core-lifecycle",),
             required_checks=(
                 AcceptanceCheck(
@@ -503,7 +780,14 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertTrue(bundle_path.is_file())
             inspect = subprocess.run(
-                [*command, "inspect", "--bundle", str(bundle_path)],
+                [
+                    *command,
+                    "inspect",
+                    "--manifest",
+                    str(manifest_path),
+                    "--bundle",
+                    str(bundle_path),
+                ],
                 text=True,
                 capture_output=True,
             )
@@ -523,12 +807,69 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             )
             self.assertEqual(verify.returncode, 0, verify.stderr)
             render = subprocess.run(
-                [*command, "render", "--bundle", str(bundle_path)],
+                [
+                    *command,
+                    "render",
+                    "--manifest",
+                    str(manifest_path),
+                    "--bundle",
+                    str(bundle_path),
+                ],
                 text=True,
                 capture_output=True,
             )
             self.assertEqual(render.returncode, 0, render.stderr)
             self.assertIn("# core-lifecycle", render.stdout)
+
+    def test_cli_assigns_unique_execution_ids_for_manifest_revisions(self) -> None:
+        from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+
+        source_commit, artifact_digest, environment = self._installed_manifest_identity()
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit=source_commit,
+            artifact_digest=artifact_digest,
+            fixture_digest="fixture",
+            environment=environment,
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                AcceptanceCheck(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+                AcceptanceCheck(
+                    check_id="core.lifecycle.unknown-definition",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.DefinitionRegistry",
+                ),
+                AcceptanceCheck(
+                    check_id="core.lifecycle.bundle-tamper",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.testing.ScenarioEvidenceBundle",
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = root / "manifest.json"
+            first_path = root / "first.json"
+            second_path = root / "second.json"
+            manifest_path.write_text(manifest.model_dump_json())
+            command = [sys.executable, "-m", "m_agent.testing", "run", "--manifest", str(manifest_path)]
+            for output in (first_path, second_path):
+                completed = subprocess.run(
+                    [*command, "--output", str(output)],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+            first = json.loads(first_path.read_text())
+            second = json.loads(second_path.read_text())
+
+        self.assertEqual(first["manifest_digest"], second["manifest_digest"])
+        self.assertNotEqual(first["execution_id"], second["execution_id"])
 
 
 if __name__ == "__main__":

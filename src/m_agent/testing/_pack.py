@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from enum import StrEnum
 from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+_SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_EVIDENCE_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
 
 class EvidenceLevel(StrEnum):
@@ -65,6 +71,16 @@ class AcceptanceCheckResult(BaseModel, frozen=True):
     detail: str = ""
     evidence_digest: str | None = None
 
+    @model_validator(mode="after")
+    def _validate_minimal_reference(self) -> "AcceptanceCheckResult":
+        if self.detail:
+            raise ValueError("Acceptance Check Results cannot contain free-text detail")
+        if self.evidence_digest is not None and not _SHA256_DIGEST.fullmatch(
+            self.evidence_digest
+        ):
+            raise ValueError("Acceptance Check Result evidence_digest must be sha256")
+        return self
+
 
 class AcceptanceManifest(BaseModel, frozen=True):
     """Frozen identity and required check declaration for one Pack profile."""
@@ -85,6 +101,8 @@ class AcceptanceManifest(BaseModel, frozen=True):
     def _validate_frozen_declarations(self) -> "AcceptanceManifest":
         if not self.scenarios or len(set(self.scenarios)) != len(self.scenarios):
             raise ValueError("Manifest scenarios must be nonempty and unique")
+        if not self.required_checks:
+            raise ValueError("Manifest required checks must be nonempty")
         check_ids = [check.check_id for check in self.required_checks]
         if len(set(check_ids)) != len(check_ids):
             raise ValueError("Manifest required check_id values must be unique")
@@ -154,12 +172,30 @@ class PackExecution(BaseModel, frozen=True):
         by_id = {result.check_id: result for result in results}
         if len(by_id) != len(results):
             raise ValueError("Acceptance Check Results must have unique check_id values")
+        if not manifest.required_checks:
+            return self.model_copy(
+                update={
+                    "status": PackExecutionStatus.INCOMPLETE,
+                    "exit_code": EXIT_INCOMPLETE,
+                }
+            )
         required = [by_id.get(check.check_id) for check in manifest.required_checks]
         if any(result is None for result in required):
             return self.model_copy(
                 update={
                     "status": PackExecutionStatus.INCOMPLETE,
                     "exit_code": EXIT_INCOMPLETE,
+                }
+            )
+        if any(
+            result.evidence_level is not check.evidence_level
+            for check, result in zip(manifest.required_checks, required, strict=True)
+            if result is not None
+        ):
+            return self.model_copy(
+                update={
+                    "status": PackExecutionStatus.ERROR,
+                    "exit_code": EXIT_HARNESS_ERROR,
                 }
             )
         statuses = {result.status for result in required if result is not None}
@@ -192,30 +228,28 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
     content_digest: str
 
     @staticmethod
-    def _ensure_redacted(value: Mapping[str, object]) -> None:
-        forbidden = {
-            "rawprompt",
-            "conversationhistory",
-            "credential",
-            "credentials",
-            "apikey",
-            "endpointsecret",
-            "liveresponse",
-            "authorization",
-            "token",
-            "password",
-        }
-        present = {
-            str(key)
-            for key in value
-            if "".join(character for character in str(key).lower() if character.isalnum())
-            in forbidden
-        }
-        if present:
+    def _ensure_minimal_evidence(value: Mapping[str, object]) -> None:
+        for key, item in value.items():
+            if not _EVIDENCE_KEY.fullmatch(key):
+                raise ValueError("Scenario Evidence Bundle keys must be stable identifiers")
+            if item is None or isinstance(item, bool | int):
+                continue
+            if isinstance(item, float) and math.isfinite(item):
+                continue
+            if isinstance(item, str) and _SHA256_DIGEST.fullmatch(item):
+                continue
             raise ValueError(
-                "Scenario Evidence Bundle cannot contain sensitive fields: "
-                + ", ".join(sorted(present))
+                "Scenario Evidence Bundle values must be structural or sha256 references"
             )
+
+    @staticmethod
+    def _assert_minimal_check_results(checks: tuple[AcceptanceCheckResult, ...]) -> None:
+        for result in checks:
+            if result.detail or (
+                result.evidence_digest is not None
+                and not _SHA256_DIGEST.fullmatch(result.evidence_digest)
+            ):
+                raise ValueError("Scenario Evidence Bundle check result is not minimal")
 
     @staticmethod
     def _assert_declared_checks(
@@ -282,8 +316,9 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         if scenario not in manifest.scenarios:
             raise ValueError(f"scenario {scenario!r} is not declared by Manifest")
         cls._assert_declared_checks(manifest, scenario, checks)
-        cls._ensure_redacted(evidence_view)
-        cls._ensure_redacted(independent_evidence)
+        cls._assert_minimal_check_results(checks)
+        cls._ensure_minimal_evidence(evidence_view)
+        cls._ensure_minimal_evidence(independent_evidence)
         digest = cls._digest_payload(
             schema_version="1",
             manifest_digest=manifest.digest,
@@ -315,8 +350,9 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
             if self.execution_id != execution.execution_id:
                 raise BundleIntegrityError("Bundle execution identity does not match")
             self._assert_declared_checks(manifest, self.scenario, self.checks)
-            self._ensure_redacted(self.evidence_view)
-            self._ensure_redacted(self.independent_evidence)
+            self._assert_minimal_check_results(self.checks)
+            self._ensure_minimal_evidence(self.evidence_view)
+            self._ensure_minimal_evidence(self.independent_evidence)
         except (BundleIntegrityError, ValueError) as error:
             if isinstance(error, BundleIntegrityError):
                 raise

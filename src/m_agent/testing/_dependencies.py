@@ -30,7 +30,7 @@ def find_runtime_dependency_violations(
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         parts = relative.with_suffix("").parts
-        package_parts = parts if parts[-1] == "__init__" else parts[:-1]
+        package_parts = parts[:-1]
         package = ".".join(("m_agent", *package_parts))
         for node in ast.walk(tree):
             modules: list[str] = []

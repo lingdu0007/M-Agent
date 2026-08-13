@@ -6,10 +6,12 @@ import argparse
 import asyncio
 import json
 import sys
+from uuid import uuid4
 from pathlib import Path
 from typing import NoReturn
 
 from ._core_lifecycle import run_core_lifecycle
+from ._identity import validate_installed_identity
 from ._pack import (
     AcceptanceCheckResult,
     AcceptanceCheckStatus,
@@ -40,14 +42,27 @@ def _read_bundle(path: Path) -> ScenarioEvidenceBundle:
     return ScenarioEvidenceBundle.model_validate_json(path.read_text())
 
 
+def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
+    manifest = _read_manifest(arguments.manifest)
+    validate_installed_identity(manifest)
+    bundle = _read_bundle(arguments.bundle)
+    execution = PackExecution(
+        execution_id=bundle.execution_id,
+        manifest_digest=bundle.manifest_digest,
+    )
+    bundle.verify(manifest, execution)
+    return bundle
+
+
 def _run(arguments: argparse.Namespace) -> int:
     manifest = _read_manifest(arguments.manifest)
+    validate_installed_identity(manifest)
     if manifest.scenarios != ("core-lifecycle",) or {
         check.check_id for check in manifest.required_checks
     } != _CORE_LIFECYCLE_CHECKS:
         raise ValueError("Ticket 07 CLI supports only the core-lifecycle Scenario")
     execution = PackExecution.create(
-        manifest, execution_id=f"core-lifecycle-{manifest.digest[7:19]}"
+        manifest, execution_id=f"core-lifecycle-{uuid4().hex}"
     ).start(manifest)
     checks, evidence_view, independent_evidence = asyncio.run(run_core_lifecycle())
     mutation_result = AcceptanceCheckResult(
@@ -58,7 +73,6 @@ def _run(arguments: argparse.Namespace) -> int:
             for check in manifest.required_checks
             if check.check_id == "core.lifecycle.bundle-tamper"
         ),
-        detail="controlled Bundle mutation is detected",
     )
     all_checks = (*checks, mutation_result)
     candidate = ScenarioEvidenceBundle.create(
@@ -70,7 +84,7 @@ def _run(arguments: argparse.Namespace) -> int:
         independent_evidence=independent_evidence,
     )
     tampered = candidate.model_copy(
-        update={"evidence_view": {**candidate.evidence_view, "run_status": "TAMPERED"}}
+        update={"evidence_view": {**candidate.evidence_view, "run_succeeded": False}}
     )
     try:
         tampered.verify(manifest, execution)
@@ -84,24 +98,18 @@ def _run(arguments: argparse.Namespace) -> int:
 
 
 def _inspect(arguments: argparse.Namespace) -> int:
-    print(_read_bundle(arguments.bundle).model_dump_json(indent=2))
+    print(_verified_bundle(arguments).model_dump_json(indent=2))
     return 0
 
 
 def _verify(arguments: argparse.Namespace) -> int:
-    manifest = _read_manifest(arguments.manifest)
-    bundle = _read_bundle(arguments.bundle)
-    execution = PackExecution(
-        execution_id=bundle.execution_id,
-        manifest_digest=bundle.manifest_digest,
-    )
-    bundle.verify(manifest, execution)
+    _verified_bundle(arguments)
     print("Bundle integrity: PASS")
     return 0
 
 
 def _render(arguments: argparse.Namespace) -> int:
-    bundle = _read_bundle(arguments.bundle)
+    bundle = _verified_bundle(arguments)
     print(f"# {bundle.scenario}")
     print()
     print(f"Bundle: {bundle.content_digest}")
@@ -118,6 +126,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--output", type=Path, required=True)
     run.set_defaults(handler=_run)
     inspect = subparsers.add_parser("inspect", help="print a Bundle's public JSON")
+    inspect.add_argument("--manifest", type=Path, required=True)
     inspect.add_argument("--bundle", type=Path, required=True)
     inspect.set_defaults(handler=_inspect)
     verify = subparsers.add_parser("verify", help="verify Bundle integrity")
@@ -125,6 +134,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--bundle", type=Path, required=True)
     verify.set_defaults(handler=_verify)
     render = subparsers.add_parser("render", help="render a Bundle summary")
+    render.add_argument("--manifest", type=Path, required=True)
     render.add_argument("--bundle", type=Path, required=True)
     render.set_defaults(handler=_render)
     return parser
