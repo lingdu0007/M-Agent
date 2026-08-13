@@ -1,0 +1,70 @@
+{
+  "database": {
+    "foreign_key_violations": 0,
+    "integrity_check": "ok",
+    "journal_mode": "delete",
+    "orphan_counts": {
+      "attempts_without_step": 0,
+      "checkpoints_without_step": 0,
+      "steps_without_run": 0
+    },
+    "path": "benchmarks/results/ticket12-local.sqlite",
+    "row_counts": {
+      "runs": 100,
+      "step_attempts": 300,
+      "step_checkpoints": 300,
+      "steps": 300
+    },
+    "synchronous": 2
+  },
+  "environment": {
+    "cpu": {
+      "logical_count": 14,
+      "machine": "arm64",
+      "processor": "arm"
+    },
+    "os": {
+      "release": "25.2.0",
+      "system": "Darwin",
+      "version": "Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:56 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6041"
+    },
+    "python": {
+      "implementation": "CPython",
+      "version": "3.11.15"
+    }
+  },
+  "measurement": {
+    "concurrency": 100,
+    "definition": "wall clock from barrier release through concurrent public Runner.create_run + Runner.start_run completion; validation and inspection excluded",
+    "elapsed_seconds": 0.4087339580291882,
+    "run_count": 100
+  },
+  "metrics": {
+    "persistence_overhead_ms_per_step": {
+      "definition": "sum of record_step, record_attempt, and record_checkpoint wall time for each completed Step",
+      "mean": 0.8824771487464508,
+      "p50": 0.7551245507784188,
+      "p95": 1.3015677744988352
+    },
+    "run_latency_ms": {
+      "p50": 4.007645999081433,
+      "p95": 4.645851836539805
+    },
+    "throughput_runs_per_second": 244.6579199882846
+  },
+  "qualification": "Comparative local evidence only; not production QPS, latency, scalability, or availability proof.",
+  "schema_version": 1,
+  "validation": {
+    "attempts": 300,
+    "checkpoints": 300,
+    "problems": [],
+    "side_effect_count": 100,
+    "status": "PASS",
+    "steps": 300,
+    "terminal_runs": 100
+  },
+  "warmup": {
+    "definition": "SQLite schema initialization before measurement",
+    "run_count": 0
+  }
+}

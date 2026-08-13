@@ -1,5 +1,16 @@
 from dataclasses import dataclass, field
+import warnings
 from typing import Any, Dict, List, Optional
+
+
+warnings.warn(
+    "agent_framework.types is deprecated in M-Agent 0.2.x and will be "
+    "removed in 0.3.0. Migrate AgentResult to m_agent.RunRecord and "
+    "RunInspection; adapt Message, ModelResponse, and ToolCall to their "
+    "m_agent counterparts; see docs/migrating-from-0.1.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 @dataclass

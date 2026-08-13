@@ -1,6 +1,17 @@
 import inspect
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional
+
+
+warnings.warn(
+    "agent_framework.tools (Tool, ToolRegistry, and tool) is deprecated in "
+    "M-Agent 0.2.x and will be removed in 0.3.0. Migrate to m_agent.Tool "
+    "with explicit ToolEffect and AgentDefinition.tools; see "
+    "docs/migrating-from-0.1.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 def _json_type(annotation: Any) -> str:
