@@ -1,0 +1,12 @@
+include LICENSE NOTICE README.md CONTRIBUTING.md SECURITY.md
+recursive-include docs *.md
+prune examples
+include examples/m_agent_telemetry.py
+recursive-include examples/durable_support_agent *.py *.md
+recursive-include benchmarks *.py *.md
+prune tests
+prune .scratch
+prune .github
+prune .reasonix
+prune benchmarks/results
+exclude .env.example

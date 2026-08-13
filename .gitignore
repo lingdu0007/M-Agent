@@ -3,9 +3,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.reasonix/
 .env
 data/
 dist/
 build/
 *.egg-info/
 DESIGN.md
+# 本地 telemetry 示例产物（examples/m_agent_telemetry.py 运行时生成）
+examples/telemetry-example.jsonl

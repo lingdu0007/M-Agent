@@ -111,6 +111,16 @@ async def main():
 asyncio.run(main())
 """
 
+_FLAGSHIP_INSTALLED_PROBE = """
+from pathlib import Path
+import sys
+
+import m_agent
+
+assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+print("m-agent installed artifact import passed")
+"""
+
 
 class DistributionIdentityTests(unittest.TestCase):
     def test_built_m_agent_distribution_runs_public_runner_in_clean_environment(
@@ -184,3 +194,79 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent distribution Runner contract passed", output)
+
+    def test_built_sdist_runs_flagship_against_installed_m_agent(self) -> None:
+        """The packaged flagship uses the installed runtime, never checkout src."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            dist_dir = temporary_root / "dist"
+            clean_environment = _clean_environment()
+
+            _run(
+                ["uv", "build", "--offline", "--sdist", "--out-dir", str(dist_dir)],
+                cwd=_ROOT,
+                env=clean_environment,
+            )
+            sdists = list(dist_dir.glob("*.tar.gz"))
+            self.assertEqual(len(sdists), 1)
+
+            extracted = temporary_root / "source"
+            extracted.mkdir()
+            _run(
+                ["tar", "-xzf", str(sdists[0]), "-C", str(extracted)],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            project = next(extracted.iterdir())
+            environment_dir = temporary_root / "environment"
+            _run(
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            python = environment_dir / "bin" / "python"
+            target_site = Path(
+                _run(
+                    [str(python), "-c", "import site; print(site.getsitepackages()[0])"],
+                    cwd=temporary_root,
+                    env=clean_environment,
+                ).strip()
+            )
+            _copy_locked_runtime_dependencies(target_site)
+            _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--no-deps",
+                    "--python",
+                    str(python),
+                    str(project),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            import_output = _run(
+                [str(python), "-c", _FLAGSHIP_INSTALLED_PROBE],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            self.assertIn("m-agent installed artifact import passed", import_output)
+            output = _run(
+                [
+                    str(python),
+                    "examples/durable_support_agent/run_acceptance.py",
+                ],
+                cwd=project,
+                env=clean_environment,
+            )
+            self.assertIn("11/11 checks passed", output)

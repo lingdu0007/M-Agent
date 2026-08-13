@@ -4,9 +4,22 @@ import re
 import socket
 import urllib.error
 import urllib.request
+import warnings
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 from .types import Message, ModelResponse, ToolCall
+
+
+warnings.warn(
+    "agent_framework.models is deprecated in M-Agent 0.2.x and will be "
+    "removed in 0.3.0. Migrate EchoModel and RuleBasedDemoModel to "
+    "m_agent.DeterministicModelAdapter, ModelClient to m_agent.ModelAdapter, "
+    "OpenAICompatibleClient to m_agent.provider.ChatCompletionsModelAdapter, "
+    "and OpenAIResponsesClient to m_agent.provider.ResponsesModelAdapter; "
+    "see docs/migrating-from-0.1.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 class ModelClient(Protocol):
