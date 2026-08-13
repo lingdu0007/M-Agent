@@ -26,7 +26,15 @@ class ReleaseMaterialTests(unittest.TestCase):
             self.assertIn(f"Programming Language :: Python :: {version}", project["classifiers"])
 
     def test_release_material_and_migration_table_exist(self) -> None:
-        for relative in ("LICENSE", "NOTICE", "CONTRIBUTING.md", "SECURITY.md", "MANIFEST.in", "docs/migrating-from-0.1.md"):
+        for relative in (
+            "LICENSE",
+            "NOTICE",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
+            "MANIFEST.in",
+            "docs/migrating-from-0.1.md",
+            "docs/migrating-to-0.3.md",
+        ):
             self.assertTrue((ROOT / relative).is_file(), relative)
         migration = (ROOT / "docs/migrating-from-0.1.md").read_text()
         self.assertIn("agent_framework.Agent", migration)
@@ -42,6 +50,21 @@ class ReleaseMaterialTests(unittest.TestCase):
             "tool",
         ):
             self.assertIn(symbol, migration)
+
+    def test_runtime_foundation_documents_expand_and_0_3_import_migration(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+        self.assertIn("testing", project["optional-dependencies"])
+        migration = (ROOT / "docs/migrating-to-0.3.md").read_text()
+        for marker in (
+            "expand",
+            "m_agent.runtime",
+            "m_agent.adapters",
+            "m_agent.companion",
+            "m_agent.testing",
+            "m_agent.provider",
+            "removed",
+        ):
+            self.assertIn(marker, migration)
 
     def test_public_docs_are_sanitized_and_scope_qualified(self) -> None:
         paths = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", ROOT / "SECURITY.md"]

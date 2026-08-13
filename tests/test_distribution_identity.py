@@ -121,6 +121,68 @@ assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve(
 print("m-agent installed artifact import passed")
 """
 
+_FOUNDATION_INSTALLED_PROBE = """
+import json
+from importlib.metadata import metadata
+from pathlib import Path
+import sys
+import tempfile
+
+import m_agent
+from m_agent.adapters import DeterministicModelAdapter, InMemoryRunStore, PlaintextPayloadCodec
+from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
+from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+
+assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+manifest = AcceptanceManifest(
+    pack_version="0.3.0",
+    profile="0.3",
+    source_commit="wheel-probe",
+    artifact_digest="wheel-probe",
+    fixture_digest="fixture",
+    environment={"python": f"{sys.version_info.major}.{sys.version_info.minor}"},
+    scenarios=("core-lifecycle",),
+    required_checks=(
+        AcceptanceCheck(
+            check_id="core.lifecycle",
+            scenario="core-lifecycle",
+            public_seam="m_agent.runtime.Runner",
+        ),
+        AcceptanceCheck(
+            check_id="core.lifecycle.unknown-definition",
+            scenario="core-lifecycle",
+            public_seam="m_agent.runtime.DefinitionRegistry",
+        ),
+        AcceptanceCheck(
+            check_id="core.lifecycle.bundle-tamper",
+            scenario="core-lifecycle",
+            public_seam="m_agent.testing.ScenarioEvidenceBundle",
+        ),
+    ),
+)
+with tempfile.TemporaryDirectory() as temporary_directory:
+    manifest_path = Path(temporary_directory) / "manifest.json"
+    bundle_path = Path(temporary_directory) / "bundle.json"
+    manifest_path.write_text(manifest.model_dump_json())
+    import subprocess
+    completed = subprocess.run(
+        [sys.executable, "-I", "-m", "m_agent.testing", "run", "--manifest", str(manifest_path), "--output", str(bundle_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    completed = subprocess.run(
+        [sys.executable, "-I", "-m", "m_agent.testing", "verify", "--manifest", str(manifest_path), "--bundle", str(bundle_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+assert metadata("m-agent")["Name"] == "m-agent"
+print("m-agent Foundation wheel contract passed")
+"""
+
 
 class DistributionIdentityTests(unittest.TestCase):
     def test_built_m_agent_distribution_runs_public_runner_in_clean_environment(
@@ -194,6 +256,62 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent distribution Runner contract passed", output)
+
+    def test_built_wheel_runs_foundation_pack_from_public_namespaces_only(self) -> None:
+        """The Ticket 07 Pack works outside source with isolated imports."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            dist_dir = temporary_root / "dist"
+            clean_environment = _clean_environment()
+            _run(
+                ["uv", "build", "--offline", "--wheel", "--out-dir", str(dist_dir)],
+                cwd=_ROOT,
+                env=clean_environment,
+            )
+            wheel = next(dist_dir.glob("*.whl"))
+            environment_dir = temporary_root / "environment"
+            _run(
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            python = environment_dir / "bin" / "python"
+            target_site = Path(
+                _run(
+                    [str(python), "-c", "import site; print(site.getsitepackages()[0])"],
+                    cwd=temporary_root,
+                    env=clean_environment,
+                ).strip()
+            )
+            _copy_locked_runtime_dependencies(target_site)
+            _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--no-deps",
+                    "--python",
+                    str(python),
+                    str(wheel),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            output = _run(
+                [str(python), "-I", "-c", _FOUNDATION_INSTALLED_PROBE],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            self.assertIn("m-agent Foundation wheel contract passed", output)
 
     def test_built_sdist_runs_flagship_against_installed_m_agent(self) -> None:
         """The packaged flagship uses the installed runtime, never checkout src."""

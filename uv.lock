@@ -121,7 +121,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
 ]
-provides-extras = ["dev", "provider", "storage", "telemetry", "security"]
+provides-extras = ["dev", "provider", "storage", "telemetry", "security", "testing"]
 
 [[package]]
 name = "packaging"

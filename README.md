@@ -13,6 +13,15 @@ and JSONL integrations without adding dependencies; `security` names the
 application-supplied `PayloadCodec` boundary. This release does not claim an
 official OpenTelemetry adapter or a bundled protected-payload implementation.
 
+## Runtime Foundation
+
+During the 0.2 expand window, existing `m_agent` imports remain supported.
+New integrations can instead use `m_agent.runtime` for Core contracts and
+ports, `m_agent.adapters` for concrete implementations,
+`m_agent.companion` for optional composition capabilities, and
+`m_agent.testing` for the offline Acceptance Pack. Core does not import the
+other three layers. See [the 0.3 migration table](docs/migrating-to-0.3.md).
+
 ## Durable Run
 
 `Runner` is async-first and executes one explicit Agent Run. The embedding
