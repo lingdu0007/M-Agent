@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 
 
 _SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_SOURCE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _EVIDENCE_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _MANIFEST_SCHEMA_VERSION = "1"
 _BUNDLE_SCHEMA_VERSION = "4"
@@ -148,6 +149,17 @@ class AcceptanceManifest(BaseModel, frozen=True):
             )
         ):
             raise ValueError("Manifest identity declarations must be nonempty")
+        if not _SOURCE_COMMIT.fullmatch(self.source_commit):
+            raise ValueError("Manifest source_commit must be a full Git commit")
+        if any(
+            not _SHA256_DIGEST.fullmatch(value)
+            for value in (
+                self.artifact_digest,
+                self.sdist_digest,
+                self.fixture_digest,
+            )
+        ):
+            raise ValueError("Manifest artifact identities must be sha256 digests")
         if not self.environment or any(
             not key.strip() or not value.strip()
             for key, value in self.environment.items()
@@ -299,6 +311,19 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         milestone="foundation",
         non_claim="external_collector_or_store_authority",
     ),
+    AcceptanceCheck(
+        check_id="core.lifecycle.telemetry-host",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Runtime Adapter",
+        public_seam="python -I,m_agent.adapters.JsonlTelemetrySink",
+        positive_check="isolated_jsonl_telemetry_contract_observed",
+        negative_check="missing_or_malformed_host_telemetry_is_error",
+        authoritative_evidence="telemetry_host_authoritative_digest",
+        independent_evidence="telemetry_host_independent_digest",
+        milestone="foundation",
+        non_claim="external_collector_or_store_authority",
+        evidence_level=EvidenceLevel.HOST,
+    ),
 )
 
 
@@ -347,9 +372,11 @@ class PackExecution(BaseModel, frozen=True):
     def create(cls, manifest: AcceptanceManifest, *, execution_id: str) -> "PackExecution":
         if not execution_id:
             raise ValueError("execution_id must not be empty")
+        manifest = AcceptanceManifest.model_validate(manifest.model_dump(mode="json"))
         return cls(execution_id=execution_id, manifest_digest=manifest.digest)
 
     def assert_matches(self, manifest: AcceptanceManifest) -> None:
+        manifest = AcceptanceManifest.model_validate(manifest.model_dump(mode="json"))
         if self.manifest_digest != manifest.digest:
             raise ValueError(
                 "Pack Execution is bound to a different Acceptance Manifest"
@@ -396,7 +423,9 @@ class PackExecution(BaseModel, frozen=True):
                 }
             )
         statuses = {result.status for result in required if result is not None}
-        if statuses & {AcceptanceCheckStatus.ERROR, AcceptanceCheckStatus.FAIL}:
+        if AcceptanceCheckStatus.ERROR in statuses:
+            status, exit_code = PackExecutionStatus.ERROR, EXIT_HARNESS_ERROR
+        elif AcceptanceCheckStatus.FAIL in statuses:
             status, exit_code = PackExecutionStatus.FAILED, EXIT_SUBJECT_FAILURE
         elif any(result is None for result in required) or any(
             check.evidence_level not in {EvidenceLevel.CONTRACT, EvidenceLevel.HOST}

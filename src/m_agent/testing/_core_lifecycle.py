@@ -22,7 +22,9 @@ from ..runtime import (
     AgentDefinition,
     DefinitionNotFoundError,
     DefinitionRegistry,
+    FailureClassification,
     ModelCapabilities,
+    ModelFailure,
     ModelResponse,
     ModelUsage,
     Runner,
@@ -50,6 +52,20 @@ class _UsageReportingModel(DeterministicModelAdapter):
         return ModelResponse(
             content=response.content,
             usage=ModelUsage(input_tokens=11, output_tokens=7),
+        )
+
+
+class _FailingModel(DeterministicModelAdapter):
+    """Deterministic public failure seam for structured telemetry evidence."""
+
+    def __init__(self) -> None:
+        super().__init__(("unused",))
+
+    async def generate(self, request):
+        raise ModelFailure(
+            FailureClassification.PERMANENT,
+            "rate_limited",
+            _TELEMETRY_CANARIES[2],
         )
 
 
@@ -283,6 +299,56 @@ def _telemetry_sequence(events: list[dict], run_id: str) -> bool:
     )
 
 
+def _telemetry_inspection_reconciled(events: list[dict], inspection) -> bool:
+    """Bind exported step events to the public authoritative inspection."""
+    if (
+        len(inspection.steps) != 1
+        or len(inspection.attempts) != 1
+        or len(inspection.checkpoints) != 1
+    ):
+        return False
+    step = inspection.steps[0]
+    attempt = inspection.attempts[0]
+    checkpoint = inspection.checkpoints[0]
+    step_events = [
+        event
+        for event in events
+        if event.get("event_type") in {"STEP_STARTED", "STEP_COMPLETED"}
+    ]
+    return (
+        len(step_events) == 2
+        and attempt.step_id == step.step_id == checkpoint.step_id
+        and attempt.attempt_id == checkpoint.attempt_id
+        and all(
+            event.get("step_id") == step.step_id
+            and event.get("attempt_id") == attempt.attempt_id
+            and event.get("step_type") == step.step_type.value
+            for event in step_events
+        )
+    )
+
+
+def _telemetry_failure_observed(events: list[dict], inspection) -> bool:
+    if len(inspection.steps) != 1 or len(inspection.attempts) != 1:
+        return False
+    step = inspection.steps[0]
+    attempt = inspection.attempts[0]
+    failed = [
+        event for event in events if event.get("event_type") == "ATTEMPT_FAILED"
+    ]
+    return (
+        len(failed) == 1
+        and failed[0].get("step_id") == step.step_id
+        and failed[0].get("attempt_id") == attempt.attempt_id
+        and failed[0].get("step_type") == step.step_type.value
+        and failed[0].get("step_status") == "FAILED"
+        and failed[0].get("classification") == FailureClassification.PERMANENT.value
+        and failed[0].get("error_code") == "rate_limited"
+        and isinstance(failed[0].get("duration_ms"), (int, float))
+        and failed[0]["duration_ms"] >= 0
+    )
+
+
 def _telemetry_usage_provenance(events: list[dict]) -> bool:
     completions = [
         event
@@ -387,6 +453,37 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         telemetry_bytes = telemetry_path.read_bytes()
         telemetry_lines = telemetry_bytes.decode("utf-8").splitlines()
         telemetry_events = [json.loads(line) for line in telemetry_lines if line]
+        failure_path = Path(temporary_directory) / "failure.jsonl"
+        failure_sink = JsonlTelemetrySink(failure_path)
+        failure_registry = DefinitionRegistry()
+        failure_registry.register(
+            AgentDefinition(
+                definition_id="telemetry-failure",
+                version="1.0",
+                instructions=_TELEMETRY_CANARIES[1],
+                model_adapter=_FailingModel(),
+            )
+        )
+        failure_runner = Runner(
+            registry=failure_registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+            telemetry_sink=failure_sink,
+        )
+        failed_created = await failure_runner.create_run(
+            "telemetry-failure",
+            "1.0",
+            "failure " + _TELEMETRY_CANARIES[0] + " " + _TELEMETRY_CANARIES[2],
+        )
+        failed_terminal = await failure_runner.start_run(failed_created.run_id)
+        failed_inspection = await failure_runner.inspect_run(failed_created.run_id)
+        failure_sink.close()
+        failure_sink.close()
+        failure_bytes = failure_path.read_bytes()
+        failure_events = [
+            json.loads(line)
+            for line in failure_bytes.decode("utf-8").splitlines()
+            if line
+        ]
 
         cross_process_path = Path(temporary_directory) / "cross-process.jsonl"
         cross_process = subprocess.run(
@@ -457,10 +554,30 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
     )
     telemetry_payload_absent = all(
         not {"input", "output", "instructions", "payload"}.intersection(event)
-        for event in telemetry_events
+        for event in (*telemetry_events, *failure_events)
     )
     telemetry_ordered = _telemetry_sequence(telemetry_events, created.run_id)
+    telemetry_inspection_reconciled = _telemetry_inspection_reconciled(
+        telemetry_events, inspection
+    )
     telemetry_usage_provenance = _telemetry_usage_provenance(telemetry_events)
+    completions = [
+        event
+        for event in telemetry_events
+        if event.get("event_type") == "STEP_COMPLETED"
+    ]
+    telemetry_model_purpose_observed = (
+        len(completions) == 1 and completions[0].get("step_type") == "MODEL"
+    )
+    telemetry_duration_observed = (
+        telemetry_model_purpose_observed
+        and isinstance(completions[0].get("duration_ms"), (int, float))
+        and completions[0]["duration_ms"] >= 0
+    )
+    telemetry_error_observed = (
+        failed_terminal.status is RunStatus.FAILED
+        and _telemetry_failure_observed(failure_events, failed_inspection)
+    )
     telemetry_closed = (
         len(telemetry_events) == 5
         and telemetry_bytes.endswith(b"\n")
@@ -477,18 +594,28 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         concurrent_events, concurrent_run_ids
     )
     telemetry_redacted = all(
-        canary.encode("utf-8") not in telemetry_bytes
+        canary.encode("utf-8") not in payload
         for canary in _TELEMETRY_CANARIES
+        for payload in (
+            telemetry_bytes,
+            failure_bytes,
+            cross_process_bytes,
+            concurrent_bytes,
+        )
     )
     telemetry_jsonl_digest = _telemetry_digest(
-        telemetry_bytes, cross_process_bytes, concurrent_bytes
+        telemetry_bytes, failure_bytes, cross_process_bytes, concurrent_bytes
     )
     telemetry_passed = (
         telemetry_correlated
         and telemetry_lifecycle_observed
         and telemetry_payload_absent
         and telemetry_ordered
+        and telemetry_inspection_reconciled
         and telemetry_usage_provenance
+        and telemetry_error_observed
+        and telemetry_model_purpose_observed
+        and telemetry_duration_observed
         and telemetry_closed
         and telemetry_cross_process
         and telemetry_concurrent
@@ -507,7 +634,11 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         "telemetry_lifecycle_observed": telemetry_lifecycle_observed,
         "telemetry_payload_absent": telemetry_payload_absent,
         "telemetry_ordered": telemetry_ordered,
+        "telemetry_inspection_reconciled": telemetry_inspection_reconciled,
         "telemetry_usage_provenance": telemetry_usage_provenance,
+        "telemetry_error_observed": telemetry_error_observed,
+        "telemetry_model_purpose_observed": telemetry_model_purpose_observed,
+        "telemetry_duration_observed": telemetry_duration_observed,
         "telemetry_closed": telemetry_closed,
         "telemetry_cross_process": telemetry_cross_process,
         "telemetry_concurrent": telemetry_concurrent,
@@ -553,8 +684,20 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
                         "telemetry_payload_absent"
                     ],
                     "telemetry_ordered": evidence_view["telemetry_ordered"],
+                    "telemetry_inspection_reconciled": evidence_view[
+                        "telemetry_inspection_reconciled"
+                    ],
                     "telemetry_usage_provenance": evidence_view[
                         "telemetry_usage_provenance"
+                    ],
+                    "telemetry_error_observed": evidence_view[
+                        "telemetry_error_observed"
+                    ],
+                    "telemetry_model_purpose_observed": evidence_view[
+                        "telemetry_model_purpose_observed"
+                    ],
+                    "telemetry_duration_observed": evidence_view[
+                        "telemetry_duration_observed"
                     ],
                     "telemetry_closed": evidence_view["telemetry_closed"],
                     "telemetry_cross_process": evidence_view[

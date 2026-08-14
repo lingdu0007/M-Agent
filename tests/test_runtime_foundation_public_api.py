@@ -199,9 +199,9 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         common = {
             "pack_version": "foundation-v1",
             "profile": "core-lifecycle-foundation",
-            "source_commit": "source",
-            "artifact_digest": "artifact",
-            "fixture_digest": "fixture",
+            "source_commit": "b70919487a5aed78d9780efd24219ec77b670d92",
+            "artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fixture_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "scenarios": ("core-lifecycle",),
             "required_checks": (required_check,),
         }
@@ -209,7 +209,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             AcceptanceManifest(environment={"os": "linux"}, **common)
         with self.assertRaises(ValidationError):
             AcceptanceManifest(
-                sdist_digest="sdist", environment={"os": "windows"}, **common
+                sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", environment={"os": "windows"}, **common
             )
 
     def test_manifest_rejects_a_required_check_without_complete_coverage(self) -> None:
@@ -222,10 +222,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             AcceptanceManifest(
                 pack_version="foundation-v1",
                 profile="core-lifecycle-foundation",
-                source_commit="source",
-                artifact_digest="artifact",
-                sdist_digest="sdist",
-                fixture_digest="fixture",
+                source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+                artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 environment={"os": "linux"},
                 scenarios=("core-lifecycle",),
                 required_checks=(
@@ -263,10 +263,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         common = {
             "pack_version": "foundation-v1",
             "profile": "core-lifecycle-foundation",
-            "source_commit": "source",
-            "artifact_digest": "artifact",
-            "sdist_digest": "sdist",
-            "fixture_digest": "fixture",
+            "source_commit": "b70919487a5aed78d9780efd24219ec77b670d92",
+            "artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sdist_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "fixture_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "environment": {"python": "3.11"},
             "scenarios": ("core-lifecycle",),
             "required_checks": (required_check,),
@@ -308,19 +308,23 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         from m_agent.testing import core_lifecycle_manifest
 
         manifest = core_lifecycle_manifest(
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"os": "linux"},
         )
 
         self.assertEqual(manifest.profile, "core-lifecycle-foundation")
         self.assertEqual(manifest.pack_version, "foundation-v1")
         self.assertEqual(manifest.scenarios, ("core-lifecycle",))
-        self.assertEqual(len(manifest.required_checks), 8)
+        self.assertEqual(len(manifest.required_checks), 9)
         self.assertIn(
             "core.lifecycle.telemetry",
+            {check.check_id for check in manifest.required_checks},
+        )
+        self.assertIn(
+            "core.lifecycle.telemetry-host",
             {check.check_id for check in manifest.required_checks},
         )
         for check in manifest.required_checks:
@@ -340,10 +344,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         first = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"os": "linux", "python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
@@ -368,10 +372,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
@@ -402,10 +406,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
@@ -512,10 +516,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
@@ -571,10 +575,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
@@ -638,10 +642,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("first", "second"),
             required_checks=(
@@ -719,10 +723,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest_data = {
             "pack_version": "0.3.0",
             "profile": "0.3",
-            "source_commit": "source",
-            "artifact_digest": "artifact",
-            "sdist_digest": "sdist",
-            "fixture_digest": "fixture",
+            "source_commit": "b70919487a5aed78d9780efd24219ec77b670d92",
+            "artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sdist_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "fixture_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "environment": {"python": "3.11"},
             "scenarios": ("core-lifecycle",),
             "required_checks": (
@@ -769,10 +773,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         common = {
             "pack_version": "0.3.0",
             "profile": "0.3",
-            "source_commit": "source",
-            "artifact_digest": "artifact",
-            "sdist_digest": "sdist",
-            "fixture_digest": "fixture",
+            "source_commit": "b70919487a5aed78d9780efd24219ec77b670d92",
+            "artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sdist_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "fixture_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "environment": {"python": "3.11"},
         }
         with self.assertRaises(ValidationError):
@@ -813,13 +817,55 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             AcceptanceManifest(
                 pack_version="0.3.0",
                 profile="0.3",
-                source_commit="source",
-                artifact_digest="artifact",
-                sdist_digest="sdist",
-                fixture_digest="fixture",
+                source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+                artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 environment={"python": "3.11"},
                 scenarios=("core-lifecycle",),
             )
+
+    def test_manifest_rejects_counterfeit_subject_identity_syntax(self) -> None:
+        """A public Pack subject is a full commit plus exact SHA-256 artifacts."""
+        from pydantic import ValidationError
+
+        from m_agent.testing import (
+            AcceptanceManifest,
+            PackExecution,
+            core_lifecycle_manifest,
+        )
+
+        with self.assertRaises(ValidationError):
+            AcceptanceManifest(
+                pack_version="foundation-v1",
+                profile="core-lifecycle-foundation",
+                source_commit="not-a-commit",
+                artifact_digest="not-a-digest",
+                sdist_digest="still-not-a-digest",
+                fixture_digest="counterfeit-fixture",
+                environment={"python": "3.11"},
+                scenarios=("core-lifecycle",),
+                required_checks=(
+                    self._acceptance_check(
+                        check_id="core.lifecycle",
+                        scenario="core-lifecycle",
+                        public_seam="m_agent.runtime.Runner",
+                    ),
+                ),
+            )
+        valid = core_lifecycle_manifest(
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:" + "a" * 64,
+            sdist_digest="sha256:" + "b" * 64,
+            fixture_digest="sha256:" + "c" * 64,
+            environment={"os": "linux"},
+        )
+        with self.assertRaises(ValidationError):
+            PackExecution.create(
+                valid.model_copy(update={"source_commit": "counterfeit"}),
+                execution_id="counterfeit",
+            )
+
     def test_all_layers_are_public_and_runtime_reverse_dependency_fails(self) -> None:
         from m_agent import adapters, companion, runtime, testing
         from m_agent.testing import find_runtime_dependency_violations
@@ -910,15 +956,14 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         """Release evidence can only be produced by a clean installed wheel."""
         from m_agent.testing import AcceptanceCheck, AcceptanceManifest
 
-        source_commit, artifact_digest, environment = self._installed_manifest_identity()
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit=source_commit,
-            artifact_digest=artifact_digest,
-            sdist_digest="sdist",
-            fixture_digest="fixture",
-            environment=environment,
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:" + "a" * 64,
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
                 self._acceptance_check(
@@ -978,10 +1023,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
@@ -996,7 +1041,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         for check_status, expected_status, expected_exit in (
             (AcceptanceCheckStatus.PASS, PackExecutionStatus.PASSED, 0),
             (AcceptanceCheckStatus.FAIL, PackExecutionStatus.FAILED, 1),
-            (AcceptanceCheckStatus.ERROR, PackExecutionStatus.FAILED, 1),
+            (AcceptanceCheckStatus.ERROR, PackExecutionStatus.ERROR, 3),
             (AcceptanceCheckStatus.NOT_RUN, PackExecutionStatus.INCOMPLETE, 4),
             (AcceptanceCheckStatus.INCONCLUSIVE, PackExecutionStatus.INCOMPLETE, 4),
         ):
@@ -1028,10 +1073,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
@@ -1073,10 +1118,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            sdist_digest="sdist",
-            fixture_digest="fixture",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
@@ -1117,10 +1162,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-           source_commit="source",
-           artifact_digest="artifact",
-            sdist_digest="sdist",
-           fixture_digest="fixture",
+           source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+           artifact_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sdist_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+           fixture_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(

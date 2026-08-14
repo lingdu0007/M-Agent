@@ -36,6 +36,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -48,8 +49,10 @@ from m_agent import (
     DefinitionNotFoundError,
     DefinitionRegistry,
     DeterministicModelAdapter,
+    FailureClassification,
     JsonlTelemetrySink,
     ModelCapabilities,
+    ModelFailure,
     ModelResponse,
     ModelUsage,
     PlaintextPayloadCodec,
@@ -130,6 +133,18 @@ class UsageModel(DeterministicModelAdapter):
         )
 
 
+class FailureModel(DeterministicModelAdapter):
+    def __init__(self):
+        super().__init__(("unused",))
+
+    async def generate(self, request):
+        raise ModelFailure(
+            FailureClassification.PERMANENT,
+            "rate_limited",
+            _TELEMETRY_CANARIES[2],
+        )
+
+
 def telemetry_sequence(events, run_id):
     return (
         [event.get("event_type") for event in events]
@@ -163,6 +178,52 @@ def telemetry_usage_provenance(events):
             for event in events
             if event is not completed[0]
         )
+    )
+
+
+def telemetry_inspection_reconciled(events, inspection):
+    if (
+        len(inspection.steps) != 1
+        or len(inspection.attempts) != 1
+        or len(inspection.checkpoints) != 1
+    ):
+        return False
+    step = inspection.steps[0]
+    attempt = inspection.attempts[0]
+    checkpoint = inspection.checkpoints[0]
+    step_events = [
+        event for event in events
+        if event.get("event_type") in {"STEP_STARTED", "STEP_COMPLETED"}
+    ]
+    return (
+        len(step_events) == 2
+        and step.step_id == attempt.step_id == checkpoint.step_id
+        and attempt.attempt_id == checkpoint.attempt_id
+        and all(
+            event.get("step_id") == step.step_id
+            and event.get("attempt_id") == attempt.attempt_id
+            and event.get("step_type") == step.step_type.value
+            for event in step_events
+        )
+    )
+
+
+def telemetry_failure_observed(events, inspection):
+    if len(inspection.steps) != 1 or len(inspection.attempts) != 1:
+        return False
+    step = inspection.steps[0]
+    attempt = inspection.attempts[0]
+    failed = [event for event in events if event.get("event_type") == "ATTEMPT_FAILED"]
+    return (
+        len(failed) == 1
+        and failed[0].get("step_id") == step.step_id
+        and failed[0].get("attempt_id") == attempt.attempt_id
+        and failed[0].get("step_type") == step.step_type.value
+        and failed[0].get("step_status") == "FAILED"
+        and failed[0].get("classification") == "PERMANENT"
+        and failed[0].get("error_code") == "rate_limited"
+        and isinstance(failed[0].get("duration_ms"), (int, float))
+        and failed[0]["duration_ms"] >= 0
     )
 
 
@@ -219,6 +280,40 @@ async def observe():
         telemetry_bytes = telemetry_path.read_bytes()
         telemetry_lines = telemetry_bytes.decode("utf-8").splitlines()
         telemetry_events = [json.loads(line) for line in telemetry_lines if line]
+        failure_path = Path(temporary_directory) / "failure.jsonl"
+        failure_sink = JsonlTelemetrySink(failure_path)
+        failure_registry = DefinitionRegistry()
+        failure_registry.register(AgentDefinition(
+            definition_id="telemetry-failure",
+            version="1.0",
+            instructions=_TELEMETRY_CANARIES[1],
+            model_adapter=FailureModel(),
+        ))
+        failure_store = SQLiteRunStore(
+            Path(temporary_directory) / "failure.sqlite3",
+            payload_codec=PlaintextPayloadCodec(),
+        )
+        failure_runner = Runner(
+            registry=failure_registry,
+            store=failure_store,
+            telemetry_sink=failure_sink,
+        )
+        failed_created = await failure_runner.create_run(
+            "telemetry-failure",
+            "1.0",
+            "failure " + _TELEMETRY_CANARIES[0] + " " + _TELEMETRY_CANARIES[2],
+        )
+        failed_terminal = await failure_runner.start_run(failed_created.run_id)
+        failed_inspection = await failure_runner.inspect_run(failed_created.run_id)
+        failure_sink.close()
+        failure_sink.close()
+        failure_store.close()
+        failure_bytes = failure_path.read_bytes()
+        failure_events = [
+            json.loads(line)
+            for line in failure_bytes.decode("utf-8").splitlines()
+            if line
+        ]
 
         concurrent_path = Path(temporary_directory) / "concurrent.jsonl"
         telemetry_concurrent = concurrent_telemetry(concurrent_path)
@@ -244,7 +339,26 @@ async def observe():
             reopened = {}
         sqlite_file_created = database.is_file() and database.stat().st_size > 0
         telemetry_ordered = telemetry_sequence(telemetry_events, created.run_id)
+        telemetry_reconciled = telemetry_inspection_reconciled(
+            telemetry_events, inspection
+        )
         telemetry_usage = telemetry_usage_provenance(telemetry_events)
+        completions = [
+            event for event in telemetry_events
+            if event.get("event_type") == "STEP_COMPLETED"
+        ]
+        telemetry_model_purpose = (
+            len(completions) == 1 and completions[0].get("step_type") == "MODEL"
+        )
+        telemetry_duration = (
+            telemetry_model_purpose
+            and isinstance(completions[0].get("duration_ms"), (int, float))
+            and completions[0]["duration_ms"] >= 0
+        )
+        telemetry_error = (
+            failed_terminal.status is RunStatus.FAILED
+            and telemetry_failure_observed(failure_events, failed_inspection)
+        )
         telemetry_closed = (
             len(telemetry_events) == 5
             and telemetry_bytes.endswith(b"\\n")
@@ -255,12 +369,24 @@ async def observe():
             and reopened.get("telemetry_readable") is True
         )
         telemetry_redacted = all(
-            canary.encode("utf-8") not in telemetry_bytes
+            canary.encode("utf-8") not in payload
             for canary in _TELEMETRY_CANARIES
+            for payload in (telemetry_bytes, failure_bytes, concurrent_bytes)
         )
         telemetry_jsonl_digest = "sha256:" + hashlib.sha256(
-            telemetry_bytes + concurrent_bytes
+            telemetry_bytes + failure_bytes + concurrent_bytes
         ).hexdigest()
+        permission_directory = Path(temporary_directory) / "no-write"
+        permission_directory.mkdir()
+        permission_directory.chmod(0o500)
+        try:
+            (permission_directory / "denied").write_text("denied", encoding="utf-8")
+        except PermissionError:
+            filesystem_permission_boundary_observed = True
+        else:
+            filesystem_permission_boundary_observed = False
+        finally:
+            permission_directory.chmod(0o700)
     try:
         registry.resolve("unknown", "1.0")
     except DefinitionNotFoundError:
@@ -301,11 +427,16 @@ async def observe():
         "runtime_dependency_violation_count": len(find_runtime_dependency_violations()),
         "root_expand_compatibility": root_expand_compatibility,
         "telemetry_ordered": telemetry_ordered,
+        "telemetry_inspection_reconciled": telemetry_reconciled,
         "telemetry_usage_provenance": telemetry_usage,
+        "telemetry_error_observed": telemetry_error,
+        "telemetry_model_purpose_observed": telemetry_model_purpose,
+        "telemetry_duration_observed": telemetry_duration,
         "telemetry_closed": telemetry_closed,
         "telemetry_cross_process": telemetry_cross_process,
         "telemetry_concurrent": telemetry_concurrent,
         "telemetry_redacted": telemetry_redacted,
+        "filesystem_permission_boundary_observed": filesystem_permission_boundary_observed,
         "telemetry_jsonl_digest": telemetry_jsonl_digest,
     }, sort_keys=True))
 
@@ -450,22 +581,69 @@ def _attest_declared_evidence(
     declared = {check.check_id: check for check in manifest.required_checks}
     authoritative = dict(evidence_view)
     independent = dict(independent_evidence)
+    subject_identity_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            {
+                "source_commit": manifest.source_commit,
+                "artifact_digest": manifest.artifact_digest,
+                "sdist_digest": manifest.sdist_digest,
+                "environment": dict(manifest.environment),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     for result in results:
         check = declared[result.check_id]
         authoritative[check.authoritative_evidence] = result.evidence_digest
-        if check.check_id in {
-            "core.lifecycle",
-            "core.lifecycle.bundle-tamper",
-            "core.lifecycle.host-wheel",
-        }:
-            independent[check.independent_evidence] = manifest.fixture_digest
+        if check.check_id == "core.lifecycle":
+            independent[check.independent_evidence] = host_observation_digest
+        elif check.check_id == "core.lifecycle.host-wheel":
+            independent[check.independent_evidence] = subject_identity_digest
+        elif check.check_id == "core.lifecycle.bundle-tamper":
+            independent[check.independent_evidence] = independent[
+                "bundle_mutation_independent_digest"
+            ]
         elif check.check_id == "core.lifecycle.telemetry":
             independent[check.independent_evidence] = independent[
                 "telemetry_jsonl_digest"
             ]
+        elif check.check_id == "core.lifecycle.telemetry-host":
+            independent[check.independent_evidence] = host_observation_digest
         else:
             independent[check.independent_evidence] = host_observation_digest
     return authoritative, independent
+
+
+def _controlled_bundle_mutation_evidence(
+    bundle: ScenarioEvidenceBundle,
+    manifest: AcceptanceManifest,
+    execution: PackExecution,
+) -> tuple[str, str]:
+    """Derive evidence only after the public integrity seam rejects a mutation."""
+    tampered = bundle.model_copy(
+        update={"evidence_view": {**bundle.evidence_view, "run_succeeded": False}}
+    )
+    try:
+        tampered.verify(manifest, execution)
+    except BundleIntegrityError:
+        mutated_payload_digest = "sha256:" + hashlib.sha256(
+            tampered.model_dump_json().encode("utf-8")
+        ).hexdigest()
+        observation_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                {
+                    "original_content_digest": bundle.content_digest,
+                    "mutated_payload_digest": mutated_payload_digest,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return observation_digest, mutated_payload_digest
+    raise RuntimeError("controlled Bundle mutation was not detected")
 
 
 def _run(arguments: argparse.Namespace) -> int:
@@ -489,8 +667,8 @@ def _run(arguments: argparse.Namespace) -> int:
     checks, evidence_view, independent_evidence = asyncio.run(
         run_core_lifecycle(fixture_digest=manifest.fixture_digest)
     )
-    host_result, host_evidence = _isolated_host_result()
-    mutation_result = AcceptanceCheckResult(
+    host_results, host_evidence = _isolated_host_result()
+    provisional_mutation_result = AcceptanceCheckResult(
         check_id="core.lifecycle.bundle-tamper",
         status=AcceptanceCheckStatus.PASS,
         evidence_level=next(
@@ -500,15 +678,61 @@ def _run(arguments: argparse.Namespace) -> int:
         ),
         reason_code="bundle_mutation_detected",
         evidence_digest="sha256:"
-        + hashlib.sha256(b"core-lifecycle bundle mutation").hexdigest(),
+        + hashlib.sha256(
+            json.dumps(
+                {"execution_id": execution.execution_id, "manifest": manifest.digest},
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
     )
-    all_checks = (*checks, host_result, mutation_result)
+    provisional_mutation_independent_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            {"execution_id": execution.execution_id, "manifest": manifest.digest},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    provisional_checks = (*checks, *host_results, provisional_mutation_result)
+    provisional_completed = execution.complete(manifest, provisional_checks)
+    evidence_view, independent_evidence = _attest_declared_evidence(
+        manifest,
+        provisional_checks,
+        evidence_view,
+        {
+            **independent_evidence,
+            **host_evidence,
+            "bundle_mutation_independent_digest": provisional_mutation_independent_digest,
+        },
+        host_observation_digest=str(host_evidence["host_observation_digest"]),
+    )
+    provisional_bundle = ScenarioEvidenceBundle.create(
+        manifest=manifest,
+        execution=provisional_completed,
+        execution_checks=provisional_checks,
+        scenario="core-lifecycle",
+        checks=provisional_checks,
+        evidence_view=evidence_view,
+        independent_evidence=independent_evidence,
+    )
+    mutation_digest, mutation_independent_digest = _controlled_bundle_mutation_evidence(
+        provisional_bundle, manifest, provisional_completed
+    )
+    mutation_result = provisional_mutation_result.model_copy(
+        update={"evidence_digest": mutation_digest}
+    )
+    all_checks = (*checks, *host_results, mutation_result)
     completed = execution.complete(manifest, all_checks)
     evidence_view, independent_evidence = _attest_declared_evidence(
         manifest,
         all_checks,
         evidence_view,
-        {**independent_evidence, **host_evidence},
+        {
+            **independent_evidence,
+            "bundle_mutation_independent_digest": mutation_independent_digest,
+        },
         host_observation_digest=str(host_evidence["host_observation_digest"]),
     )
     candidate = ScenarioEvidenceBundle.create(
@@ -520,23 +744,15 @@ def _run(arguments: argparse.Namespace) -> int:
         evidence_view=evidence_view,
         independent_evidence=independent_evidence,
     )
-    tampered = candidate.model_copy(
-        update={"evidence_view": {**candidate.evidence_view, "run_succeeded": False}}
-    )
-    try:
-        tampered.verify(manifest, completed)
-    except BundleIntegrityError:
-        bundle = candidate
-    else:
-        raise RuntimeError("controlled Bundle mutation was not detected")
+    _controlled_bundle_mutation_evidence(candidate, manifest, completed)
     _write_run_state(arguments.output_dir, manifest, completed, candidate)
-    _publish_bundle(arguments.output_dir, bundle)
+    _publish_bundle(arguments.output_dir, candidate)
     _clear_run_state(arguments.output_dir)
     return completed.exit_code or 0
 
 
 def _isolated_host_result() -> tuple[
-    AcceptanceCheckResult, dict[str, str | int | bool]
+    tuple[AcceptanceCheckResult, AcceptanceCheckResult], dict[str, str | int | bool]
 ]:
     """Observe the installed wheel from a separate isolated Python process."""
     environment = {
@@ -589,11 +805,16 @@ def _isolated_host_result() -> tuple[
         "runtime_dependency_violation_count": 0,
         "root_expand_compatibility": True,
         "telemetry_ordered": True,
+        "telemetry_inspection_reconciled": True,
         "telemetry_usage_provenance": True,
+        "telemetry_error_observed": True,
+        "telemetry_model_purpose_observed": True,
+        "telemetry_duration_observed": True,
         "telemetry_closed": True,
         "telemetry_cross_process": True,
         "telemetry_concurrent": True,
         "telemetry_redacted": True,
+        "filesystem_permission_boundary_observed": True,
     }
     valid_observation = set(observation) == set(expected_observation) and all(
         type(observation[key]) is type(expected)
@@ -609,20 +830,37 @@ def _isolated_host_result() -> tuple[
         )
     )
     return (
-        AcceptanceCheckResult(
-            check_id="core.lifecycle.host-wheel",
-            status=status,
-            evidence_level=EvidenceLevel.HOST,
-            reason_code=(
-                "isolated_wheel_lifecycle_observed"
-                if status is AcceptanceCheckStatus.PASS
-                else (
-                    "isolated_wheel_lifecycle_failed"
-                    if status is AcceptanceCheckStatus.FAIL
-                    else "isolated_wheel_lifecycle_error"
-                )
+        (
+            AcceptanceCheckResult(
+                check_id="core.lifecycle.host-wheel",
+                status=status,
+                evidence_level=EvidenceLevel.HOST,
+                reason_code=(
+                    "isolated_wheel_lifecycle_observed"
+                    if status is AcceptanceCheckStatus.PASS
+                    else (
+                        "isolated_wheel_lifecycle_failed"
+                        if status is AcceptanceCheckStatus.FAIL
+                        else "isolated_wheel_lifecycle_error"
+                    )
+                ),
+                evidence_digest=digest,
             ),
-            evidence_digest=digest,
+            AcceptanceCheckResult(
+                check_id="core.lifecycle.telemetry-host",
+                status=status,
+                evidence_level=EvidenceLevel.HOST,
+                reason_code=(
+                    "isolated_jsonl_telemetry_observed"
+                    if status is AcceptanceCheckStatus.PASS
+                    else (
+                        "isolated_jsonl_telemetry_failed"
+                        if status is AcceptanceCheckStatus.FAIL
+                        else "isolated_jsonl_telemetry_error"
+                    )
+                ),
+                evidence_digest=telemetry_jsonl_digest,
+            ),
         ),
         {
             "host_observation_digest": digest,
@@ -633,16 +871,19 @@ def _isolated_host_result() -> tuple[
 
 
 def _publish_bundle(output_dir: Path, bundle: ScenarioEvidenceBundle) -> Path:
-    """Publish a content-addressed snapshot without replacing prior evidence."""
+    """Atomically publish or repair a content-addressed snapshot."""
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{bundle.content_digest.removeprefix('sha256:')}.json"
     payload = (bundle.model_dump_json(indent=2) + "\n").encode("utf-8")
-    try:
-        with path.open("xb") as output:
-            output.write(payload)
-    except FileExistsError:
-        if path.read_bytes() != payload:
-            raise ValueError("content-addressed Bundle path already contains different data")
+    if path.is_file() and path.read_bytes() == payload:
+        print(path)
+        return path
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    with temporary.open("xb") as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
     print(path)
     return path
 

@@ -265,6 +265,31 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     resumed_bundle = json.loads(Path(resumed.stdout.strip()).read_text())
     assert resumed_bundle["execution"]["execution_id"] == execution_id
     assert not running_state.exists()
+    resumed_bundle_path = Path(resumed.stdout.strip())
+    completed_state = {
+        "schema_version": "1",
+        "manifest": manifest.model_dump(mode="json"),
+        "manifest_digest": manifest.digest,
+        "execution": resumed_bundle["execution"],
+        "bundle": resumed_bundle,
+    }
+    running_state.write_text(json.dumps({
+        **completed_state,
+        "content_digest": "sha256:" + hashlib.sha256(
+            json.dumps(completed_state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+    }))
+    resumed_bundle_path.write_bytes(b"{truncated")
+    recovered = invoke(
+        "run",
+        "--manifest", str(manifest_path),
+        "--wheel", str(wheel),
+        "--sdist", str(sdist),
+        "--output-dir", str(resumed_output_dir),
+    )
+    assert recovered.returncode == 0, recovered.stderr
+    assert json.loads(resumed_bundle_path.read_text())["content_digest"] == resumed_bundle["content_digest"]
+    assert not running_state.exists()
 
     completed = invoke(
         "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
@@ -297,11 +322,32 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         and check["status"] == "PASS"
         for check in bundle["checks"]
     )
+    assert any(
+        check["check_id"] == "core.lifecycle.telemetry-host"
+        and check["evidence_level"] == "HOST"
+        and check["status"] == "PASS"
+        for check in bundle["checks"]
+    )
     assert bundle["independent_evidence"]["fixture_digest"] == identity["fixture_digest"]
     assert bundle["independent_evidence"]["host_observation_digest"].startswith("sha256:")
+    assert (
+        bundle["independent_evidence"]["core_lifecycle_independent_digest"]
+        == bundle["independent_evidence"]["host_observation_digest"]
+    )
+    assert (
+        bundle["independent_evidence"]["host_wheel_independent_digest"]
+        != identity["fixture_digest"]
+    )
+    assert bundle["independent_evidence"]["bundle_tamper_independent_digest"].startswith(
+        "sha256:"
+    )
     for telemetry_field in (
         "telemetry_ordered",
+        "telemetry_inspection_reconciled",
         "telemetry_usage_provenance",
+        "telemetry_error_observed",
+        "telemetry_model_purpose_observed",
+        "telemetry_duration_observed",
         "telemetry_closed",
         "telemetry_cross_process",
         "telemetry_concurrent",
@@ -340,11 +386,16 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "runtime_dependency_violation_count": 0,
         "root_expand_compatibility": True,
         "telemetry_ordered": True,
+        "telemetry_inspection_reconciled": True,
         "telemetry_usage_provenance": True,
+        "telemetry_error_observed": True,
+        "telemetry_model_purpose_observed": True,
+        "telemetry_duration_observed": True,
         "telemetry_closed": True,
         "telemetry_cross_process": True,
         "telemetry_concurrent": True,
         "telemetry_redacted": True,
+        "filesystem_permission_boundary_observed": True,
     }
     assert bundle["independent_evidence"]["host_observation_digest"] == "sha256:" + hashlib.sha256(
         json.dumps(host_observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1211,6 +1262,46 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent modified archive provenance rejected", output)
+
+    def test_ignored_nested_source_cannot_claim_ancestor_git_identity(self) -> None:
+        """A copied source tree must not inherit a clean parent repository SHA."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            parent = temporary_root / "parent"
+            parent.mkdir()
+            clean_environment = _clean_environment()
+            (parent / ".gitignore").write_text("ignored-source/\n")
+            (parent / "marker").write_text("parent only\n")
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "ticket07@example.invalid"],
+                ["git", "config", "user.name", "Ticket 07"],
+                ["git", "add", ".gitignore", "marker"],
+                ["git", "commit", "-qm", "unrelated parent"],
+            ):
+                _run(command, cwd=parent, env=clean_environment)
+            parent_commit = _run(
+                ["git", "rev-parse", "HEAD"], cwd=parent, env=clean_environment
+            ).strip()
+            source_root = parent / "ignored-source"
+            shutil.copytree(
+                _ROOT,
+                source_root,
+                ignore=shutil.ignore_patterns(
+                    ".git", ".venv", ".pytest_cache", "__pycache__", "build", "dist"
+                ),
+            )
+            dist_dir = temporary_root / "dist"
+            _run(
+                ["uv", "build", "--offline", "--wheel", "--out-dir", str(dist_dir)],
+                cwd=source_root,
+                env=clean_environment,
+            )
+            wheel = next(dist_dir.glob("*.whl"))
+            with zipfile.ZipFile(wheel) as artifact:
+                identity = artifact.read("m_agent/_build_identity.py").decode("utf-8")
+            self.assertIn("SOURCE_COMMIT = 'unavailable'", identity)
+            self.assertNotIn(parent_commit, identity)
 
     def test_built_sdist_runs_flagship_against_installed_m_agent(self) -> None:
         """The packaged flagship uses the installed runtime, never checkout src."""

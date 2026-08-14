@@ -95,14 +95,19 @@ def _source_integrity_matches(root: Path) -> bool:
 
 def _source_identity() -> tuple[str, str]:
     completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        ["git", "rev-parse", "--show-toplevel", "HEAD"],
         cwd=_ROOT,
         text=True,
         capture_output=True,
         check=False,
     )
-    commit = completed.stdout.strip()
-    if completed.returncode == 0 and _COMMIT.fullmatch(commit):
+    top_level, separator, commit = completed.stdout.strip().partition("\n")
+    if (
+        completed.returncode == 0
+        and separator
+        and Path(top_level).resolve() == _ROOT.resolve()
+        and _COMMIT.fullmatch(commit)
+    ):
         status = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=normal"],
             cwd=_ROOT,
