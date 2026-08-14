@@ -221,6 +221,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         completed.returncode,
         completed.stdout,
         completed.stderr,
+        Path(completed.stdout.strip()).read_text() if completed.stdout.strip() else "",
     )
     bundle_path = Path(completed.stdout.strip())
     assert bundle_path.parent == output_dir
