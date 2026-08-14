@@ -530,6 +530,59 @@ print("m-agent HOST subject failure contract passed")
 """
 
 
+_EXPAND_COMPATIBILITY_FAILURE_PROBE = """
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from m_agent.testing import core_lifecycle_manifest, installed_identity
+
+wheel = Path(sys.argv[1])
+sdist = Path(sys.argv[2])
+identity = installed_identity(artifact=wheel, sdist=sdist)
+manifest = core_lifecycle_manifest(
+    source_commit=identity["source_commit"],
+    artifact_digest=identity["artifact_digest"],
+    sdist_digest=identity["sdist_digest"],
+    fixture_digest=identity["fixture_digest"],
+    environment=identity["environment"],
+)
+with tempfile.TemporaryDirectory() as temporary_directory:
+    manifest_path = Path(temporary_directory) / "manifest.json"
+    manifest_path.write_text(manifest.model_dump_json())
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "m_agent.testing",
+            "run",
+            "--manifest",
+            str(manifest_path),
+            "--wheel",
+            str(wheel),
+            "--sdist",
+            str(sdist),
+            "--output-dir",
+            str(Path(temporary_directory) / "bundles"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 1, completed.stderr
+    bundle = json.loads(Path(completed.stdout.strip()).read_text())
+    assert next(
+        check["status"]
+        for check in bundle["checks"]
+        if check["check_id"] == "core.lifecycle.expand-compatibility"
+    ) == "FAIL"
+print("m-agent expand compatibility contract passed")
+"""
+
+
 _TAMPERED_SOURCE_PROBE = """
 import sys
 from pathlib import Path
@@ -787,6 +840,100 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent HOST subject failure contract passed", output)
+
+    def test_foundation_cli_rejects_misbound_legacy_root_export(self) -> None:
+        """The required expand check covers semantic 0.2 root bindings."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            archive = temporary_root / "source.tar"
+            source_root = temporary_root / "source"
+            source_root.mkdir()
+            clean_environment = _clean_environment()
+            _run(
+                ["git", "archive", "--format=tar", "--output", str(archive), "HEAD"],
+                cwd=_ROOT,
+                env=clean_environment,
+            )
+            _run(
+                ["tar", "-xf", str(archive), "-C", str(source_root)],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            root_package = source_root / "src" / "m_agent" / "__init__.py"
+            source = root_package.read_text()
+            changed = source.replace(
+                "from ._clock import Clock, FakeClock, SystemClock",
+                "from ._clock import Clock, SystemClock\nFakeClock = SystemClock",
+                1,
+            )
+            self.assertNotEqual(changed, source)
+            root_package.write_text(changed)
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "ticket07@example.invalid"],
+                ["git", "config", "user.name", "Ticket 07"],
+                ["git", "add", "--all"],
+                ["git", "commit", "-qm", "controlled expand incompatibility"],
+            ):
+                _run(command, cwd=source_root, env=clean_environment)
+
+            dist_dir = temporary_root / "dist"
+            _run(
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--sdist",
+                    "--out-dir",
+                    str(dist_dir),
+                ],
+                cwd=source_root,
+                env=clean_environment,
+            )
+            wheel = next(dist_dir.glob("*.whl"))
+            sdist = next(dist_dir.glob("*.tar.gz"))
+            environment_dir = temporary_root / "environment"
+            _run(
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            python = environment_dir / "bin" / "python"
+            _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--python",
+                    str(python),
+                    f"{wheel}[testing]",
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            output = _run(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    _EXPAND_COMPATIBILITY_FAILURE_PROBE,
+                    str(wheel),
+                    str(sdist),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            self.assertIn("m-agent expand compatibility contract passed", output)
 
     def test_modified_exported_source_cannot_claim_clean_provenance(self) -> None:
         """A changed Git-less export is never a clean reviewed source subject."""
