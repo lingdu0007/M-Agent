@@ -173,6 +173,8 @@ def _assert_core_lifecycle_manifest(manifest: AcceptanceManifest) -> None:
 
 def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
     bundle = _read_bundle(arguments.bundle)
+    if arguments.bundle.name != f"{bundle.content_digest.removeprefix('sha256:')}.json":
+        raise BundleIntegrityError("Bundle path does not match content digest")
     if arguments.manifest is not None:
         supplied = _read_manifest(arguments.manifest)
         if supplied.digest != bundle.manifest.digest:

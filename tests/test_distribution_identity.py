@@ -382,7 +382,9 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         evidence_view={"run_succeeded": True},
         independent_evidence={"fixture_digest": identity["fixture_digest"]},
     )
-    reduced_bundle_path = Path(temporary_directory) / "reduced-bundle.json"
+    reduced_bundle_path = Path(temporary_directory) / (
+        reduced_bundle.content_digest.removeprefix("sha256:") + ".json"
+    )
     reduced_bundle_path.write_text(reduced_bundle.model_dump_json())
     for command in ("inspect", "verify", "render"):
         completed = invoke(
