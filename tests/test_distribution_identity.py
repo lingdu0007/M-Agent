@@ -299,6 +299,24 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     )
     assert bundle["independent_evidence"]["fixture_digest"] == identity["fixture_digest"]
     assert bundle["independent_evidence"]["host_observation_digest"].startswith("sha256:")
+    for telemetry_field in (
+        "telemetry_ordered",
+        "telemetry_usage_provenance",
+        "telemetry_closed",
+        "telemetry_cross_process",
+        "telemetry_concurrent",
+        "telemetry_redacted",
+    ):
+        assert bundle["evidence_view"][telemetry_field] is True
+    assert bundle["independent_evidence"]["telemetry_jsonl_digest"].startswith("sha256:")
+    assert (
+        bundle["independent_evidence"]["telemetry_independent_digest"]
+        == bundle["independent_evidence"]["telemetry_jsonl_digest"]
+    )
+    assert (
+        bundle["independent_evidence"]["telemetry_independent_digest"]
+        != bundle["independent_evidence"]["host_observation_digest"]
+    )
     host_observation = {
         key.removeprefix("host_"): value
         for key, value in bundle["independent_evidence"].items()
