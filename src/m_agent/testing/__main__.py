@@ -232,7 +232,9 @@ def _run(arguments: argparse.Namespace) -> int:
     return completed.exit_code or 0
 
 
-def _isolated_host_result() -> tuple[AcceptanceCheckResult, dict[str, str | bool]]:
+def _isolated_host_result() -> tuple[
+    AcceptanceCheckResult, dict[str, str | int | bool]
+]:
     """Observe the installed wheel from a separate isolated Python process."""
     environment = {
         key: value
@@ -305,8 +307,7 @@ def _isolated_host_result() -> tuple[AcceptanceCheckResult, dict[str, str | bool
         ),
         {
             "host_observation_digest": digest,
-            "sqlite_persistence_observed": observation.get("sqlite_file_created") is True,
-            "restart_observed": observation.get("restart_observed") is True,
+            **{f"host_{key}": value for key, value in observation.items()},
         },
     )
 
