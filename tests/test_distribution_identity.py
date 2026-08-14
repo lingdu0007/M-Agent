@@ -337,6 +337,25 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         )
         assert completed.returncode == 0, completed.stderr
 
+    published_bundle = ScenarioEvidenceBundle.model_validate(bundle)
+    repointed_bundle = ScenarioEvidenceBundle.create(
+        manifest=published_bundle.manifest,
+        execution=published_bundle.execution,
+        execution_checks=published_bundle.execution_checks,
+        scenario=published_bundle.scenario,
+        checks=published_bundle.checks,
+        evidence_view={**published_bundle.evidence_view, "run_succeeded": False},
+        independent_evidence=published_bundle.independent_evidence,
+    )
+    assert repointed_bundle.content_digest != published_bundle.content_digest
+    bundle_path.write_text(repointed_bundle.model_dump_json())
+    for command in ("inspect", "verify", "render"):
+        completed = invoke(
+            command, "--manifest", str(manifest_path), "--wheel", str(wheel),
+            "--sdist", str(sdist), "--bundle", str(bundle_path),
+        )
+        assert completed.returncode == 5, completed.stderr
+
     reduced_manifest = manifest.model_copy(
         update={
             "pack_version": "counterfeit",
