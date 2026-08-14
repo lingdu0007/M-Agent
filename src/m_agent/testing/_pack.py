@@ -7,9 +7,10 @@ import json
 import math
 import re
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 
 _SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -68,16 +69,17 @@ class AcceptanceCheckResult(BaseModel, frozen=True):
     check_id: str
     status: AcceptanceCheckStatus
     evidence_level: EvidenceLevel
+    reason_code: str
+    evidence_digest: str
     detail: str = ""
-    evidence_digest: str | None = None
 
     @model_validator(mode="after")
     def _validate_minimal_reference(self) -> "AcceptanceCheckResult":
         if self.detail:
             raise ValueError("Acceptance Check Results cannot contain free-text detail")
-        if self.evidence_digest is not None and not _SHA256_DIGEST.fullmatch(
-            self.evidence_digest
-        ):
+        if not _EVIDENCE_KEY.fullmatch(self.reason_code):
+            raise ValueError("Acceptance Check Result reason_code must be a stable identifier")
+        if not _SHA256_DIGEST.fullmatch(self.evidence_digest):
             raise ValueError("Acceptance Check Result evidence_digest must be sha256")
         return self
 
@@ -139,6 +141,15 @@ class PackExecution(BaseModel, frozen=True):
     status: PackExecutionStatus = PackExecutionStatus.CREATED
     exit_code: int | None = None
 
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in {
+            PackExecutionStatus.PASSED,
+            PackExecutionStatus.FAILED,
+            PackExecutionStatus.INCOMPLETE,
+            PackExecutionStatus.ERROR,
+        }
+
     @classmethod
     def create(cls, manifest: AcceptanceManifest, *, execution_id: str) -> "PackExecution":
         if not execution_id:
@@ -198,6 +209,16 @@ class PackExecution(BaseModel, frozen=True):
                     "exit_code": EXIT_HARNESS_ERROR,
                 }
             )
+        if any(
+            check.evidence_level not in {EvidenceLevel.CONTRACT, EvidenceLevel.HOST}
+            for check in manifest.required_checks
+        ):
+            return self.model_copy(
+                update={
+                    "status": PackExecutionStatus.INCOMPLETE,
+                    "exit_code": EXIT_INCOMPLETE,
+                }
+            )
         statuses = {result.status for result in required if result is not None}
         if AcceptanceCheckStatus.ERROR in statuses:
             status, exit_code = PackExecutionStatus.ERROR, EXIT_HARNESS_ERROR
@@ -218,14 +239,32 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "1"
+    schema_version: str = "2"
     manifest_digest: str
-    execution_id: str
+    execution: PackExecution
     scenario: str
     checks: tuple[AcceptanceCheckResult, ...]
     evidence_view: Mapping[str, str | int | float | bool | None]
     independent_evidence: Mapping[str, str | int | float | bool | None]
     content_digest: str
+
+    @model_validator(mode="after")
+    def _freeze_evidence_mappings(self) -> "ScenarioEvidenceBundle":
+        object.__setattr__(
+            self, "evidence_view", MappingProxyType(dict(self.evidence_view))
+        )
+        object.__setattr__(
+            self,
+            "independent_evidence",
+            MappingProxyType(dict(self.independent_evidence)),
+        )
+        return self
+
+    @field_serializer("evidence_view", "independent_evidence")
+    def _serialize_evidence_mapping(
+        self, value: Mapping[str, str | int | float | bool | None]
+    ) -> dict[str, str | int | float | bool | None]:
+        return dict(value)
 
     @staticmethod
     def _ensure_minimal_evidence(value: Mapping[str, object]) -> None:
@@ -246,8 +285,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
     def _assert_minimal_check_results(checks: tuple[AcceptanceCheckResult, ...]) -> None:
         for result in checks:
             if result.detail or (
-                result.evidence_digest is not None
-                and not _SHA256_DIGEST.fullmatch(result.evidence_digest)
+                not _SHA256_DIGEST.fullmatch(result.evidence_digest)
             ):
                 raise ValueError("Scenario Evidence Bundle check result is not minimal")
 
@@ -272,13 +310,31 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
                     f"Bundle evidence level does not match Manifest for {result.check_id}"
                 )
 
+    @staticmethod
+    def _assert_terminal_execution(
+        manifest: AcceptanceManifest,
+        execution: PackExecution,
+        checks: tuple[AcceptanceCheckResult, ...],
+    ) -> None:
+        execution.assert_matches(manifest)
+        if not execution.is_terminal or execution.exit_code is None:
+            raise ValueError("Bundle execution must be terminal with an exit code")
+        derived = PackExecution.create(
+            manifest, execution_id=execution.execution_id
+        ).complete(manifest, checks)
+        if (
+            execution.status is not derived.status
+            or execution.exit_code != derived.exit_code
+        ):
+            raise ValueError("Bundle execution does not match its check results")
+
     @classmethod
     def _digest_payload(
         cls,
         *,
         schema_version: str,
         manifest_digest: str,
-        execution_id: str,
+        execution: PackExecution,
         scenario: str,
         checks: tuple[AcceptanceCheckResult, ...],
         evidence_view: Mapping[str, str | int | float | bool | None],
@@ -287,7 +343,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         payload = {
             "schema_version": schema_version,
             "manifest_digest": manifest_digest,
-            "execution_id": execution_id,
+            "execution": execution.model_dump(mode="json"),
             "scenario": scenario,
             "checks": [check.model_dump(mode="json") for check in checks],
             "evidence_view": dict(evidence_view),
@@ -313,6 +369,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         independent_evidence: Mapping[str, str | int | float | bool | None],
     ) -> "ScenarioEvidenceBundle":
         execution.assert_matches(manifest)
+        cls._assert_terminal_execution(manifest, execution, checks)
         if scenario not in manifest.scenarios:
             raise ValueError(f"scenario {scenario!r} is not declared by Manifest")
         cls._assert_declared_checks(manifest, scenario, checks)
@@ -320,17 +377,18 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         cls._ensure_minimal_evidence(evidence_view)
         cls._ensure_minimal_evidence(independent_evidence)
         digest = cls._digest_payload(
-            schema_version="1",
+            schema_version="2",
             manifest_digest=manifest.digest,
-            execution_id=execution.execution_id,
+            execution=execution,
             scenario=scenario,
             checks=checks,
             evidence_view=evidence_view,
             independent_evidence=independent_evidence,
         )
         return cls(
+            schema_version="2",
             manifest_digest=manifest.digest,
-            execution_id=execution.execution_id,
+            execution=execution,
             scenario=scenario,
             checks=checks,
             evidence_view=dict(evidence_view),
@@ -341,14 +399,14 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
     def verify(
         self,
         manifest: AcceptanceManifest,
-        execution: PackExecution,
+        execution: PackExecution | None = None,
     ) -> None:
         try:
-            execution.assert_matches(manifest)
+            if execution is not None and execution != self.execution:
+                raise BundleIntegrityError("Bundle execution does not match supplied execution")
             if self.manifest_digest != manifest.digest:
                 raise BundleIntegrityError("Bundle Manifest digest does not match")
-            if self.execution_id != execution.execution_id:
-                raise BundleIntegrityError("Bundle execution identity does not match")
+            self._assert_terminal_execution(manifest, self.execution, self.checks)
             self._assert_declared_checks(manifest, self.scenario, self.checks)
             self._assert_minimal_check_results(self.checks)
             self._ensure_minimal_evidence(self.evidence_view)
@@ -360,7 +418,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         expected = self._digest_payload(
             schema_version=self.schema_version,
             manifest_digest=self.manifest_digest,
-            execution_id=self.execution_id,
+            execution=self.execution,
             scenario=self.scenario,
             checks=self.checks,
             evidence_view=self.evidence_view,

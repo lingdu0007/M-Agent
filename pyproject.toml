@@ -38,3 +38,6 @@ markers = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"m_agent.testing" = ["fixtures/*.json"]

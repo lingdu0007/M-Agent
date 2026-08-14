@@ -25,8 +25,16 @@ _RUNTIME_DEPENDENCIES = (
 
 def _clean_environment() -> dict[str, str]:
     """Keep tool discovery while preventing the source tree from leaking in."""
-    excluded = {"PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"}
-    return {key: value for key, value in os.environ.items() if key not in excluded}
+    excluded = {
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "M_AGENT_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+    }
+    clean = {key: value for key, value in os.environ.items() if key not in excluded}
+    clean["M_AGENT_RUN_LIVE_TESTS"] = "0"
+    return clean
 
 
 def _run(command: list[str], *, cwd: Path, env: dict[str, str]) -> str:
@@ -134,15 +142,17 @@ from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
 from m_agent.testing import AcceptanceCheck, AcceptanceManifest, installed_identity
 
 assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-identity = installed_identity()
+wheel = Path(sys.argv[1])
+identity = installed_identity(artifact=wheel)
 assert identity["environment"]["installation"] == "wheel"
 assert identity["source_commit"] not in {"development", "unavailable"}
+assert identity["environment"]["source_state"] == "clean"
 manifest = AcceptanceManifest(
     pack_version="0.3.0",
     profile="0.3",
     source_commit=identity["source_commit"],
     artifact_digest=identity["artifact_digest"],
-    fixture_digest="fixture",
+    fixture_digest=identity["fixture_digest"],
     environment=identity["environment"],
     scenarios=("core-lifecycle",),
     required_checks=(
@@ -157,6 +167,21 @@ manifest = AcceptanceManifest(
             public_seam="m_agent.runtime.DefinitionRegistry",
         ),
         AcceptanceCheck(
+            check_id="core.lifecycle.public-namespaces",
+            scenario="core-lifecycle",
+            public_seam="m_agent.runtime,m_agent.adapters,m_agent.companion,m_agent.testing",
+        ),
+        AcceptanceCheck(
+            check_id="core.lifecycle.dependency-direction",
+            scenario="core-lifecycle",
+            public_seam="m_agent.testing.find_runtime_dependency_violations",
+        ),
+        AcceptanceCheck(
+            check_id="core.lifecycle.expand-compatibility",
+            scenario="core-lifecycle",
+            public_seam="m_agent,m_agent.runtime",
+        ),
+        AcceptanceCheck(
             check_id="core.lifecycle.bundle-tamper",
             scenario="core-lifecycle",
             public_seam="m_agent.testing.ScenarioEvidenceBundle",
@@ -165,48 +190,90 @@ manifest = AcceptanceManifest(
 )
 with tempfile.TemporaryDirectory() as temporary_directory:
     manifest_path = Path(temporary_directory) / "manifest.json"
-    bundle_path = Path(temporary_directory) / "bundle.json"
+    output_dir = Path(temporary_directory) / "bundles"
     manifest_path.write_text(manifest.model_dump_json())
     import subprocess
-    completed = subprocess.run(
-        [sys.executable, "-I", "-m", "m_agent.testing", "run", "--manifest", str(manifest_path), "--output", str(bundle_path)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    completed = subprocess.run(
-        [sys.executable, "-I", "-m", "m_agent.testing", "inspect", "--manifest", str(manifest_path), "--bundle", str(bundle_path)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    completed = subprocess.run(
-        [sys.executable, "-I", "-m", "m_agent.testing", "verify", "--manifest", str(manifest_path), "--bundle", str(bundle_path)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    completed = subprocess.run(
-        [sys.executable, "-I", "-m", "m_agent.testing", "render", "--manifest", str(manifest_path), "--bundle", str(bundle_path)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    for update in (
-        {"source_commit": "counterfeit-source"},
-        {"artifact_digest": "sha256:" + "0" * 64},
-        {"environment": {**identity["environment"], "os": "counterfeit"}},
-    ):
-        manifest_path.write_text(manifest.model_copy(update=update).model_dump_json())
-        completed = subprocess.run(
-            [sys.executable, "-I", "-m", "m_agent.testing", "run", "--manifest", str(manifest_path), "--output", str(bundle_path)],
+
+    def invoke(*arguments):
+        return subprocess.run(
+            [sys.executable, "-I", "-m", "m_agent.testing", *arguments],
             text=True,
             capture_output=True,
             check=False,
+        )
+
+    completed = invoke(
+        "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--output-dir", str(output_dir),
+    )
+    assert completed.returncode == 0, completed.stderr
+    bundle_path = Path(completed.stdout.strip())
+    assert bundle_path.parent == output_dir
+    bundle = json.loads(bundle_path.read_text())
+    assert bundle_path.stem == bundle["content_digest"].removeprefix("sha256:")
+    assert bundle["execution"]["status"] == "PASSED"
+    assert bundle["execution"]["exit_code"] == 0
+    assert all(check["reason_code"] and check["evidence_digest"] for check in bundle["checks"])
+    assert bundle["independent_evidence"] == {"fixture_digest": identity["fixture_digest"]}
+    assert "model_digest" not in bundle["independent_evidence"]
+    assert "network_disabled" not in bundle["independent_evidence"]
+
+    manifest_path.write_text(
+        manifest.model_copy(update={"required_checks": manifest.required_checks[:-1]}).model_dump_json()
+    )
+    completed = invoke(
+        "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--output-dir", str(output_dir),
+    )
+    assert completed.returncode == 2, completed.stderr
+    manifest_path.write_text(manifest.model_dump_json())
+
+    completed = invoke(
+        "inspect", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--bundle", str(bundle_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+    completed = invoke(
+        "verify", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--bundle", str(bundle_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+    completed = invoke(
+        "render", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--bundle", str(bundle_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    bundle["checks"][0]["status"] = "FAIL"
+    bundle_path.write_text(json.dumps(bundle))
+    for command in ("inspect", "verify", "render"):
+        completed = invoke(
+            command, "--manifest", str(manifest_path), "--wheel", str(wheel),
+            "--bundle", str(bundle_path),
+        )
+        assert completed.returncode == 5, completed.stderr
+
+    completed = invoke(
+        "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--output-dir", str(output_dir),
+    )
+    assert completed.returncode == 0, completed.stderr
+    second_bundle_path = Path(completed.stdout.strip())
+    assert second_bundle_path != bundle_path
+    assert len(list(output_dir.glob("*.json"))) == 2
+    second_bundle = json.loads(second_bundle_path.read_text())
+    assert second_bundle["execution"]["execution_id"] != bundle["execution"]["execution_id"]
+
+    for update in (
+        {"source_commit": "counterfeit-source"},
+        {"artifact_digest": "sha256:" + "0" * 64},
+        {"fixture_digest": "sha256:" + "0" * 64},
+        {"environment": {**identity["environment"], "os": "counterfeit"}},
+    ):
+        manifest_path.write_text(manifest.model_copy(update=update).model_dump_json())
+        completed = invoke(
+            "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+            "--output-dir", str(output_dir),
         )
         assert completed.returncode == 2, completed.stderr
 assert metadata("m-agent")["Name"] == "m-agent"
@@ -337,7 +404,7 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             output = _run(
-                [str(python), "-I", "-c", _FOUNDATION_INSTALLED_PROBE],
+                [str(python), "-I", "-c", _FOUNDATION_INSTALLED_PROBE, str(wheel)],
                 cwd=temporary_root,
                 env=clean_environment,
             )

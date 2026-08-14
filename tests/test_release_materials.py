@@ -34,6 +34,7 @@ class ReleaseMaterialTests(unittest.TestCase):
             "MANIFEST.in",
             "docs/migrating-from-0.1.md",
             "docs/migrating-to-0.3.md",
+            "docs/acceptance-coverage-matrix.md",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
         migration = (ROOT / "docs/migrating-from-0.1.md").read_text()
@@ -63,8 +64,17 @@ class ReleaseMaterialTests(unittest.TestCase):
             "m_agent.testing",
             "m_agent.provider",
             "removed",
+            "m_agent.Clock",
         ):
             self.assertIn(marker, migration)
+        matrix = (ROOT / "docs/acceptance-coverage-matrix.md").read_text()
+        for required_check in (
+            "core.lifecycle.public-namespaces",
+            "core.lifecycle.dependency-direction",
+            "core.lifecycle.expand-compatibility",
+            "core.lifecycle.host-wheel",
+        ):
+            self.assertIn(required_check, matrix)
 
     def test_public_docs_are_sanitized_and_scope_qualified(self) -> None:
         paths = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", ROOT / "SECURITY.md"]

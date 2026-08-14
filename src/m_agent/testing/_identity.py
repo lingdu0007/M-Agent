@@ -6,9 +6,12 @@ import csv
 import base64
 import binascii
 import hashlib
+from importlib.resources import files
 import json
 import platform
 import sys
+from pathlib import Path
+from zipfile import BadZipFile, ZipFile
 from importlib.metadata import Distribution, distributions
 from typing import TYPE_CHECKING
 
@@ -65,6 +68,53 @@ def _artifact_digest() -> str:
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
+def _file_digest(path: Path) -> str:
+    if not path.is_file():
+        raise ValueError(f"candidate wheel is not a file: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as artifact:
+        for chunk in iter(lambda: artifact.read(65536), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _fixture_digest() -> str:
+    fixture = files("m_agent.testing").joinpath("fixtures/core_lifecycle.json")
+    return "sha256:" + hashlib.sha256(fixture.read_bytes()).hexdigest()
+
+
+def _assert_installed_wheel_matches(artifact: Path, installed: Distribution) -> None:
+    try:
+        with ZipFile(artifact) as wheel:
+            wheel_members = {
+                name
+                for name in wheel.namelist()
+                if name.startswith("m_agent/") and not name.endswith("/")
+            }
+            if not wheel_members:
+                raise ValueError("candidate wheel does not contain m_agent")
+            record = installed.read_text("RECORD")
+            assert record is not None
+            installed_members = {
+                row[0]
+                for row in csv.reader(record.splitlines())
+                if len(row) == 3 and row[0].startswith("m_agent/")
+            }
+            if installed_members != wheel_members:
+                raise ValueError("installed m-agent package does not match candidate wheel")
+            for member in wheel_members:
+                installed_file = installed.locate_file(member)
+                if (
+                    not installed_file.is_file()
+                    or installed_file.read_bytes() != wheel.read(member)
+                ):
+                    raise ValueError(
+                        f"installed m-agent does not match candidate wheel: {member}"
+                    )
+    except BadZipFile as error:
+        raise ValueError("candidate wheel is not a valid zip archive") from error
+
+
 def _installation_kind() -> str:
     direct_url = _installed_distribution().read_text("direct_url.json")
     if direct_url:
@@ -77,12 +127,17 @@ def _installation_kind() -> str:
     return "wheel"
 
 
-def installed_identity() -> dict[str, str | dict[str, str]]:
+def installed_identity(
+    *, artifact: Path | None = None
+) -> dict[str, str | dict[str, str]]:
     """Return the installed distribution and host identity for a frozen Manifest."""
     installed = _installed_distribution()
+    if artifact is not None:
+        _assert_installed_wheel_matches(artifact, installed)
     return {
         "source_commit": SOURCE_COMMIT,
-        "artifact_digest": _artifact_digest(),
+        "artifact_digest": _file_digest(artifact) if artifact else _artifact_digest(),
+        "fixture_digest": _fixture_digest(),
         "environment": {
             "distribution": installed.metadata["Name"],
             "version": installed.version,
@@ -95,14 +150,21 @@ def installed_identity() -> dict[str, str | dict[str, str]]:
     }
 
 
-def validate_installed_identity(manifest: "AcceptanceManifest") -> None:
+def validate_installed_identity(
+    manifest: "AcceptanceManifest", *, artifact: Path
+) -> None:
     """Reject a Manifest whose claimed subject differs from this installation."""
-    measured = installed_identity()
+    installation = _installation_kind()
+    if installation != "wheel" or SOURCE_STATE != "clean":
+        raise ValueError("Acceptance Pack requires a clean wheel subject")
+    measured = installed_identity(artifact=artifact)
     mismatches: list[str] = []
     if manifest.source_commit != measured["source_commit"]:
         mismatches.append("source_commit")
     if manifest.artifact_digest != measured["artifact_digest"]:
         mismatches.append("artifact_digest")
+    if manifest.fixture_digest != measured["fixture_digest"]:
+        mismatches.append("fixture_digest")
     if dict(manifest.environment) != measured["environment"]:
         mismatches.append("environment")
     if mismatches:
