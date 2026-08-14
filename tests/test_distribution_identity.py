@@ -192,7 +192,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             payload = content.read() if content is not None else None
             if member.isfile() and member.name.endswith("/README.md"):
                 assert payload is not None
-                payload += b"\ncontrolled source tamper\n"
+                payload += b"\\ncontrolled source tamper\\n"
                 copied.size = len(payload)
             altered.addfile(copied, io.BytesIO(payload) if payload is not None else None)
     try:
