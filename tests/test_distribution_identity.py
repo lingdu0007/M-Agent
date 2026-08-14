@@ -466,8 +466,14 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         execution_checks=(reduced_check,),
         scenario="core-lifecycle",
         checks=(reduced_check,),
-        evidence_view={"run_succeeded": True},
-        independent_evidence={"fixture_digest": identity["fixture_digest"]},
+        evidence_view={
+            "core_lifecycle_authoritative_digest": reduced_check.evidence_digest,
+            "run_succeeded": True,
+        },
+        independent_evidence={
+            "core_lifecycle_independent_digest": identity["fixture_digest"],
+            "fixture_digest": identity["fixture_digest"],
+        },
     )
     reduced_bundle_path = Path(temporary_directory) / (
         reduced_bundle.content_digest.removeprefix("sha256:") + ".json"

@@ -25,6 +25,7 @@ from ._pack import (
     EXIT_INVALID_INVOCATION,
     EvidenceLevel,
     PackExecution,
+    PackExecutionStatus,
     ScenarioEvidenceBundle,
     core_lifecycle_manifest,
 )
@@ -167,6 +168,9 @@ async def observe():
 asyncio.run(observe())
 """
 
+_RUN_STATE_FILE = ".core-lifecycle-running.json"
+_RUN_STATE_SCHEMA_VERSION = "1"
+
 
 def _read_manifest(path: Path) -> AcceptanceManifest:
     return AcceptanceManifest.model_validate_json(path.read_text())
@@ -206,13 +210,131 @@ def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
     return bundle
 
 
+def _state_digest(payload: object) -> str:
+    canonical = json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _run_state_path(output_dir: Path) -> Path:
+    return output_dir / _RUN_STATE_FILE
+
+
+def _write_run_state(
+    output_dir: Path,
+    manifest: AcceptanceManifest,
+    execution: PackExecution,
+    bundle: ScenarioEvidenceBundle | None = None,
+) -> None:
+    """Atomically persist the one Scenario that this thin CLI can resume."""
+    payload: dict[str, object] = {
+        "schema_version": _RUN_STATE_SCHEMA_VERSION,
+        "manifest": manifest.model_dump(mode="json"),
+        "manifest_digest": manifest.digest,
+        "execution": execution.model_dump(mode="json"),
+    }
+    if bundle is not None:
+        bundle.verify(manifest, execution)
+        payload["bundle"] = bundle.model_dump(mode="json")
+    state = {**payload, "content_digest": _state_digest(payload)}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = _run_state_path(output_dir)
+    temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+    with temporary.open("x", encoding="utf-8") as output:
+        output.write(json.dumps(state, ensure_ascii=True, sort_keys=True) + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+
+
+def _load_run_state(
+    output_dir: Path, manifest: AcceptanceManifest
+) -> tuple[PackExecution, ScenarioEvidenceBundle | None] | None:
+    path = _run_state_path(output_dir)
+    if not path.exists():
+        return None
+    try:
+        state = json.loads(path.read_text())
+        if not isinstance(state, dict):
+            raise ValueError("Pack state is not an object")
+        content_digest = state.pop("content_digest")
+        if not isinstance(content_digest, str) or content_digest != _state_digest(state):
+            raise ValueError("Pack state content digest does not match")
+        has_bundle = "bundle" in state
+        expected = {
+            "schema_version",
+            "manifest",
+            "manifest_digest",
+            "execution",
+        } | ({"bundle"} if has_bundle else set())
+        if set(state) != expected or state["schema_version"] != _RUN_STATE_SCHEMA_VERSION:
+            raise ValueError("Pack state schema is unsupported")
+        saved_manifest = AcceptanceManifest.model_validate(state["manifest"])
+        if saved_manifest != manifest or state["manifest_digest"] != manifest.digest:
+            raise ValueError("Pack state belongs to a different Manifest")
+        execution = PackExecution.model_validate(state["execution"])
+        execution.assert_matches(manifest)
+        if has_bundle:
+            bundle = ScenarioEvidenceBundle.model_validate(state["bundle"])
+            bundle.verify(manifest, execution)
+            return execution, bundle
+        if execution.status is not PackExecutionStatus.RUNNING:
+            raise ValueError("Pack state is not resumable")
+        return execution, None
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise BundleIntegrityError(f"Pack state is invalid: {error}") from error
+
+
+def _clear_run_state(output_dir: Path) -> None:
+    _run_state_path(output_dir).unlink(missing_ok=True)
+
+
+def _attest_declared_evidence(
+    manifest: AcceptanceManifest,
+    results: tuple[AcceptanceCheckResult, ...],
+    evidence_view: dict[str, str | int | float | bool | None],
+    independent_evidence: dict[str, str | int | float | bool | None],
+    *,
+    host_observation_digest: str,
+) -> tuple[
+    dict[str, str | int | float | bool | None],
+    dict[str, str | int | float | bool | None],
+]:
+    """Attach every frozen evidence slot to the result it actually attests."""
+    declared = {check.check_id: check for check in manifest.required_checks}
+    authoritative = dict(evidence_view)
+    independent = dict(independent_evidence)
+    for result in results:
+        check = declared[result.check_id]
+        authoritative[check.authoritative_evidence] = result.evidence_digest
+        independent[check.independent_evidence] = (
+            manifest.fixture_digest
+            if check.check_id
+            in {"core.lifecycle", "core.lifecycle.bundle-tamper", "core.lifecycle.host-wheel"}
+            else host_observation_digest
+        )
+    return authoritative, independent
+
+
 def _run(arguments: argparse.Namespace) -> int:
     manifest = _read_manifest(arguments.manifest)
     validate_installed_identity(manifest, artifact=arguments.wheel, sdist=arguments.sdist)
     _assert_core_lifecycle_manifest(manifest)
-    execution = PackExecution.create(
-        manifest, execution_id=f"core-lifecycle-{uuid4().hex}"
-    ).start(manifest)
+    prior = _load_run_state(arguments.output_dir, manifest)
+    if prior is not None and prior[1] is not None:
+        execution, bundle = prior
+        _publish_bundle(arguments.output_dir, bundle)
+        _clear_run_state(arguments.output_dir)
+        return execution.exit_code or 0
+    execution = (
+        prior[0]
+        if prior is not None
+        else PackExecution.create(
+            manifest, execution_id=f"core-lifecycle-{uuid4().hex}"
+        ).start(manifest)
+    )
+    _write_run_state(arguments.output_dir, manifest, execution)
     checks, evidence_view, independent_evidence = asyncio.run(
         run_core_lifecycle(fixture_digest=manifest.fixture_digest)
     )
@@ -231,6 +353,13 @@ def _run(arguments: argparse.Namespace) -> int:
     )
     all_checks = (*checks, host_result, mutation_result)
     completed = execution.complete(manifest, all_checks)
+    evidence_view, independent_evidence = _attest_declared_evidence(
+        manifest,
+        all_checks,
+        evidence_view,
+        {**independent_evidence, **host_evidence},
+        host_observation_digest=str(host_evidence["host_observation_digest"]),
+    )
     candidate = ScenarioEvidenceBundle.create(
         manifest=manifest,
         execution=completed,
@@ -238,7 +367,7 @@ def _run(arguments: argparse.Namespace) -> int:
         scenario="core-lifecycle",
         checks=all_checks,
         evidence_view=evidence_view,
-        independent_evidence={**independent_evidence, **host_evidence},
+        independent_evidence=independent_evidence,
     )
     tampered = candidate.model_copy(
         update={"evidence_view": {**candidate.evidence_view, "run_succeeded": False}}
@@ -249,7 +378,9 @@ def _run(arguments: argparse.Namespace) -> int:
         bundle = candidate
     else:
         raise RuntimeError("controlled Bundle mutation was not detected")
+    _write_run_state(arguments.output_dir, manifest, completed, candidate)
     _publish_bundle(arguments.output_dir, bundle)
+    _clear_run_state(arguments.output_dir)
     return completed.exit_code or 0
 
 
