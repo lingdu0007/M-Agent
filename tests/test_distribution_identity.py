@@ -156,6 +156,8 @@ from m_agent.testing import (
 assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 wheel = Path(sys.argv[1])
 sdist = Path(sys.argv[2])
+with zipfile.ZipFile(wheel) as candidate:
+    assert "m_agent/_sqlite_store.py" not in candidate.namelist()
 identity = installed_identity(artifact=wheel, sdist=sdist)
 assert identity["environment"]["installation"] == "wheel"
 assert identity["source_commit"] not in {"development", "unavailable"}

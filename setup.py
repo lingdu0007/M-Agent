@@ -117,6 +117,12 @@ class build_py(_build_py):
     """Replace the source-checkout fallback only in the generated wheel tree."""
 
     def run(self) -> None:
+        package = Path(self.build_lib) / "m_agent"
+        source = _ROOT / "src" / "m_agent"
+        if package.is_dir():
+            for module in package.rglob("*.py"):
+                if not (source / module.relative_to(package)).is_file():
+                    module.unlink()
         super().run()
         _write_build_identity(Path(self.build_lib) / "m_agent" / "_build_identity.py")
 
