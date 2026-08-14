@@ -376,7 +376,9 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
             telemetry_sink=sink,
         )
         created = await runner.create_run(
-            "core-lifecycle", "1.0", "fixture " + _TELEMETRY_CANARIES[0]
+            "core-lifecycle",
+            "1.0",
+            "fixture " + _TELEMETRY_CANARIES[0] + " " + _TELEMETRY_CANARIES[2],
         )
         terminal = await runner.start_run(created.run_id)
         inspection = await runner.inspect_run(created.run_id)
