@@ -285,6 +285,12 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert bundle["execution"]["status"] == "PASSED"
     assert bundle["execution"]["exit_code"] == 0
     assert all(check["reason_code"] and check["evidence_digest"] for check in bundle["checks"])
+    checks_by_id = {check["check_id"]: check for check in bundle["checks"]}
+    for declared in manifest.required_checks:
+        result = checks_by_id[declared.check_id]
+        if result["status"] == "PASS":
+            assert bundle["evidence_view"][declared.authoritative_evidence] == result["evidence_digest"]
+            assert bundle["independent_evidence"][declared.independent_evidence].startswith("sha256:")
     assert any(
         check["check_id"] == "core.lifecycle.host-wheel"
         and check["evidence_level"] == "HOST"
@@ -296,7 +302,8 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     host_observation = {
         key.removeprefix("host_"): value
         for key, value in bundle["independent_evidence"].items()
-        if key.startswith("host_") and key != "host_observation_digest"
+        if key.startswith("host_")
+        and key not in {"host_observation_digest", "host_wheel_independent_digest"}
     }
     assert host_observation == {
         "module_under_prefix": True,
