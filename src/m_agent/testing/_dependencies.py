@@ -36,13 +36,19 @@ def find_runtime_dependency_violations(
             modules: list[str] = []
             if isinstance(node, ast.ImportFrom):
                 if node.level:
-                    modules.append(
+                    module = (
                         importlib.util.resolve_name(
                             "." * node.level + (node.module or ""), package
                         )
                     )
                 elif node.module:
-                    modules.append(node.module)
+                    module = node.module
+                else:
+                    module = ""
+                if module.startswith(_FORBIDDEN_PREFIXES):
+                    modules.append(module)
+                else:
+                    modules.extend(f"{module}.{alias.name}" for alias in node.names)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     modules.append(alias.name)

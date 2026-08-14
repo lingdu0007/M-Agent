@@ -205,7 +205,7 @@ def _isolated_host_result() -> tuple[AcceptanceCheckResult, dict[str, str]]:
     digest = "sha256:" + hashlib.sha256(
         json.dumps(observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    passed = observation == {
+    expected_observation = {
         "module_under_prefix": True,
         "run_succeeded": True,
         "step_count": 1,
@@ -215,15 +215,32 @@ def _isolated_host_result() -> tuple[AcceptanceCheckResult, dict[str, str]]:
         "public_layers_available": True,
         "runtime_dependency_violation_count": 0,
     }
+    valid_observation = set(observation) == set(expected_observation) and all(
+        type(observation[key]) is type(expected)
+        for key, expected in expected_observation.items()
+    )
+    status = (
+        AcceptanceCheckStatus.ERROR
+        if not valid_observation
+        else (
+            AcceptanceCheckStatus.PASS
+            if observation == expected_observation
+            else AcceptanceCheckStatus.FAIL
+        )
+    )
     return (
         AcceptanceCheckResult(
             check_id="core.lifecycle.host-wheel",
-            status=AcceptanceCheckStatus.PASS if passed else AcceptanceCheckStatus.ERROR,
+            status=status,
             evidence_level=EvidenceLevel.HOST,
             reason_code=(
                 "isolated_wheel_lifecycle_observed"
-                if passed
-                else "isolated_wheel_lifecycle_error"
+                if status is AcceptanceCheckStatus.PASS
+                else (
+                    "isolated_wheel_lifecycle_failed"
+                    if status is AcceptanceCheckStatus.FAIL
+                    else "isolated_wheel_lifecycle_error"
+                )
             ),
             evidence_digest=digest,
         ),

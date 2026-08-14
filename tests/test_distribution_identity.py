@@ -328,6 +328,63 @@ print("m-agent Foundation wheel contract passed")
 """
 
 
+_HOST_SUBJECT_FAILURE_PROBE = """
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from m_agent.testing import AcceptanceCheck, AcceptanceManifest, EvidenceLevel, installed_identity
+
+wheel = Path(sys.argv[1])
+identity = installed_identity(artifact=wheel)
+manifest = AcceptanceManifest(
+    pack_version="0.3.0",
+    profile="0.3",
+    source_commit=identity["source_commit"],
+    artifact_digest=identity["artifact_digest"],
+    fixture_digest=identity["fixture_digest"],
+    environment=identity["environment"],
+    scenarios=("core-lifecycle",),
+    required_checks=tuple(
+        AcceptanceCheck(check_id=check_id, scenario="core-lifecycle", public_seam=seam, evidence_level=level)
+        for check_id, seam, level in (
+            ("core.lifecycle", "m_agent.runtime.Runner", EvidenceLevel.CONTRACT),
+            ("core.lifecycle.unknown-definition", "m_agent.runtime.DefinitionRegistry", EvidenceLevel.CONTRACT),
+            ("core.lifecycle.public-namespaces", "m_agent.runtime,m_agent.adapters,m_agent.companion,m_agent.testing", EvidenceLevel.CONTRACT),
+            ("core.lifecycle.dependency-direction", "m_agent.testing.find_runtime_dependency_violations", EvidenceLevel.CONTRACT),
+            ("core.lifecycle.expand-compatibility", "m_agent,m_agent.runtime", EvidenceLevel.CONTRACT),
+            ("core.lifecycle.host-wheel", "python -I -m m_agent.testing", EvidenceLevel.HOST),
+            ("core.lifecycle.bundle-tamper", "m_agent.testing.ScenarioEvidenceBundle", EvidenceLevel.CONTRACT),
+        )
+    ),
+)
+with tempfile.TemporaryDirectory() as temporary_directory:
+    manifest_path = Path(temporary_directory) / "manifest.json"
+    manifest_path.write_text(manifest.model_dump_json())
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "m_agent.testing",
+            "run",
+            "--manifest",
+            str(manifest_path),
+            "--wheel",
+            str(wheel),
+            "--output-dir",
+            str(Path(temporary_directory) / "bundles"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 1, completed.stderr
+print("m-agent HOST subject failure contract passed")
+"""
+
+
 class DistributionIdentityTests(unittest.TestCase):
     def test_built_m_agent_distribution_runs_public_runner_in_clean_environment(
         self,
@@ -447,6 +504,84 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent Foundation wheel contract passed", output)
+
+    def test_foundation_cli_reports_host_subject_failures_as_exit_one(self) -> None:
+        """A valid HOST observation with a false subject conclusion is a failure."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            archive = temporary_root / "source.tar"
+            source_root = temporary_root / "source"
+            source_root.mkdir()
+            clean_environment = _clean_environment()
+            if (_ROOT / ".git").exists():
+                _run(
+                    ["git", "archive", "--format=tar", "--output", str(archive), "HEAD"],
+                    cwd=_ROOT,
+                    env=clean_environment,
+                )
+                _run(
+                    ["tar", "-xf", str(archive), "-C", str(source_root)],
+                    cwd=temporary_root,
+                    env=clean_environment,
+                )
+            else:
+                shutil.copytree(
+                    _ROOT,
+                    source_root,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(".venv", ".pytest_cache", "__pycache__"),
+                )
+            entrypoint = source_root / "src" / "m_agent" / "testing" / "__main__.py"
+            source = (_ROOT / "src" / "m_agent" / "testing" / "__main__.py").read_text()
+            changed = source.replace(
+                '"run_succeeded": terminal.status is RunStatus.SUCCEEDED,',
+                '"run_succeeded": False,',
+                1,
+            )
+            self.assertNotEqual(changed, source)
+            entrypoint.write_text(changed)
+
+            dist_dir = temporary_root / "dist"
+            _run(
+                ["uv", "build", "--offline", "--wheel", "--out-dir", str(dist_dir)],
+                cwd=source_root,
+                env=clean_environment,
+            )
+            wheel = next(dist_dir.glob("*.whl"))
+            environment_dir = temporary_root / "environment"
+            _run(
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            python = environment_dir / "bin" / "python"
+            _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--python",
+                    str(python),
+                    str(wheel),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            output = _run(
+                [str(python), "-I", "-c", _HOST_SUBJECT_FAILURE_PROBE, str(wheel)],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            self.assertIn("m-agent HOST subject failure contract passed", output)
 
     def test_built_sdist_runs_flagship_against_installed_m_agent(self) -> None:
         """The packaged flagship uses the installed runtime, never checkout src."""

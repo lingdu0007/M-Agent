@@ -192,6 +192,32 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertEqual(first.digest, "sha256:" + expected)
         self.assertEqual(first.digest, second.digest)
 
+    def test_manifest_environment_identity_is_immutable(self) -> None:
+        """A frozen Manifest cannot drift through its nested environment mapping."""
+        from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit="source",
+            artifact_digest="artifact",
+            fixture_digest="fixture",
+            environment={"python": "3.11"},
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                AcceptanceCheck(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
+        )
+
+        digest = manifest.digest
+        with self.assertRaises(TypeError):
+            manifest.environment["python"] = "3.12"  # type: ignore[index]
+        self.assertEqual(manifest.digest, digest)
+
     def test_bundle_verification_detects_tampering_and_sensitive_views(self) -> None:
         from m_agent.testing import (
             AcceptanceCheck,
@@ -554,6 +580,21 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
 
         self.assertEqual(len(violations), 1)
         self.assertIn("m_agent.adapters", violations[0])
+
+        for source in (
+            "from .. import adapters\n",
+            "from m_agent import adapters\n",
+        ):
+            with self.subTest(source=source):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    source_root = Path(temporary_directory)
+                    runtime_directory = source_root / "m_agent" / "runtime"
+                    runtime_directory.mkdir(parents=True)
+                    (runtime_directory / "__init__.py").write_text(source)
+                    violations = find_runtime_dependency_violations(source_root)
+
+                self.assertEqual(len(violations), 1)
+                self.assertIn("m_agent.adapters", violations[0])
 
     def test_cli_refuses_editable_development_subjects(self) -> None:
         """Release evidence can only be produced by a clean installed wheel."""

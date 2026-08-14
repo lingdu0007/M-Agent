@@ -119,7 +119,12 @@ class AcceptanceManifest(BaseModel, frozen=True):
             raise ValueError(
                 "Manifest required checks must be required and name a declared Scenario"
             )
+        object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
         return self
+
+    @field_serializer("environment")
+    def _serialize_environment(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
 
     def canonical_bytes(self) -> bytes:
         payload = self.model_dump(mode="json")
