@@ -9,12 +9,15 @@ import hashlib
 from importlib.resources import files
 import json
 import platform
-import re
 import sys
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 from importlib.metadata import Distribution, PackageNotFoundError, distribution, distributions
 from typing import TYPE_CHECKING
+
+from packaging.markers import default_environment
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 from m_agent._build_identity import (
     BUILD_TOOL,
@@ -28,7 +31,6 @@ if TYPE_CHECKING:
 
 
 _DISTRIBUTION_NAME = "m-agent"
-_DEPENDENCY_NAME = re.compile(r"\s*([A-Za-z0-9_.-]+)")
 _INSTALLER_METADATA = {
     "RECORD",
     "INSTALLER",
@@ -97,31 +99,72 @@ def _fixture_digest() -> str:
     return "sha256:" + hashlib.sha256(fixture.read_bytes()).hexdigest()
 
 
-def _dependency_summary(installed: Distribution) -> str:
-    """Digest the installed runtime dependency closure, excluding optional extras."""
+def _runtime_dependencies(installed: Distribution) -> dict[str, str]:
+    """Measure the active, non-extra runtime dependency closure."""
     pending = list(installed.requires or ())
     observed: dict[str, str] = {}
+    environment = default_environment()
+    environment["extra"] = ""
     while pending:
-        requirement = pending.pop()
-        if ";" in requirement:
+        try:
+            requirement = Requirement(pending.pop())
+        except InvalidRequirement as error:
+            raise ValueError("m-agent dependency metadata is malformed") from error
+        if requirement.marker is not None and not requirement.marker.evaluate(environment):
             continue
-        match = _DEPENDENCY_NAME.match(requirement)
-        if match is None:
-            raise ValueError("m-agent dependency metadata is malformed")
-        name = match.group(1)
-        normalized = re.sub(r"[-_.]+", "-", name).lower()
+        normalized = canonicalize_name(requirement.name)
         if normalized in observed:
             continue
         try:
-            dependency = distribution(name)
+            dependency = distribution(requirement.name)
         except PackageNotFoundError as error:
-            raise ValueError(f"m-agent runtime dependency is unavailable: {name}") from error
+            raise ValueError(
+                f"m-agent runtime dependency is unavailable: {requirement.name}"
+            ) from error
         observed[normalized] = dependency.version
         pending.extend(dependency.requires or ())
+    return observed
+
+
+def _dependency_summary(installed: Distribution) -> str:
+    """Digest the active runtime dependency closure."""
     canonical = json.dumps(
-        observed, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        _runtime_dependencies(installed),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _installed_distribution_versions() -> dict[str, str]:
+    observed: dict[str, str] = {}
+    for candidate in distributions():
+        name = candidate.metadata.get("Name")
+        if name:
+            observed[canonicalize_name(name)] = candidate.version
+    return observed
+
+
+def _distribution_summary(versions: dict[str, str]) -> str:
+    canonical = json.dumps(
+        versions, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _assert_fresh_external_environment(installed: Distribution) -> None:
+    prefix = Path(sys.prefix).resolve()
+    if prefix == Path(sys.base_prefix).resolve() or any(
+        (ancestor / ".git").exists() for ancestor in (prefix, *prefix.parents)
+    ):
+        raise ValueError("Acceptance Pack requires an external virtual environment")
+    allowed = set(_runtime_dependencies(installed)) | {canonicalize_name(_DISTRIBUTION_NAME)}
+    foreign = sorted(set(_installed_distribution_versions()) - allowed)
+    if foreign:
+        raise ValueError(
+            "Acceptance Pack requires a fresh environment: " + ", ".join(foreign)
+        )
 
 
 def _assert_installed_wheel_matches(artifact: Path, installed: Distribution) -> None:
@@ -193,6 +236,7 @@ def installed_identity(
     installed = _installed_distribution()
     if artifact is not None:
         _assert_installed_wheel_matches(artifact, installed)
+    installed_versions = _installed_distribution_versions()
     return {
         "source_commit": SOURCE_COMMIT,
         "artifact_digest": _file_digest(artifact) if artifact else _artifact_digest(),
@@ -207,6 +251,9 @@ def installed_identity(
             "source_state": SOURCE_STATE,
             "build_tool": f"{BUILD_TOOL}=={BUILD_TOOL_VERSION}",
             "dependency_summary": _dependency_summary(installed),
+            "installed_distribution_summary": _distribution_summary(installed_versions),
+            "environment_prefix_digest": "sha256:"
+            + hashlib.sha256(str(Path(sys.prefix).resolve()).encode("utf-8")).hexdigest(),
         },
     }
 
@@ -218,6 +265,7 @@ def validate_installed_identity(
     installation = _installation_kind()
     if installation != "wheel" or SOURCE_STATE != "clean":
         raise ValueError("Acceptance Pack requires a clean wheel subject")
+    _assert_fresh_external_environment(_installed_distribution())
     measured = installed_identity(artifact=artifact)
     mismatches: list[str] = []
     if manifest.source_commit != measured["source_commit"]:

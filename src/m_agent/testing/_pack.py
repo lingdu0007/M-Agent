@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 _SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _EVIDENCE_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _MANIFEST_SCHEMA_VERSION = "1"
-_BUNDLE_SCHEMA_VERSION = "3"
+_BUNDLE_SCHEMA_VERSION = "4"
 
 
 class EvidenceLevel(StrEnum):
@@ -249,6 +249,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: str = _BUNDLE_SCHEMA_VERSION
+    manifest: AcceptanceManifest
     manifest_digest: str
     execution: PackExecution
     execution_checks: tuple[AcceptanceCheckResult, ...]
@@ -360,6 +361,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         cls,
         *,
         schema_version: str,
+        manifest: AcceptanceManifest,
         manifest_digest: str,
         execution: PackExecution,
         execution_checks: tuple[AcceptanceCheckResult, ...],
@@ -370,6 +372,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
     ) -> str:
         payload = {
             "schema_version": schema_version,
+            "manifest": manifest.model_dump(mode="json"),
             "manifest_digest": manifest_digest,
             "execution": execution.model_dump(mode="json"),
             "execution_checks": [
@@ -414,6 +417,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         cls._ensure_minimal_evidence(independent_evidence)
         digest = cls._digest_payload(
             schema_version=_BUNDLE_SCHEMA_VERSION,
+            manifest=manifest,
             manifest_digest=manifest.digest,
             execution=execution,
             execution_checks=execution_checks,
@@ -424,6 +428,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         )
         return cls(
             schema_version=_BUNDLE_SCHEMA_VERSION,
+            manifest=manifest,
             manifest_digest=manifest.digest,
             execution=execution,
             execution_checks=execution_checks,
@@ -436,22 +441,27 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
 
     def verify(
         self,
-        manifest: AcceptanceManifest,
+        manifest: AcceptanceManifest | None = None,
         execution: PackExecution | None = None,
     ) -> None:
         try:
+            declared_manifest = self.manifest
+            if manifest is not None and manifest.digest != declared_manifest.digest:
+                raise BundleIntegrityError("Bundle does not match supplied Manifest")
             if execution is not None and execution != self.execution:
                 raise BundleIntegrityError("Bundle execution does not match supplied execution")
             if self.schema_version != _BUNDLE_SCHEMA_VERSION:
                 raise BundleIntegrityError("Scenario Evidence Bundle schema version is unsupported")
-            if self.manifest_digest != manifest.digest:
+            if self.manifest_digest != declared_manifest.digest:
                 raise BundleIntegrityError("Bundle Manifest digest does not match")
             self._assert_terminal_execution(
-                manifest, self.execution, self.execution_checks
+                declared_manifest, self.execution, self.execution_checks
             )
-            self._assert_declared_checks(manifest, self.scenario, self.checks)
+            if self.scenario not in declared_manifest.scenarios:
+                raise ValueError(f"scenario {self.scenario!r} is not declared by Manifest")
+            self._assert_declared_checks(declared_manifest, self.scenario, self.checks)
             self._assert_minimal_check_results(self.checks)
-            self._assert_execution_checks(manifest, self.execution_checks)
+            self._assert_execution_checks(declared_manifest, self.execution_checks)
             self._assert_minimal_check_results(self.execution_checks)
             self._ensure_minimal_evidence(self.evidence_view)
             if not self.independent_evidence:
@@ -463,6 +473,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
             raise BundleIntegrityError(str(error)) from error
         expected = self._digest_payload(
             schema_version=self.schema_version,
+            manifest=self.manifest,
             manifest_digest=self.manifest_digest,
             execution=self.execution,
             execution_checks=self.execution_checks,

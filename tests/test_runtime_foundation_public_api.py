@@ -278,6 +278,8 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             evidence_view={"run_succeeded": True, "step_count": 1},
             independent_evidence={"fixture_digest": "sha256:" + "f" * 64},
         )
+        self.assertEqual(bundle.manifest, manifest)
+        bundle.verify()
         bundle.verify(manifest, execution)
         with self.assertRaises(TypeError):
             bundle.evidence_view["run_succeeded"] = False
@@ -286,7 +288,18 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         )
         with self.assertRaises(BundleIntegrityError):
             tampered.verify(manifest, execution)
-        schema_tampered = bundle.model_copy(update={"schema_version": "4"})
+        undeclared = bundle.model_dump(mode="json")
+        undeclared["scenario"] = "undeclared-scenario"
+        undeclared["checks"] = []
+        digest_payload = {key: value for key, value in undeclared.items() if key != "content_digest"}
+        undeclared["content_digest"] = "sha256:" + hashlib.sha256(
+            json.dumps(
+                digest_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        with self.assertRaises(BundleIntegrityError):
+            ScenarioEvidenceBundle.model_validate(undeclared).verify(manifest)
+        schema_tampered = bundle.model_copy(update={"schema_version": "5"})
         with self.assertRaises(BundleIntegrityError):
             schema_tampered.verify(manifest, execution)
         redaction_tampered = bundle.model_copy(
@@ -581,9 +594,14 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("m_agent.adapters", violations[0])
 
-        for source in (
-            "from .. import adapters\n",
-            "from m_agent import adapters\n",
+        for source, expected_module in (
+            ("from .. import adapters\n", "m_agent.adapters"),
+            ("from m_agent import adapters\n", "m_agent.adapters"),
+            ("__import__('m_agent.adapters')\n", "m_agent.adapters"),
+            (
+                "import importlib\nimportlib.import_module('m_agent.testing')\n",
+                "m_agent.testing",
+            ),
         ):
             with self.subTest(source=source):
                 with tempfile.TemporaryDirectory() as temporary_directory:
@@ -594,7 +612,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                     violations = find_runtime_dependency_violations(source_root)
 
                 self.assertEqual(len(violations), 1)
-                self.assertIn("m_agent.adapters", violations[0])
+                self.assertIn(expected_module, violations[0])
 
     def test_cli_refuses_editable_development_subjects(self) -> None:
         """Release evidence can only be produced by a clean installed wheel."""

@@ -232,6 +232,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert bundle_path.parent == output_dir
     bundle = json.loads(bundle_path.read_text())
     assert bundle_path.stem == bundle["content_digest"].removeprefix("sha256:")
+    assert bundle["manifest"] == manifest.model_dump(mode="json")
     assert bundle["execution"]["status"] == "PASSED"
     assert bundle["execution"]["exit_code"] == 0
     assert all(check["reason_code"] and check["evidence_digest"] for check in bundle["checks"])
@@ -290,6 +291,9 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "--bundle", str(bundle_path),
     )
     assert completed.returncode == 0, completed.stderr
+    for command in ("inspect", "verify", "render"):
+        completed = invoke(command, "--wheel", str(wheel), "--bundle", str(bundle_path))
+        assert completed.returncode == 0, completed.stderr
 
     bundle["checks"][0]["status"] = "FAIL"
     bundle_path.write_text(json.dumps(bundle))
@@ -323,6 +327,20 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             "--output-dir", str(output_dir),
         )
         assert completed.returncode == 2, completed.stderr
+
+    manifest_path.write_text(manifest.model_dump_json())
+    completed = subprocess.run(
+        ["uv", "pip", "install", "--offline", "--python", sys.executable, "pytest"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    completed = invoke(
+        "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--output-dir", str(output_dir),
+    )
+    assert completed.returncode == 2, completed.stderr
 assert metadata("m-agent")["Name"] == "m-agent"
 print("m-agent Foundation wheel contract passed")
 """
@@ -382,6 +400,18 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     )
     assert completed.returncode == 1, completed.stderr
 print("m-agent HOST subject failure contract passed")
+"""
+
+
+_TAMPERED_SOURCE_PROBE = """
+import sys
+from pathlib import Path
+
+from m_agent.testing import installed_identity
+
+identity = installed_identity(artifact=Path(sys.argv[1]))
+assert identity["environment"]["source_state"] == "dirty"
+print("m-agent modified archive provenance rejected")
 """
 
 
@@ -540,6 +570,14 @@ class DistributionIdentityTests(unittest.TestCase):
             )
             self.assertNotEqual(changed, source)
             entrypoint.write_text(changed)
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "ticket07@example.invalid"],
+                ["git", "config", "user.name", "Ticket 07"],
+                ["git", "add", "--all"],
+                ["git", "commit", "-qm", "controlled host subject failure"],
+            ):
+                _run(command, cwd=source_root, env=clean_environment)
 
             dist_dir = temporary_root / "dist"
             _run(
@@ -582,6 +620,68 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent HOST subject failure contract passed", output)
+
+    def test_modified_exported_source_cannot_claim_clean_provenance(self) -> None:
+        """A changed Git-less export is never a clean reviewed source subject."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            source_root = temporary_root / "source"
+            source_root.mkdir()
+            archive = temporary_root / "source.tar"
+            clean_environment = _clean_environment()
+            _run(
+                ["git", "archive", "--format=tar", "--output", str(archive), "HEAD"],
+                cwd=_ROOT,
+                env=clean_environment,
+            )
+            _run(
+                ["tar", "-xf", str(archive), "-C", str(source_root)],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            runtime_module = source_root / "src" / "m_agent" / "runtime" / "__init__.py"
+            runtime_module.write_text(runtime_module.read_text() + "\nPROVENANCE_TAMPER_MARKER = True\n")
+            dist_dir = temporary_root / "dist"
+            _run(
+                ["uv", "build", "--offline", "--wheel", "--out-dir", str(dist_dir)],
+                cwd=source_root,
+                env=clean_environment,
+            )
+            wheel = next(dist_dir.glob("*.whl"))
+            environment_dir = temporary_root / "environment"
+            _run(
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            python = environment_dir / "bin" / "python"
+            _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--python",
+                    str(python),
+                    str(wheel),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            output = _run(
+                [str(python), "-I", "-c", _TAMPERED_SOURCE_PROBE, str(wheel)],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            self.assertIn("m-agent modified archive provenance rejected", output)
 
     def test_built_sdist_runs_flagship_against_installed_m_agent(self) -> None:
         """The packaged flagship uses the installed runtime, never checkout src."""

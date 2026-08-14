@@ -32,6 +32,20 @@ def find_runtime_dependency_violations(
         parts = relative.with_suffix("").parts
         package_parts = parts[:-1]
         package = ".".join(("m_agent", *package_parts))
+        importlib_names = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name == "importlib"
+        }
+        import_module_names = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "importlib"
+            for alias in node.names
+            if alias.name == "import_module"
+        }
         for node in ast.walk(tree):
             modules: list[str] = []
             if isinstance(node, ast.ImportFrom):
@@ -52,6 +66,21 @@ def find_runtime_dependency_violations(
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     modules.append(alias.name)
+            elif (
+                isinstance(node, ast.Call)
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id in {"__import__", *import_module_names}
+                    or isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in importlib_names
+                    and node.func.attr == "import_module"
+                )
+            ):
+                modules.append(node.args[0].value)
             for module in modules:
                 if module.startswith(_FORBIDDEN_PREFIXES):
                     violations.append(f"{path}: import {module}")
