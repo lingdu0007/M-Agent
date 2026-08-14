@@ -531,6 +531,20 @@ print("m-agent HOST subject failure contract passed")
 """
 
 
+_SDIST_DERIVED_WHEEL_IDENTITY_PROBE = """
+import sys
+
+from m_agent.testing import installed_identity
+
+
+identity = installed_identity()
+assert identity["source_commit"] == sys.argv[1], identity
+assert identity["environment"]["source_state"] == "clean", identity
+assert identity["environment"]["installation"] == "wheel", identity
+print("m-agent sdist-derived wheel identity passed")
+"""
+
+
 _EXPAND_COMPATIBILITY_FAILURE_PROBE = """
 import json
 import subprocess
@@ -739,6 +753,117 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent Foundation wheel contract passed", output)
+
+    def test_clean_sdist_builds_a_wheel_with_public_clean_identity(self) -> None:
+        """The normal clean source-distribution release path remains a HOST subject."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository_root = temporary_root / "repository"
+            shutil.copytree(
+                _ROOT,
+                repository_root,
+                ignore=shutil.ignore_patterns(
+                    ".git", ".venv", ".pytest_cache", "__pycache__", "build", "dist"
+                ),
+            )
+            clean_environment = _clean_environment()
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "ticket07@example.invalid"],
+                ["git", "config", "user.name", "Ticket 07"],
+                ["git", "add", "--all"],
+                ["git", "commit", "-qm", "clean sdist provenance subject"],
+            ):
+                _run(command, cwd=repository_root, env=clean_environment)
+            commit = _run(
+                ["git", "rev-parse", "HEAD"], cwd=repository_root, env=clean_environment
+            ).strip()
+            archive = temporary_root / "source.tar"
+            _run(
+                ["git", "archive", "--format=tar", "--output", str(archive), "HEAD"],
+                cwd=repository_root,
+                env=clean_environment,
+            )
+            source_root = temporary_root / "source"
+            source_root.mkdir()
+            _run(
+                ["tar", "-xf", str(archive), "-C", str(source_root)],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+
+            sdist_dir = temporary_root / "sdist"
+            _run(
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--sdist",
+                    "--out-dir",
+                    str(sdist_dir),
+                ],
+                cwd=source_root,
+                env=clean_environment,
+            )
+            sdist = next(sdist_dir.glob("*.tar.gz"))
+            extracted = temporary_root / "extracted"
+            shutil.unpack_archive(str(sdist), str(extracted))
+            extracted_root = next(extracted.iterdir())
+            wheel_dir = temporary_root / "wheel"
+            _run(
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--out-dir",
+                    str(wheel_dir),
+                ],
+                cwd=extracted_root,
+                env=clean_environment,
+            )
+            wheel = next(wheel_dir.glob("*.whl"))
+
+            environment_dir = temporary_root / "environment"
+            _run(
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            python = environment_dir / "bin" / "python"
+            _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--python",
+                    str(python),
+                    f"{wheel}[testing]",
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            output = _run(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    _SDIST_DERIVED_WHEEL_IDENTITY_PROBE,
+                    commit,
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            self.assertIn("m-agent sdist-derived wheel identity passed", output)
 
     def test_foundation_cli_reports_host_subject_failures_as_exit_one(self) -> None:
         """A valid HOST observation with a false subject conclusion is a failure."""

@@ -237,6 +237,72 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 ),
             )
 
+    def test_manifest_and_bundle_fail_closed_without_declared_identity_evidence(self) -> None:
+        """Public Pack schemas reject empty identity and unattested PASS evidence."""
+        from pydantic import ValidationError
+
+        from m_agent.testing import (
+            AcceptanceManifest,
+            EvidenceLevel,
+            PackExecution,
+            ScenarioEvidenceBundle,
+        )
+
+        with self.assertRaises(ValidationError):
+            self._acceptance_check(
+                check_id="core.lifecycle",
+                scenario="core-lifecycle",
+                public_seam="",
+            )
+
+        required_check = self._acceptance_check(
+            check_id="core.lifecycle",
+            scenario="core-lifecycle",
+            public_seam="m_agent.runtime.Runner",
+        )
+        common = {
+            "pack_version": "foundation-v1",
+            "profile": "core-lifecycle-foundation",
+            "source_commit": "source",
+            "artifact_digest": "artifact",
+            "sdist_digest": "sdist",
+            "fixture_digest": "fixture",
+            "environment": {"python": "3.11"},
+            "scenarios": ("core-lifecycle",),
+            "required_checks": (required_check,),
+        }
+        for identity in (
+            "source_commit",
+            "artifact_digest",
+            "sdist_digest",
+            "fixture_digest",
+        ):
+            with self.subTest(identity=identity):
+                values = dict(common)
+                values[identity] = ""
+                with self.assertRaises(ValidationError):
+                    AcceptanceManifest(**values)
+        with self.assertRaises(ValidationError):
+            AcceptanceManifest(**{**common, "environment": {}})
+
+        manifest = AcceptanceManifest(**common)
+        result = self._check_result(
+            "core.lifecycle", evidence_level=EvidenceLevel.CONTRACT
+        )
+        execution = PackExecution.create(manifest, execution_id="exec-1").complete(
+            manifest, (result,)
+        )
+        with self.assertRaises(ValueError):
+            ScenarioEvidenceBundle.create(
+                manifest=manifest,
+                execution=execution,
+                execution_checks=(result,),
+                scenario="core-lifecycle",
+                checks=(result,),
+                evidence_view={"observed": True},
+                independent_evidence={"observed": True},
+            )
+
     def test_core_lifecycle_foundation_profile_freezes_coverage_declarations(self) -> None:
         """The only Ticket 07 profile is not a substitute for foundation-release."""
         from m_agent.testing import core_lifecycle_manifest
@@ -252,7 +318,11 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertEqual(manifest.profile, "core-lifecycle-foundation")
         self.assertEqual(manifest.pack_version, "foundation-v1")
         self.assertEqual(manifest.scenarios, ("core-lifecycle",))
-        self.assertEqual(len(manifest.required_checks), 7)
+        self.assertEqual(len(manifest.required_checks), 8)
+        self.assertIn(
+            "core.lifecycle.telemetry",
+            {check.check_id for check in manifest.required_checks},
+        )
         for check in manifest.required_checks:
             with self.subTest(check_id=check.check_id):
                 self.assertTrue(check.owner)
@@ -376,8 +446,15 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             execution_checks=(check,),
             scenario="core-lifecycle",
             checks=(check,),
-            evidence_view={"run_succeeded": True, "step_count": 1},
-            independent_evidence={"fixture_digest": "sha256:" + "f" * 64},
+            evidence_view={
+                "public_evidence": check.evidence_digest,
+                "run_succeeded": True,
+                "step_count": 1,
+            },
+            independent_evidence={
+                "independent_evidence": "sha256:" + "f" * 64,
+                "fixture_digest": "sha256:" + "f" * 64,
+            },
         )
         self.assertEqual(bundle.manifest, manifest)
         bundle.verify()
@@ -594,8 +671,14 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             execution_checks=(first, second),
             scenario="first",
             checks=(first,),
-            evidence_view={"first_succeeded": True},
-            independent_evidence={"host_observation_digest": "sha256:" + "f" * 64},
+            evidence_view={
+                "public_evidence": first.evidence_digest,
+                "first_succeeded": True,
+            },
+            independent_evidence={
+                "independent_evidence": "sha256:" + "f" * 64,
+                "host_observation_digest": "sha256:" + "f" * 64,
+            },
         )
 
         bundle.verify(manifest)
@@ -664,8 +747,14 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             execution_checks=(check,),
             scenario="core-lifecycle",
             checks=(check,),
-            evidence_view={"run_succeeded": True},
-            independent_evidence={"host_observation_digest": "sha256:" + "f" * 64},
+            evidence_view={
+                "public_evidence": check.evidence_digest,
+                "run_succeeded": True,
+            },
+            independent_evidence={
+                "independent_evidence": "sha256:" + "f" * 64,
+                "host_observation_digest": "sha256:" + "f" * 64,
+            },
         )
         serialized = bundle.model_dump(mode="json")
         serialized["schema_version"] = "unsupported-bundle-v999"
@@ -907,7 +996,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         for check_status, expected_status, expected_exit in (
             (AcceptanceCheckStatus.PASS, PackExecutionStatus.PASSED, 0),
             (AcceptanceCheckStatus.FAIL, PackExecutionStatus.FAILED, 1),
-            (AcceptanceCheckStatus.ERROR, PackExecutionStatus.ERROR, 3),
+            (AcceptanceCheckStatus.ERROR, PackExecutionStatus.FAILED, 1),
             (AcceptanceCheckStatus.NOT_RUN, PackExecutionStatus.INCOMPLETE, 4),
             (AcceptanceCheckStatus.INCONCLUSIVE, PackExecutionStatus.INCOMPLETE, 4),
         ):

@@ -75,6 +75,9 @@ class AcceptanceCheck(BaseModel, frozen=True):
     @model_validator(mode="after")
     def _validate_complete_coverage(self) -> "AcceptanceCheck":
         coverage = (
+            self.check_id,
+            self.scenario,
+            self.public_seam,
             self.owner,
             self.positive_check,
             self.negative_check,
@@ -85,6 +88,10 @@ class AcceptanceCheck(BaseModel, frozen=True):
         )
         if any(not value.strip() for value in coverage):
             raise ValueError("Acceptance Check coverage declarations must be nonempty")
+        if not _EVIDENCE_KEY.fullmatch(self.authoritative_evidence) or not _EVIDENCE_KEY.fullmatch(
+            self.independent_evidence
+        ):
+            raise ValueError("Acceptance Check evidence declarations must be stable keys")
         return self
 
 
@@ -129,8 +136,27 @@ class AcceptanceManifest(BaseModel, frozen=True):
     def _validate_frozen_declarations(self) -> "AcceptanceManifest":
         if self.schema_version != _MANIFEST_SCHEMA_VERSION:
             raise ValueError("Acceptance Manifest schema version is unsupported")
+        if any(
+            not value.strip()
+            for value in (
+                self.pack_version,
+                self.profile,
+                self.source_commit,
+                self.artifact_digest,
+                self.sdist_digest,
+                self.fixture_digest,
+            )
+        ):
+            raise ValueError("Manifest identity declarations must be nonempty")
+        if not self.environment or any(
+            not key.strip() or not value.strip()
+            for key, value in self.environment.items()
+        ):
+            raise ValueError("Manifest environment identity must be nonempty")
         if not self.scenarios or len(set(self.scenarios)) != len(self.scenarios):
             raise ValueError("Manifest scenarios must be nonempty and unique")
+        if any(not scenario.strip() for scenario in self.scenarios):
+            raise ValueError("Manifest scenario declarations must be nonempty")
         if not self.required_checks:
             raise ValueError("Manifest required checks must be nonempty")
         check_ids = [check.check_id for check in self.required_checks]
@@ -183,8 +209,8 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         public_seam="m_agent.runtime.Runner",
         positive_check="create_start_inspect_deterministic_run",
         negative_check="non_success_terminal_is_fail",
-        authoritative_evidence="public_runinspection_counts",
-        independent_evidence="fixture_digest_isolated_wheel_observation",
+        authoritative_evidence="core_lifecycle_authoritative_digest",
+        independent_evidence="core_lifecycle_independent_digest",
         milestone="foundation",
         non_claim="provider_or_production_execution",
     ),
@@ -195,8 +221,8 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         public_seam="m_agent.runtime.DefinitionRegistry",
         positive_check="unknown_definition_raises_public_error",
         negative_check="successful_unknown_resolution_is_fail",
-        authoritative_evidence="public_registry_result",
-        independent_evidence="isolated_wheel_observation_digest",
+        authoritative_evidence="unknown_definition_authoritative_digest",
+        independent_evidence="unknown_definition_independent_digest",
         milestone="foundation",
         non_claim="definition_persistence",
     ),
@@ -207,8 +233,8 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         public_seam="m_agent.runtime,m_agent.adapters,m_agent.companion,m_agent.testing",
         positive_check="four_public_namespaces_import",
         negative_check="missing_or_wrong_binding_is_fail",
-        authoritative_evidence="installed_wheel_import_view",
-        independent_evidence="isolated_wheel_observation_digest",
+        authoritative_evidence="public_namespaces_authoritative_digest",
+        independent_evidence="public_namespaces_independent_digest",
         milestone="foundation",
         non_claim="future_companion_capabilities",
     ),
@@ -219,8 +245,8 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         public_seam="m_agent.testing.find_runtime_dependency_violations",
         positive_check="installed_core_has_no_reverse_layer_import",
         negative_check="forbidden_import_is_fail",
-        authoritative_evidence="static_installed_core_scan",
-        independent_evidence="isolated_wheel_observation_digest",
+        authoritative_evidence="dependency_direction_authoritative_digest",
+        independent_evidence="dependency_direction_independent_digest",
         milestone="foundation",
         non_claim="dynamic_behavior_outside_core_files",
     ),
@@ -231,8 +257,8 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         public_seam="m_agent,m_agent.runtime",
         positive_check="all_0_2_root_exports_retain_semantic_bindings",
         negative_check="changed_binding_is_fail",
-        authoritative_evidence="public_import_identity",
-        independent_evidence="isolated_wheel_observation_digest",
+        authoritative_evidence="expand_compatibility_authoritative_digest",
+        independent_evidence="expand_compatibility_independent_digest",
         milestone="0_2_expand",
         non_claim="0_3_root_retention",
     ),
@@ -243,8 +269,8 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         public_seam="m_agent.testing.ScenarioEvidenceBundle",
         positive_check="controlled_bundle_mutation_is_detected",
         negative_check="undetected_mutation_is_harness_error",
-        authoritative_evidence="content_digest",
-        independent_evidence="measured_fixture_digest",
+        authoritative_evidence="bundle_tamper_authoritative_digest",
+        independent_evidence="bundle_tamper_independent_digest",
         milestone="foundation",
         non_claim="external_ledger_integrity",
     ),
@@ -255,11 +281,23 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         public_seam="python -I -m m_agent.testing",
         positive_check="exact_wheel_and_sdist_install_in_clean_external_venv",
         negative_check="source_artifact_fixture_or_environment_mismatch_is_rejected",
-        authoritative_evidence="wheel_and_sdist_sha256",
-        independent_evidence="isolated_sqlite_restart_observation",
+        authoritative_evidence="host_wheel_authoritative_digest",
+        independent_evidence="host_wheel_independent_digest",
         milestone="foundation",
         non_claim="live_provider_behavior",
         evidence_level=EvidenceLevel.HOST,
+    ),
+    AcceptanceCheck(
+        check_id="core.lifecycle.telemetry",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Runtime Adapter",
+        public_seam="m_agent.adapters.JsonlTelemetrySink",
+        positive_check="jsonl_events_correlate_to_public_run_inspection",
+        negative_check="payload_or_uncorrelated_event_is_fail",
+        authoritative_evidence="telemetry_authoritative_digest",
+        independent_evidence="telemetry_independent_digest",
+        milestone="foundation",
+        non_claim="external_collector_or_store_authority",
     ),
 )
 
@@ -358,9 +396,7 @@ class PackExecution(BaseModel, frozen=True):
                 }
             )
         statuses = {result.status for result in required if result is not None}
-        if AcceptanceCheckStatus.ERROR in statuses:
-            status, exit_code = PackExecutionStatus.ERROR, EXIT_HARNESS_ERROR
-        elif AcceptanceCheckStatus.FAIL in statuses:
+        if statuses & {AcceptanceCheckStatus.ERROR, AcceptanceCheckStatus.FAIL}:
             status, exit_code = PackExecutionStatus.FAILED, EXIT_SUBJECT_FAILURE
         elif any(result is None for result in required) or any(
             check.evidence_level not in {EvidenceLevel.CONTRACT, EvidenceLevel.HOST}
@@ -482,6 +518,31 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
             raise ValueError("Bundle scenario checks must match execution checks")
 
     @staticmethod
+    def _assert_declared_evidence_bindings(
+        manifest: AcceptanceManifest,
+        results: tuple[AcceptanceCheckResult, ...],
+        evidence_view: Mapping[str, str | int | float | bool | None],
+        independent_evidence: Mapping[str, str | int | float | bool | None],
+    ) -> None:
+        """Every required PASS must name its frozen dual-source evidence slots."""
+        declared = {check.check_id: check for check in manifest.required_checks}
+        for result in results:
+            if result.status is not AcceptanceCheckStatus.PASS:
+                continue
+            check = declared[result.check_id]
+            if evidence_view.get(check.authoritative_evidence) != result.evidence_digest:
+                raise ValueError(
+                    f"Bundle authoritative evidence does not attest {result.check_id}"
+                )
+            independent = independent_evidence.get(check.independent_evidence)
+            if not isinstance(independent, str) or not _SHA256_DIGEST.fullmatch(
+                independent
+            ):
+                raise ValueError(
+                    f"Bundle independent evidence does not attest {result.check_id}"
+                )
+
+    @staticmethod
     def _assert_terminal_execution(
         manifest: AcceptanceManifest,
         execution: PackExecution,
@@ -559,6 +620,9 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         if not independent_evidence:
             raise ValueError("Scenario Evidence Bundle requires independent evidence")
         cls._ensure_minimal_evidence(independent_evidence)
+        cls._assert_declared_evidence_bindings(
+            manifest, execution_checks, evidence_view, independent_evidence
+        )
         digest = cls._digest_payload(
             schema_version=_BUNDLE_SCHEMA_VERSION,
             manifest=manifest,
@@ -614,6 +678,12 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
             if not self.independent_evidence:
                 raise ValueError("Scenario Evidence Bundle requires independent evidence")
             self._ensure_minimal_evidence(self.independent_evidence)
+            self._assert_declared_evidence_bindings(
+                declared_manifest,
+                self.execution_checks,
+                self.evidence_view,
+                self.independent_evidence,
+            )
         except (BundleIntegrityError, ValueError) as error:
             if isinstance(error, BundleIntegrityError):
                 raise

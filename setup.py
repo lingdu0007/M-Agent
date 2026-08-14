@@ -52,6 +52,47 @@ def _archive_tree(path: Path) -> bytes:
     return hashlib.sha1(b"tree " + str(len(payload)).encode() + b"\0" + payload).digest()
 
 
+def _source_integrity_matches(root: Path) -> bool:
+    """Validate the sdist's generated source map without trusting its tree shape."""
+    try:
+        declared = json.loads((root / _SOURCE_INTEGRITY_NAME).read_text())
+        files = declared.get("files")
+        if (
+            declared.get("schema_version") != "1"
+            or not isinstance(files, dict)
+            or any(
+                not isinstance(path, str) or not isinstance(digest, str)
+                for path, digest in files.items()
+            )
+        ):
+            return False
+        def included(path: Path) -> bool:
+            relative = path.relative_to(root)
+            return (
+                path.name != _SOURCE_INTEGRITY_NAME
+                and not any(part in _GENERATED_PATHS for part in relative.parts)
+                and not any(part.endswith(".egg-info") for part in relative.parts)
+            )
+
+        expected = {
+            path: digest
+            for path, digest in files.items()
+            if not any(
+                part in _GENERATED_PATHS or part.endswith(".egg-info")
+                for part in Path(path).parts
+            )
+        }
+        actual = {
+            path.relative_to(root).as_posix(): "sha256:"
+            + hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and included(path)
+        }
+        return expected == actual
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
 def _source_identity() -> tuple[str, str]:
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -77,7 +118,7 @@ def _source_identity() -> tuple[str, str]:
     )
     commit, tree = archival.get("commit", ""), archival.get("tree", "")
     if _COMMIT.fullmatch(commit) and _TREE.fullmatch(tree):
-        if _archive_tree(_ROOT).hex() == tree:
+        if _archive_tree(_ROOT).hex() == tree or _source_integrity_matches(_ROOT):
             return commit, "clean"
         return "unavailable", "dirty"
     return "unavailable", "unknown"

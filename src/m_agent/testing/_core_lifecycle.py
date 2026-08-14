@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 from importlib.resources import files
 import json
+from pathlib import Path
+import tempfile
 
 from ..adapters import (
     DeterministicModelAdapter,
     InMemoryRunStore,
+    JsonlTelemetrySink,
     PlaintextPayloadCodec,
 )
 from ..runtime import (
@@ -189,13 +192,23 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
             model_adapter=DeterministicModelAdapter((response,)),
         )
     )
-    runner = Runner(
-        registry=registry,
-        store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
-    )
-    created = await runner.create_run("core-lifecycle", "1.0", "fixture")
-    terminal = await runner.start_run(created.run_id)
-    inspection = await runner.inspect_run(created.run_id)
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        telemetry_path = Path(temporary_directory) / "core-lifecycle.jsonl"
+        sink = JsonlTelemetrySink(telemetry_path)
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+            telemetry_sink=sink,
+        )
+        created = await runner.create_run("core-lifecycle", "1.0", "fixture")
+        terminal = await runner.start_run(created.run_id)
+        inspection = await runner.inspect_run(created.run_id)
+        sink.close()
+        telemetry_events = [
+            json.loads(line)
+            for line in telemetry_path.read_text().splitlines()
+            if line
+        ]
     lifecycle_passed = (
         terminal.status is RunStatus.SUCCEEDED
         and len(inspection.steps) == len(inspection.attempts) == len(inspection.checkpoints) == 1
@@ -217,6 +230,25 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
     dependency_violations = find_runtime_dependency_violations()
     dependency_direction_passed = not dependency_violations
     expand_observation = _expand_compatibility_observation()
+    telemetry_correlated = bool(telemetry_events) and all(
+        event.get("run_id") == created.run_id for event in telemetry_events
+    )
+    telemetry_lifecycle_observed = {
+        "STEP_STARTED",
+        "STEP_COMPLETED",
+    }.issubset({event.get("event_type") for event in telemetry_events}) and any(
+        event.get("run_status") == RunStatus.SUCCEEDED.value
+        for event in telemetry_events
+    )
+    telemetry_payload_absent = all(
+        not {"input", "output", "instructions", "payload"}.intersection(event)
+        for event in telemetry_events
+    )
+    telemetry_passed = (
+        telemetry_correlated
+        and telemetry_lifecycle_observed
+        and telemetry_payload_absent
+    )
     evidence_view = {
         "run_succeeded": terminal.status is RunStatus.SUCCEEDED,
         "step_count": len(inspection.steps),
@@ -225,6 +257,10 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         "unknown_definition_rejected": unknown_definition_rejected,
         "public_layers_available": public_layers_available,
         "runtime_dependency_violation_count": len(dependency_violations),
+        "telemetry_event_count": len(telemetry_events),
+        "telemetry_correlated": telemetry_correlated,
+        "telemetry_lifecycle_observed": telemetry_lifecycle_observed,
+        "telemetry_payload_absent": telemetry_payload_absent,
         **expand_observation,
     }
     results = (
@@ -243,6 +279,28 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
                     "step_count": evidence_view["step_count"],
                     "attempt_count": evidence_view["attempt_count"],
                     "checkpoint_count": evidence_view["checkpoint_count"],
+                }
+            ),
+        ),
+        AcceptanceCheckResult(
+            check_id="core.lifecycle.telemetry",
+            status=(
+                AcceptanceCheckStatus.PASS
+                if telemetry_passed
+                else AcceptanceCheckStatus.FAIL
+            ),
+            evidence_level=EvidenceLevel.CONTRACT,
+            reason_code="jsonl_telemetry_contract_observed",
+            evidence_digest=_evidence_digest(
+                {
+                    "telemetry_event_count": evidence_view["telemetry_event_count"],
+                    "telemetry_correlated": evidence_view["telemetry_correlated"],
+                    "telemetry_lifecycle_observed": evidence_view[
+                        "telemetry_lifecycle_observed"
+                    ],
+                    "telemetry_payload_absent": evidence_view[
+                        "telemetry_payload_absent"
+                    ],
                 }
             ),
         ),
