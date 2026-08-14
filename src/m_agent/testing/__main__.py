@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -21,21 +23,92 @@ from ._pack import (
     EXIT_HARNESS_ERROR,
     EXIT_INTEGRITY_FAILURE,
     EXIT_INVALID_INVOCATION,
+    EvidenceLevel,
     PackExecution,
     ScenarioEvidenceBundle,
 )
 
 
-_CORE_LIFECYCLE_CHECKS = frozenset(
-    {
-        "core.lifecycle",
-        "core.lifecycle.unknown-definition",
-        "core.lifecycle.public-namespaces",
-        "core.lifecycle.dependency-direction",
-        "core.lifecycle.expand-compatibility",
-        "core.lifecycle.bundle-tamper",
-    }
+_CORE_LIFECYCLE_CHECKS = {
+    "core.lifecycle": EvidenceLevel.CONTRACT,
+    "core.lifecycle.unknown-definition": EvidenceLevel.CONTRACT,
+    "core.lifecycle.public-namespaces": EvidenceLevel.CONTRACT,
+    "core.lifecycle.dependency-direction": EvidenceLevel.CONTRACT,
+    "core.lifecycle.expand-compatibility": EvidenceLevel.CONTRACT,
+    "core.lifecycle.host-wheel": EvidenceLevel.HOST,
+    "core.lifecycle.bundle-tamper": EvidenceLevel.CONTRACT,
+}
+
+_ISOLATED_HOST_PROBE = """
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+import m_agent
+from m_agent import (
+    AgentDefinition,
+    Clock,
+    DefinitionNotFoundError,
+    DefinitionRegistry,
+    DeterministicModelAdapter,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    Runner,
+    RunStatus,
+    adapters,
+    companion,
+    runtime,
+    testing,
 )
+from m_agent.testing import find_runtime_dependency_violations
+
+
+async def observe():
+    registry = DefinitionRegistry()
+    registry.register(
+        AgentDefinition(
+            definition_id="core-lifecycle",
+            version="1.0",
+            instructions="Use the deterministic fixture.",
+            model_adapter=DeterministicModelAdapter(("accepted",)),
+        )
+    )
+    runner = Runner(
+        registry=registry,
+        store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+    )
+    created = await runner.create_run("core-lifecycle", "1.0", "fixture")
+    terminal = await runner.start_run(created.run_id)
+    inspection = await runner.inspect_run(created.run_id)
+    try:
+        registry.resolve("unknown", "1.0")
+    except DefinitionNotFoundError:
+        unknown_definition_rejected = True
+    else:
+        unknown_definition_rejected = False
+    print(json.dumps({
+        "module_under_prefix": Path(m_agent.__file__).resolve().is_relative_to(
+            Path(sys.prefix).resolve()
+        ),
+        "run_succeeded": terminal.status is RunStatus.SUCCEEDED,
+        "step_count": len(inspection.steps),
+        "attempt_count": len(inspection.attempts),
+        "checkpoint_count": len(inspection.checkpoints),
+        "unknown_definition_rejected": unknown_definition_rejected,
+        "public_layers_available": (
+            Runner is runtime.Runner
+            and Clock is runtime.Clock
+            and adapters.DeterministicModelAdapter is DeterministicModelAdapter
+            and hasattr(companion, "__all__")
+            and testing.AcceptanceManifest is not None
+        ),
+        "runtime_dependency_violation_count": len(find_runtime_dependency_violations()),
+    }, sort_keys=True))
+
+
+asyncio.run(observe())
+"""
 
 
 def _read_manifest(path: Path) -> AcceptanceManifest:
@@ -57,9 +130,11 @@ def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
 def _run(arguments: argparse.Namespace) -> int:
     manifest = _read_manifest(arguments.manifest)
     validate_installed_identity(manifest, artifact=arguments.wheel)
-    if manifest.scenarios != ("core-lifecycle",) or {
-        check.check_id for check in manifest.required_checks
-    } != _CORE_LIFECYCLE_CHECKS:
+    declared_checks = {check.check_id: check.evidence_level for check in manifest.required_checks}
+    if (
+        manifest.scenarios != ("core-lifecycle",)
+        or declared_checks != _CORE_LIFECYCLE_CHECKS
+    ):
         raise ValueError("Ticket 07 CLI supports only the core-lifecycle Scenario")
     execution = PackExecution.create(
         manifest, execution_id=f"core-lifecycle-{uuid4().hex}"
@@ -67,6 +142,7 @@ def _run(arguments: argparse.Namespace) -> int:
     checks, evidence_view, independent_evidence = asyncio.run(
         run_core_lifecycle(fixture_digest=manifest.fixture_digest)
     )
+    host_result, host_evidence = _isolated_host_result()
     mutation_result = AcceptanceCheckResult(
         check_id="core.lifecycle.bundle-tamper",
         status=AcceptanceCheckStatus.PASS,
@@ -79,15 +155,16 @@ def _run(arguments: argparse.Namespace) -> int:
         evidence_digest="sha256:"
         + hashlib.sha256(b"core-lifecycle bundle mutation").hexdigest(),
     )
-    all_checks = (*checks, mutation_result)
+    all_checks = (*checks, host_result, mutation_result)
     completed = execution.complete(manifest, all_checks)
     candidate = ScenarioEvidenceBundle.create(
         manifest=manifest,
         execution=completed,
+        execution_checks=all_checks,
         scenario="core-lifecycle",
         checks=all_checks,
         evidence_view=evidence_view,
-        independent_evidence=independent_evidence,
+        independent_evidence={**independent_evidence, **host_evidence},
     )
     tampered = candidate.model_copy(
         update={"evidence_view": {**candidate.evidence_view, "run_succeeded": False}}
@@ -100,6 +177,58 @@ def _run(arguments: argparse.Namespace) -> int:
         raise RuntimeError("controlled Bundle mutation was not detected")
     _publish_bundle(arguments.output_dir, bundle)
     return completed.exit_code or 0
+
+
+def _isolated_host_result() -> tuple[AcceptanceCheckResult, dict[str, str]]:
+    """Observe the installed wheel from a separate isolated Python process."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "OPENAI_API_KEY", "M_AGENT_OPENAI_API_KEY"}
+    }
+    environment["M_AGENT_RUN_LIVE_TESTS"] = "0"
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _ISOLATED_HOST_PROBE],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    observation = {"returncode": completed.returncode}
+    if completed.returncode == 0:
+        try:
+            observed = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            observed = None
+        if isinstance(observed, dict):
+            observation = observed
+    digest = "sha256:" + hashlib.sha256(
+        json.dumps(observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    passed = observation == {
+        "module_under_prefix": True,
+        "run_succeeded": True,
+        "step_count": 1,
+        "attempt_count": 1,
+        "checkpoint_count": 1,
+        "unknown_definition_rejected": True,
+        "public_layers_available": True,
+        "runtime_dependency_violation_count": 0,
+    }
+    return (
+        AcceptanceCheckResult(
+            check_id="core.lifecycle.host-wheel",
+            status=AcceptanceCheckStatus.PASS if passed else AcceptanceCheckStatus.ERROR,
+            evidence_level=EvidenceLevel.HOST,
+            reason_code=(
+                "isolated_wheel_lifecycle_observed"
+                if passed
+                else "isolated_wheel_lifecycle_error"
+            ),
+            evidence_digest=digest,
+        ),
+        {"host_observation_digest": digest},
+    )
 
 
 def _publish_bundle(output_dir: Path, bundle: ScenarioEvidenceBundle) -> Path:

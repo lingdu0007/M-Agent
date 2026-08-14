@@ -224,6 +224,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             ScenarioEvidenceBundle.create(
                 manifest=manifest,
                 execution=PackExecution.create(manifest, execution_id="created"),
+                execution_checks=(check,),
                 scenario="core-lifecycle",
                 checks=(check,),
                 evidence_view={"run_succeeded": True, "step_count": 1},
@@ -232,9 +233,20 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         execution = PackExecution.create(manifest, execution_id="exec-1").complete(
             manifest, (check,)
         )
+        with self.assertRaises(ValueError):
+            ScenarioEvidenceBundle.create(
+                manifest=manifest,
+                execution=execution,
+                execution_checks=(check,),
+                scenario="core-lifecycle",
+                checks=(check,),
+                evidence_view={"run_succeeded": True, "step_count": 1},
+                independent_evidence={},
+            )
         bundle = ScenarioEvidenceBundle.create(
             manifest=manifest,
             execution=execution,
+            execution_checks=(check,),
             scenario="core-lifecycle",
             checks=(check,),
             evidence_view={"run_succeeded": True, "step_count": 1},
@@ -248,7 +260,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         )
         with self.assertRaises(BundleIntegrityError):
             tampered.verify(manifest, execution)
-        schema_tampered = bundle.model_copy(update={"schema_version": "3"})
+        schema_tampered = bundle.model_copy(update={"schema_version": "4"})
         with self.assertRaises(BundleIntegrityError):
             schema_tampered.verify(manifest, execution)
         redaction_tampered = bundle.model_copy(
@@ -260,6 +272,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             ScenarioEvidenceBundle.create(
                 manifest=manifest,
                 execution=execution,
+                execution_checks=(check,),
                 scenario="core-lifecycle",
                 checks=(),
                 evidence_view={"raw_prompt": "must not persist"},
@@ -320,11 +333,65 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                     ScenarioEvidenceBundle.create(
                         manifest=manifest,
                         execution=execution,
+                        execution_checks=(clean_check,),
                         scenario="core-lifecycle",
                         checks=(clean_check,),
                         evidence_view=evidence_view,
                         independent_evidence=independent_evidence,
                     )
+
+    def test_multi_scenario_pack_creates_a_bundle_per_declared_scenario(self) -> None:
+        """A terminal Pack can retain its full result set in each Scenario Bundle."""
+        from m_agent.testing import (
+            AcceptanceCheck,
+            AcceptanceManifest,
+            EvidenceLevel,
+            PackExecution,
+            ScenarioEvidenceBundle,
+        )
+
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit="source",
+            artifact_digest="artifact",
+            fixture_digest="fixture",
+            environment={"python": "3.11"},
+            scenarios=("first", "second"),
+            required_checks=(
+                AcceptanceCheck(
+                    check_id="first.check",
+                    scenario="first",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+                AcceptanceCheck(
+                    check_id="second.check",
+                    scenario="second",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
+        )
+        first = self._check_result("first.check", evidence_level=EvidenceLevel.CONTRACT)
+        second = self._check_result(
+            "second.check", evidence_level=EvidenceLevel.CONTRACT
+        )
+        execution = PackExecution.create(manifest, execution_id="pack-1").complete(
+            manifest, (first, second)
+        )
+
+        bundle = ScenarioEvidenceBundle.create(
+            manifest=manifest,
+            execution=execution,
+            execution_checks=(first, second),
+            scenario="first",
+            checks=(first,),
+            evidence_view={"first_succeeded": True},
+            independent_evidence={"host_observation_digest": "sha256:" + "f" * 64},
+        )
+
+        bundle.verify(manifest)
+        self.assertEqual(bundle.checks, (first,))
+        self.assertEqual(bundle.execution_checks, (first, second))
 
     def test_check_results_require_reason_codes_and_evidence_references(self) -> None:
         from pydantic import ValidationError
@@ -345,6 +412,55 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 reason_code="not stable",
                 evidence_digest="not-a-digest",
             )
+
+    def test_unsupported_manifest_and_bundle_schemas_fail_closed(self) -> None:
+        from pydantic import ValidationError
+
+        from m_agent.testing import (
+            AcceptanceCheck,
+            AcceptanceManifest,
+            EvidenceLevel,
+            PackExecution,
+            ScenarioEvidenceBundle,
+        )
+
+        manifest_data = {
+            "pack_version": "0.3.0",
+            "profile": "0.3",
+            "source_commit": "source",
+            "artifact_digest": "artifact",
+            "fixture_digest": "fixture",
+            "environment": {"python": "3.11"},
+            "scenarios": ("core-lifecycle",),
+            "required_checks": (
+                AcceptanceCheck(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
+        }
+        with self.assertRaises(ValidationError):
+            AcceptanceManifest(schema_version="unsupported-manifest-v999", **manifest_data)
+
+        manifest = AcceptanceManifest(**manifest_data)
+        check = self._check_result("core.lifecycle", evidence_level=EvidenceLevel.CONTRACT)
+        execution = PackExecution.create(manifest, execution_id="exec-1").complete(
+            manifest, (check,)
+        )
+        bundle = ScenarioEvidenceBundle.create(
+            manifest=manifest,
+            execution=execution,
+            execution_checks=(check,),
+            scenario="core-lifecycle",
+            checks=(check,),
+            evidence_view={"run_succeeded": True},
+            independent_evidence={"host_observation_digest": "sha256:" + "f" * 64},
+        )
+        serialized = bundle.model_dump(mode="json")
+        serialized["schema_version"] = "unsupported-bundle-v999"
+        with self.assertRaises(ValidationError):
+            ScenarioEvidenceBundle.model_validate(serialized)
 
     def test_manifest_rejects_missing_or_nonrequired_frozen_declarations(self) -> None:
         from pydantic import ValidationError

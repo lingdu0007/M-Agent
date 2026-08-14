@@ -6,6 +6,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import setuptools
 from setuptools import setup
 from setuptools.command.build_py import build_py as _build_py
 
@@ -43,7 +44,12 @@ class build_py(_build_py):
         super().run()
         target = Path(self.build_lib) / "m_agent" / "_build_identity.py"
         commit, state = _source_identity()
-        target.write_text(f"SOURCE_COMMIT = {commit!r}\nSOURCE_STATE = {state!r}\n")
+        target.write_text(
+            f"SOURCE_COMMIT = {commit!r}\n"
+            f"SOURCE_STATE = {state!r}\n"
+            "BUILD_TOOL = 'setuptools'\n"
+            f"BUILD_TOOL_VERSION = {setuptools.__version__!r}\n"
+        )
 
 
 setup(cmdclass={"build_py": build_py})

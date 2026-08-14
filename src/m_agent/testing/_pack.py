@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 
 _SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _EVIDENCE_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_MANIFEST_SCHEMA_VERSION = "1"
+_BUNDLE_SCHEMA_VERSION = "3"
 
 
 class EvidenceLevel(StrEnum):
@@ -89,7 +91,7 @@ class AcceptanceManifest(BaseModel, frozen=True):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "1"
+    schema_version: str = _MANIFEST_SCHEMA_VERSION
     pack_version: str
     profile: str
     source_commit: str
@@ -101,6 +103,8 @@ class AcceptanceManifest(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _validate_frozen_declarations(self) -> "AcceptanceManifest":
+        if self.schema_version != _MANIFEST_SCHEMA_VERSION:
+            raise ValueError("Acceptance Manifest schema version is unsupported")
         if not self.scenarios or len(set(self.scenarios)) != len(self.scenarios):
             raise ValueError("Manifest scenarios must be nonempty and unique")
         if not self.required_checks:
@@ -239,9 +243,10 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "2"
+    schema_version: str = _BUNDLE_SCHEMA_VERSION
     manifest_digest: str
     execution: PackExecution
+    execution_checks: tuple[AcceptanceCheckResult, ...]
     scenario: str
     checks: tuple[AcceptanceCheckResult, ...]
     evidence_view: Mapping[str, str | int | float | bool | None]
@@ -250,6 +255,8 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _freeze_evidence_mappings(self) -> "ScenarioEvidenceBundle":
+        if self.schema_version != _BUNDLE_SCHEMA_VERSION:
+            raise ValueError("Scenario Evidence Bundle schema version is unsupported")
         object.__setattr__(
             self, "evidence_view", MappingProxyType(dict(self.evidence_view))
         )
@@ -311,17 +318,32 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
                 )
 
     @staticmethod
+    def _assert_execution_checks(
+        manifest: AcceptanceManifest,
+        execution_checks: tuple[AcceptanceCheckResult, ...],
+    ) -> None:
+        declared = {check.check_id: check for check in manifest.required_checks}
+        actual = {check.check_id for check in execution_checks}
+        if len(actual) != len(execution_checks) or actual != set(declared):
+            raise ValueError("Bundle execution checks must exactly match Manifest checks")
+        for result in execution_checks:
+            if result.evidence_level is not declared[result.check_id].evidence_level:
+                raise ValueError(
+                    f"Bundle execution evidence level does not match Manifest for {result.check_id}"
+                )
+
+    @staticmethod
     def _assert_terminal_execution(
         manifest: AcceptanceManifest,
         execution: PackExecution,
-        checks: tuple[AcceptanceCheckResult, ...],
+        execution_checks: tuple[AcceptanceCheckResult, ...],
     ) -> None:
         execution.assert_matches(manifest)
         if not execution.is_terminal or execution.exit_code is None:
             raise ValueError("Bundle execution must be terminal with an exit code")
         derived = PackExecution.create(
             manifest, execution_id=execution.execution_id
-        ).complete(manifest, checks)
+        ).complete(manifest, execution_checks)
         if (
             execution.status is not derived.status
             or execution.exit_code != derived.exit_code
@@ -335,6 +357,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         schema_version: str,
         manifest_digest: str,
         execution: PackExecution,
+        execution_checks: tuple[AcceptanceCheckResult, ...],
         scenario: str,
         checks: tuple[AcceptanceCheckResult, ...],
         evidence_view: Mapping[str, str | int | float | bool | None],
@@ -344,6 +367,9 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
             "schema_version": schema_version,
             "manifest_digest": manifest_digest,
             "execution": execution.model_dump(mode="json"),
+            "execution_checks": [
+                check.model_dump(mode="json") for check in execution_checks
+            ],
             "scenario": scenario,
             "checks": [check.model_dump(mode="json") for check in checks],
             "evidence_view": dict(evidence_view),
@@ -363,32 +389,39 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         *,
         manifest: AcceptanceManifest,
         execution: PackExecution,
+        execution_checks: tuple[AcceptanceCheckResult, ...],
         scenario: str,
         checks: tuple[AcceptanceCheckResult, ...],
         evidence_view: Mapping[str, str | int | float | bool | None],
         independent_evidence: Mapping[str, str | int | float | bool | None],
     ) -> "ScenarioEvidenceBundle":
         execution.assert_matches(manifest)
-        cls._assert_terminal_execution(manifest, execution, checks)
+        cls._assert_terminal_execution(manifest, execution, execution_checks)
         if scenario not in manifest.scenarios:
             raise ValueError(f"scenario {scenario!r} is not declared by Manifest")
         cls._assert_declared_checks(manifest, scenario, checks)
         cls._assert_minimal_check_results(checks)
+        cls._assert_execution_checks(manifest, execution_checks)
+        cls._assert_minimal_check_results(execution_checks)
         cls._ensure_minimal_evidence(evidence_view)
+        if not independent_evidence:
+            raise ValueError("Scenario Evidence Bundle requires independent evidence")
         cls._ensure_minimal_evidence(independent_evidence)
         digest = cls._digest_payload(
-            schema_version="2",
+            schema_version=_BUNDLE_SCHEMA_VERSION,
             manifest_digest=manifest.digest,
             execution=execution,
+            execution_checks=execution_checks,
             scenario=scenario,
             checks=checks,
             evidence_view=evidence_view,
             independent_evidence=independent_evidence,
         )
         return cls(
-            schema_version="2",
+            schema_version=_BUNDLE_SCHEMA_VERSION,
             manifest_digest=manifest.digest,
             execution=execution,
+            execution_checks=execution_checks,
             scenario=scenario,
             checks=checks,
             evidence_view=dict(evidence_view),
@@ -404,12 +437,20 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         try:
             if execution is not None and execution != self.execution:
                 raise BundleIntegrityError("Bundle execution does not match supplied execution")
+            if self.schema_version != _BUNDLE_SCHEMA_VERSION:
+                raise BundleIntegrityError("Scenario Evidence Bundle schema version is unsupported")
             if self.manifest_digest != manifest.digest:
                 raise BundleIntegrityError("Bundle Manifest digest does not match")
-            self._assert_terminal_execution(manifest, self.execution, self.checks)
+            self._assert_terminal_execution(
+                manifest, self.execution, self.execution_checks
+            )
             self._assert_declared_checks(manifest, self.scenario, self.checks)
             self._assert_minimal_check_results(self.checks)
+            self._assert_execution_checks(manifest, self.execution_checks)
+            self._assert_minimal_check_results(self.execution_checks)
             self._ensure_minimal_evidence(self.evidence_view)
+            if not self.independent_evidence:
+                raise ValueError("Scenario Evidence Bundle requires independent evidence")
             self._ensure_minimal_evidence(self.independent_evidence)
         except (BundleIntegrityError, ValueError) as error:
             if isinstance(error, BundleIntegrityError):
@@ -419,6 +460,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
             schema_version=self.schema_version,
             manifest_digest=self.manifest_digest,
             execution=self.execution,
+            execution_checks=self.execution_checks,
             scenario=self.scenario,
             checks=self.checks,
             evidence_view=self.evidence_view,

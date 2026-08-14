@@ -130,16 +130,18 @@ print("m-agent installed artifact import passed")
 """
 
 _FOUNDATION_INSTALLED_PROBE = """
+import hashlib
 import json
 from importlib.metadata import metadata
 from pathlib import Path
 import sys
 import tempfile
+import zipfile
 
 import m_agent
 from m_agent.adapters import DeterministicModelAdapter, InMemoryRunStore, PlaintextPayloadCodec
 from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
-from m_agent.testing import AcceptanceCheck, AcceptanceManifest, installed_identity
+from m_agent.testing import AcceptanceCheck, AcceptanceManifest, EvidenceLevel, installed_identity
 
 assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 wheel = Path(sys.argv[1])
@@ -147,6 +149,8 @@ identity = installed_identity(artifact=wheel)
 assert identity["environment"]["installation"] == "wheel"
 assert identity["source_commit"] not in {"development", "unavailable"}
 assert identity["environment"]["source_state"] == "clean"
+assert identity["environment"]["build_tool"].startswith("setuptools==")
+assert identity["environment"]["dependency_summary"].startswith("sha256:")
 manifest = AcceptanceManifest(
     pack_version="0.3.0",
     profile="0.3",
@@ -182,6 +186,12 @@ manifest = AcceptanceManifest(
             public_seam="m_agent,m_agent.runtime",
         ),
         AcceptanceCheck(
+            check_id="core.lifecycle.host-wheel",
+            scenario="core-lifecycle",
+            public_seam="python -I -m m_agent.testing",
+            evidence_level=EvidenceLevel.HOST,
+        ),
+        AcceptanceCheck(
             check_id="core.lifecycle.bundle-tamper",
             scenario="core-lifecycle",
             public_seam="m_agent.testing.ScenarioEvidenceBundle",
@@ -191,6 +201,17 @@ manifest = AcceptanceManifest(
 with tempfile.TemporaryDirectory() as temporary_directory:
     manifest_path = Path(temporary_directory) / "manifest.json"
     output_dir = Path(temporary_directory) / "bundles"
+    altered_wheel = Path(temporary_directory) / "altered.whl"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(altered_wheel, "w") as altered:
+        for member in source.infolist():
+            altered.writestr(member, source.read(member.filename))
+        altered.writestr("unexpected-member.txt", b"not installed")
+    try:
+        installed_identity(artifact=altered_wheel)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("identity accepted a wheel that was not installed")
     manifest_path.write_text(manifest.model_dump_json())
     import subprocess
 
@@ -214,15 +235,41 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert bundle["execution"]["status"] == "PASSED"
     assert bundle["execution"]["exit_code"] == 0
     assert all(check["reason_code"] and check["evidence_digest"] for check in bundle["checks"])
-    assert bundle["independent_evidence"] == {"fixture_digest": identity["fixture_digest"]}
+    assert any(
+        check["check_id"] == "core.lifecycle.host-wheel"
+        and check["evidence_level"] == "HOST"
+        and check["status"] == "PASS"
+        for check in bundle["checks"]
+    )
+    assert bundle["independent_evidence"]["fixture_digest"] == identity["fixture_digest"]
+    assert bundle["independent_evidence"]["host_observation_digest"].startswith("sha256:")
     assert "model_digest" not in bundle["independent_evidence"]
     assert "network_disabled" not in bundle["independent_evidence"]
 
     manifest_path.write_text(
-        manifest.model_copy(update={"required_checks": manifest.required_checks[:-1]}).model_dump_json()
+        manifest.model_copy(
+            update={
+                "required_checks": tuple(
+                    check
+                    for check in manifest.required_checks
+                    if check.check_id != "core.lifecycle.host-wheel"
+                )
+            }
+        ).model_dump_json()
     )
     completed = invoke(
         "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--output-dir", str(output_dir),
+    )
+    assert completed.returncode == 2, completed.stderr
+    manifest_path.write_text(manifest.model_dump_json())
+
+    altered_digest = "sha256:" + hashlib.sha256(altered_wheel.read_bytes()).hexdigest()
+    manifest_path.write_text(
+        manifest.model_copy(update={"artifact_digest": altered_digest}).model_dump_json()
+    )
+    completed = invoke(
+        "run", "--manifest", str(manifest_path), "--wheel", str(altered_wheel),
         "--output-dir", str(output_dir),
     )
     assert completed.returncode == 2, completed.stderr
@@ -381,21 +428,12 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             python = environment_dir / "bin" / "python"
-            target_site = Path(
-                _run(
-                    [str(python), "-c", "import site; print(site.getsitepackages()[0])"],
-                    cwd=temporary_root,
-                    env=clean_environment,
-                ).strip()
-            )
-            _copy_locked_runtime_dependencies(target_site)
             _run(
                 [
                     "uv",
                     "pip",
                     "install",
                     "--offline",
-                    "--no-deps",
                     "--python",
                     str(python),
                     str(wheel),

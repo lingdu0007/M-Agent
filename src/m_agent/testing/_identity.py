@@ -9,19 +9,33 @@ import hashlib
 from importlib.resources import files
 import json
 import platform
+import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
-from importlib.metadata import Distribution, distributions
+from importlib.metadata import Distribution, PackageNotFoundError, distribution, distributions
 from typing import TYPE_CHECKING
 
-from m_agent._build_identity import SOURCE_COMMIT, SOURCE_STATE
+from m_agent._build_identity import (
+    BUILD_TOOL,
+    BUILD_TOOL_VERSION,
+    SOURCE_COMMIT,
+    SOURCE_STATE,
+)
 
 if TYPE_CHECKING:
     from ._pack import AcceptanceManifest
 
 
 _DISTRIBUTION_NAME = "m-agent"
+_DEPENDENCY_NAME = re.compile(r"\s*([A-Za-z0-9_.-]+)")
+_INSTALLER_METADATA = {
+    "RECORD",
+    "INSTALLER",
+    "REQUESTED",
+    "direct_url.json",
+    "uv_cache.json",
+}
 
 
 def _installed_distribution() -> Distribution:
@@ -83,26 +97,63 @@ def _fixture_digest() -> str:
     return "sha256:" + hashlib.sha256(fixture.read_bytes()).hexdigest()
 
 
+def _dependency_summary(installed: Distribution) -> str:
+    """Digest the installed runtime dependency closure, excluding optional extras."""
+    pending = list(installed.requires or ())
+    observed: dict[str, str] = {}
+    while pending:
+        requirement = pending.pop()
+        if ";" in requirement:
+            continue
+        match = _DEPENDENCY_NAME.match(requirement)
+        if match is None:
+            raise ValueError("m-agent dependency metadata is malformed")
+        name = match.group(1)
+        normalized = re.sub(r"[-_.]+", "-", name).lower()
+        if normalized in observed:
+            continue
+        try:
+            dependency = distribution(name)
+        except PackageNotFoundError as error:
+            raise ValueError(f"m-agent runtime dependency is unavailable: {name}") from error
+        observed[normalized] = dependency.version
+        pending.extend(dependency.requires or ())
+    canonical = json.dumps(
+        observed, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
 def _assert_installed_wheel_matches(artifact: Path, installed: Distribution) -> None:
     try:
         with ZipFile(artifact) as wheel:
-            wheel_members = {
-                name
-                for name in wheel.namelist()
-                if name.startswith("m_agent/") and not name.endswith("/")
-            }
+            wheel_members = [info.filename for info in wheel.infolist() if not info.is_dir()]
             if not wheel_members:
-                raise ValueError("candidate wheel does not contain m_agent")
+                raise ValueError("candidate wheel contains no files")
+            if len(wheel_members) != len(set(wheel_members)):
+                raise ValueError("candidate wheel contains duplicate members")
             record = installed.read_text("RECORD")
             assert record is not None
             installed_members = {
                 row[0]
                 for row in csv.reader(record.splitlines())
-                if len(row) == 3 and row[0].startswith("m_agent/")
+                if len(row) == 3
             }
-            if installed_members != wheel_members:
-                raise ValueError("installed m-agent package does not match candidate wheel")
+            candidate_members = {
+                member
+                for member in wheel_members
+                if not _is_installer_metadata(member)
+            }
+            installed_product_members = {
+                member
+                for member in installed_members
+                if not _is_installer_metadata(member)
+            }
+            if installed_product_members != candidate_members:
+                raise ValueError("installed m-agent does not match candidate wheel members")
             for member in wheel_members:
+                if _is_installer_metadata(member):
+                    continue
                 installed_file = installed.locate_file(member)
                 if (
                     not installed_file.is_file()
@@ -115,6 +166,11 @@ def _assert_installed_wheel_matches(artifact: Path, installed: Distribution) -> 
         raise ValueError("candidate wheel is not a valid zip archive") from error
 
 
+def _is_installer_metadata(member: str) -> bool:
+    path = PurePosixPath(member)
+    return path.parent.name.endswith(".dist-info") and path.name in _INSTALLER_METADATA
+
+
 def _installation_kind() -> str:
     direct_url = _installed_distribution().read_text("direct_url.json")
     if direct_url:
@@ -122,8 +178,11 @@ def _installation_kind() -> str:
             data = json.loads(direct_url)
         except json.JSONDecodeError as error:
             raise ValueError("m-agent direct_url metadata is malformed") from error
-        if data.get("dir_info", {}).get("editable") is True:
-            return "editable"
+        if "dir_info" in data:
+            return "editable" if data["dir_info"].get("editable") is True else "directory"
+        if "archive_info" in data:
+            return "wheel" if str(data.get("url", "")).endswith(".whl") else "archive"
+        return "unknown"
     return "wheel"
 
 
@@ -146,6 +205,8 @@ def installed_identity(
             "architecture": platform.machine().lower(),
             "installation": _installation_kind(),
             "source_state": SOURCE_STATE,
+            "build_tool": f"{BUILD_TOOL}=={BUILD_TOOL_VERSION}",
+            "dependency_summary": _dependency_summary(installed),
         },
     }
 
