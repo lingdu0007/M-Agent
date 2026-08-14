@@ -339,6 +339,12 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "public_layers_available": True,
         "runtime_dependency_violation_count": 0,
         "root_expand_compatibility": True,
+        "telemetry_ordered": True,
+        "telemetry_usage_provenance": True,
+        "telemetry_closed": True,
+        "telemetry_cross_process": True,
+        "telemetry_concurrent": True,
+        "telemetry_redacted": True,
     }
     assert bundle["independent_evidence"]["host_observation_digest"] == "sha256:" + hashlib.sha256(
         json.dumps(host_observation, sort_keys=True, separators=(",", ":")).encode("utf-8")

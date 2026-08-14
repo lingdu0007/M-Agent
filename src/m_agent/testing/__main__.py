@@ -33,6 +33,8 @@ from ._pack import (
 
 _ISOLATED_HOST_PROBE = """
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import subprocess
 import sys
@@ -46,9 +48,15 @@ from m_agent import (
     DefinitionNotFoundError,
     DefinitionRegistry,
     DeterministicModelAdapter,
+    JsonlTelemetrySink,
+    ModelCapabilities,
+    ModelResponse,
+    ModelUsage,
     PlaintextPayloadCodec,
     Runner,
     RunStatus,
+    TelemetryEvent,
+    TelemetryEventType,
     adapters,
     companion,
     runtime,
@@ -70,6 +78,7 @@ _EXPAND_ONLY_EXPORTS = {
 _REOPEN_PROBE = '''
 import asyncio
 import json
+from pathlib import Path
 import sys
 
 from m_agent import DefinitionRegistry, PlaintextPayloadCodec, Runner, RunStatus
@@ -80,11 +89,19 @@ async def inspect():
     store = SQLiteRunStore(sys.argv[1], payload_codec=PlaintextPayloadCodec())
     try:
         inspection = await Runner(DefinitionRegistry(), store).inspect_run(sys.argv[2])
+        telemetry = [
+            json.loads(line)
+            for line in Path(sys.argv[3]).read_text(encoding="utf-8").splitlines()
+            if line
+        ]
         print(json.dumps({
             "run_succeeded": inspection.run.status is RunStatus.SUCCEEDED,
             "step_count": len(inspection.steps),
             "attempt_count": len(inspection.attempts),
             "checkpoint_count": len(inspection.checkpoints),
+            "telemetry_readable": bool(telemetry) and all(
+                event.get("run_id") == sys.argv[2] for event in telemetry
+            ),
         }, sort_keys=True))
     finally:
         store.close()
@@ -94,26 +111,127 @@ asyncio.run(inspect())
 '''
 
 
+_TELEMETRY_CANARIES = (
+    "T07-INPUT-CANARY",
+    "T07-INSTRUCTION-CANARY",
+    "T07-SECRET-CANARY",
+)
+
+
+class UsageModel(DeterministicModelAdapter):
+    def __init__(self):
+        super().__init__(("accepted",), capabilities=ModelCapabilities(usage_reporting=True))
+
+    async def generate(self, request):
+        response = await super().generate(request)
+        return ModelResponse(
+            content=response.content,
+            usage=ModelUsage(input_tokens=11, output_tokens=7),
+        )
+
+
+def telemetry_sequence(events, run_id):
+    return (
+        [event.get("event_type") for event in events]
+        == [
+            "RUN_STATUS_CHANGED",
+            "RUN_STATUS_CHANGED",
+            "STEP_STARTED",
+            "STEP_COMPLETED",
+            "RUN_STATUS_CHANGED",
+        ]
+        and all(event.get("run_id") == run_id for event in events)
+        and [
+            event.get("run_status")
+            for event in events
+            if event.get("event_type") == "RUN_STATUS_CHANGED"
+        ]
+        == ["CREATED", "RUNNING", "SUCCEEDED"]
+    )
+
+
+def telemetry_usage_provenance(events):
+    completed = [
+        event for event in events if event.get("event_type") == "STEP_COMPLETED"
+    ]
+    return (
+        len(completed) == 1
+        and completed[0].get("usage")
+        == {"input_tokens": 11, "output_tokens": 7}
+        and all(
+            event.get("usage") is None
+            for event in events
+            if event is not completed[0]
+        )
+    )
+
+
+def concurrent_telemetry(path):
+    sink = JsonlTelemetrySink(path)
+
+    def emit(index):
+        for status in (RunStatus.CREATED, RunStatus.SUCCEEDED):
+            sink.emit(TelemetryEvent(
+                event_type=TelemetryEventType.RUN_STATUS_CHANGED,
+                run_id=f"telemetry-concurrent-{index}",
+                run_status=status,
+            ))
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        tuple(executor.map(emit, range(4)))
+    sink.close()
+    sink.close()
+    events = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line
+    ]
+    return len(events) == 8 and all(
+        [event["run_status"] for event in events if event["run_id"] == f"telemetry-concurrent-{index}"]
+        == ["CREATED", "SUCCEEDED"]
+        for index in range(4)
+    )
+
+
 async def observe():
     registry = DefinitionRegistry()
     registry.register(
         AgentDefinition(
             definition_id="core-lifecycle",
             version="1.0",
-            instructions="Use the deterministic fixture.",
-            model_adapter=DeterministicModelAdapter(("accepted",)),
+            instructions="Use the deterministic fixture. " + _TELEMETRY_CANARIES[1],
+            model_adapter=UsageModel(),
         )
     )
     with tempfile.TemporaryDirectory() as temporary_directory:
         database = Path(temporary_directory) / "core-lifecycle.sqlite3"
+        telemetry_path = Path(temporary_directory) / "core-lifecycle.jsonl"
         store = SQLiteRunStore(database, payload_codec=PlaintextPayloadCodec())
-        runner = Runner(registry=registry, store=store)
-        created = await runner.create_run("core-lifecycle", "1.0", "fixture")
+        sink = JsonlTelemetrySink(telemetry_path)
+        runner = Runner(registry=registry, store=store, telemetry_sink=sink)
+        created = await runner.create_run(
+            "core-lifecycle", "1.0", "fixture " + _TELEMETRY_CANARIES[0]
+        )
         terminal = await runner.start_run(created.run_id)
         inspection = await runner.inspect_run(created.run_id)
+        sink.close()
+        sink.close()
+        telemetry_bytes = telemetry_path.read_bytes()
+        telemetry_lines = telemetry_bytes.decode("utf-8").splitlines()
+        telemetry_events = [json.loads(line) for line in telemetry_lines if line]
+
+        concurrent_path = Path(temporary_directory) / "concurrent.jsonl"
+        telemetry_concurrent = concurrent_telemetry(concurrent_path)
+        concurrent_bytes = concurrent_path.read_bytes()
         store.close()
         reopened_process = subprocess.run(
-            [sys.executable, "-I", "-c", _REOPEN_PROBE, str(database), created.run_id],
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _REOPEN_PROBE,
+                str(database),
+                created.run_id,
+                str(telemetry_path),
+            ],
             text=True,
             capture_output=True,
             check=False,
@@ -123,6 +241,24 @@ async def observe():
         except json.JSONDecodeError:
             reopened = {}
         sqlite_file_created = database.is_file() and database.stat().st_size > 0
+        telemetry_ordered = telemetry_sequence(telemetry_events, created.run_id)
+        telemetry_usage = telemetry_usage_provenance(telemetry_events)
+        telemetry_closed = (
+            len(telemetry_events) == 5
+            and telemetry_bytes.endswith(b"\\n")
+            and all(telemetry_lines)
+        )
+        telemetry_cross_process = (
+            reopened_process.returncode == 0
+            and reopened.get("telemetry_readable") is True
+        )
+        telemetry_redacted = all(
+            canary.encode("utf-8") not in telemetry_bytes
+            for canary in _TELEMETRY_CANARIES
+        )
+        telemetry_jsonl_digest = "sha256:" + hashlib.sha256(
+            telemetry_bytes + concurrent_bytes
+        ).hexdigest()
     try:
         registry.resolve("unknown", "1.0")
     except DefinitionNotFoundError:
@@ -162,6 +298,13 @@ async def observe():
         ),
         "runtime_dependency_violation_count": len(find_runtime_dependency_violations()),
         "root_expand_compatibility": root_expand_compatibility,
+        "telemetry_ordered": telemetry_ordered,
+        "telemetry_usage_provenance": telemetry_usage,
+        "telemetry_closed": telemetry_closed,
+        "telemetry_cross_process": telemetry_cross_process,
+        "telemetry_concurrent": telemetry_concurrent,
+        "telemetry_redacted": telemetry_redacted,
+        "telemetry_jsonl_digest": telemetry_jsonl_digest,
     }, sort_keys=True))
 
 
@@ -308,12 +451,18 @@ def _attest_declared_evidence(
     for result in results:
         check = declared[result.check_id]
         authoritative[check.authoritative_evidence] = result.evidence_digest
-        independent[check.independent_evidence] = (
-            manifest.fixture_digest
-            if check.check_id
-            in {"core.lifecycle", "core.lifecycle.bundle-tamper", "core.lifecycle.host-wheel"}
-            else host_observation_digest
-        )
+        if check.check_id in {
+            "core.lifecycle",
+            "core.lifecycle.bundle-tamper",
+            "core.lifecycle.host-wheel",
+        }:
+            independent[check.independent_evidence] = manifest.fixture_digest
+        elif check.check_id == "core.lifecycle.telemetry":
+            independent[check.independent_evidence] = independent[
+                "telemetry_jsonl_digest"
+            ]
+        else:
+            independent[check.independent_evidence] = host_observation_digest
     return authoritative, independent
 
 
@@ -409,6 +558,15 @@ def _isolated_host_result() -> tuple[
             observed = None
         if isinstance(observed, dict):
             observation = observed
+    telemetry_jsonl_digest = observation.pop("telemetry_jsonl_digest", None)
+    if not isinstance(telemetry_jsonl_digest, str) or not telemetry_jsonl_digest.startswith(
+        "sha256:"
+    ):
+        telemetry_jsonl_digest = "sha256:" + hashlib.sha256(
+            json.dumps(observation, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
     digest = "sha256:" + hashlib.sha256(
         json.dumps(observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -428,6 +586,12 @@ def _isolated_host_result() -> tuple[
         "public_layers_available": True,
         "runtime_dependency_violation_count": 0,
         "root_expand_compatibility": True,
+        "telemetry_ordered": True,
+        "telemetry_usage_provenance": True,
+        "telemetry_closed": True,
+        "telemetry_cross_process": True,
+        "telemetry_concurrent": True,
+        "telemetry_redacted": True,
     }
     valid_observation = set(observation) == set(expected_observation) and all(
         type(observation[key]) is type(expected)
@@ -460,6 +624,7 @@ def _isolated_host_result() -> tuple[
         ),
         {
             "host_observation_digest": digest,
+            "telemetry_jsonl_digest": telemetry_jsonl_digest,
             **{f"host_{key}": value for key, value in observation.items()},
         },
     )
