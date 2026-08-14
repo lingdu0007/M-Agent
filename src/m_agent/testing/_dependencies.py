@@ -35,10 +35,11 @@ def find_runtime_dependency_violations(
         relative = path.relative_to(package_root)
         if relative.parts[0] in excluded_layers:
             continue
-        if relative == Path("__init__.py"):
-            continue
         tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
+        nodes = tuple(
+            tree.body if relative == Path("__init__.py") else ast.walk(tree)
+        )
+        for node in nodes:
             if (
                 isinstance(node, ast.ClassDef)
                 and node.name in _CONCRETE_ADAPTER_CLASSES
@@ -51,19 +52,19 @@ def find_runtime_dependency_violations(
         package = ".".join(("m_agent", *package_parts))
         importlib_names = {
             alias.asname or alias.name
-            for node in ast.walk(tree)
+            for node in nodes
             if isinstance(node, ast.Import)
             for alias in node.names
             if alias.name == "importlib"
         }
         import_module_names = {
             alias.asname or alias.name
-            for node in ast.walk(tree)
+            for node in nodes
             if isinstance(node, ast.ImportFrom) and node.module == "importlib"
             for alias in node.names
             if alias.name == "import_module"
         }
-        for node in ast.walk(tree):
+        for node in nodes:
             modules: list[str] = []
             if isinstance(node, ast.ImportFrom):
                 if node.level:

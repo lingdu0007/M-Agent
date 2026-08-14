@@ -910,6 +910,18 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             source_root = Path(temporary_directory)
             package_directory = source_root / "m_agent"
             package_directory.mkdir()
+            (package_directory / "__init__.py").write_text(
+                "from .adapters import InMemoryRunStore\n"
+            )
+            violations = find_runtime_dependency_violations(source_root)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("m_agent.adapters", violations[0])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source_root = Path(temporary_directory)
+            package_directory = source_root / "m_agent"
+            package_directory.mkdir()
             (package_directory / "_store.py").write_text(
                 "class InMemoryRunStore:\n    pass\n"
             )
@@ -1010,6 +1022,11 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertIn("clean wheel", completed.stderr)
 
     def test_required_results_have_fail_closed_pack_status_and_exit_codes(self) -> None:
+        """A Pack keeps harness ERROR/3 distinct from subject FAILED/1.
+
+        A later Release or Milestone aggregate may project either result to an
+        aggregate failure, but it must not rewrite this public Pack result.
+        """
         from m_agent.testing import (
             AcceptanceCheck,
             AcceptanceCheckResult,

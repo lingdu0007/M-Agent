@@ -93,21 +93,30 @@ def _source_integrity_matches(root: Path) -> bool:
         return False
 
 
-def _source_identity() -> tuple[str, str]:
+def _checkout_identity() -> tuple[str, str] | None:
     completed = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel", "HEAD"],
+        ["git", "rev-parse", "--show-toplevel", "HEAD", "HEAD^{tree}"],
         cwd=_ROOT,
         text=True,
         capture_output=True,
         check=False,
     )
-    top_level, separator, commit = completed.stdout.strip().partition("\n")
+    lines = completed.stdout.strip().splitlines()
     if (
         completed.returncode == 0
-        and separator
-        and Path(top_level).resolve() == _ROOT.resolve()
-        and _COMMIT.fullmatch(commit)
+        and len(lines) == 3
+        and Path(lines[0]).resolve() == _ROOT.resolve()
+        and _COMMIT.fullmatch(lines[1])
+        and _TREE.fullmatch(lines[2])
     ):
+        return lines[1], lines[2]
+    return None
+
+
+def _source_identity() -> tuple[str, str]:
+    checkout = _checkout_identity()
+    if checkout is not None:
+        commit, _ = checkout
         status = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=normal"],
             cwd=_ROOT,
@@ -179,10 +188,15 @@ class sdist(_sdist):
     def make_release_tree(self, base_dir: str, files: list[str]) -> None:
         identity = _source_identity()
         super().make_release_tree(base_dir, files)
-        _write_build_identity(
-            Path(base_dir) / "src" / "m_agent" / "_build_identity.py", identity
-        )
-        _write_source_integrity(Path(base_dir))
+        release_tree = Path(base_dir)
+        _write_build_identity(release_tree / "src" / "m_agent" / "_build_identity.py", identity)
+        checkout = _checkout_identity()
+        if identity[1] == "clean" and checkout is not None and checkout[0] == identity[0]:
+            commit, tree = checkout
+            (release_tree / ".git_archival.txt").write_text(
+                f"commit {commit}\ntree {tree}\n"
+            )
+        _write_source_integrity(release_tree)
 
 
 setup(cmdclass={"build_py": build_py, "sdist": sdist})

@@ -14,7 +14,7 @@ from typing import NoReturn
 from uuid import uuid4
 
 from ._core_lifecycle import run_core_lifecycle
-from ._identity import validate_installed_identity
+from ._identity import installed_identity, validate_installed_identity
 from ._pack import (
     AcceptanceCheckResult,
     AcceptanceCheckStatus,
@@ -581,26 +581,15 @@ def _attest_declared_evidence(
     declared = {check.check_id: check for check in manifest.required_checks}
     authoritative = dict(evidence_view)
     independent = dict(independent_evidence)
-    subject_identity_digest = "sha256:" + hashlib.sha256(
-        json.dumps(
-            {
-                "source_commit": manifest.source_commit,
-                "artifact_digest": manifest.artifact_digest,
-                "sdist_digest": manifest.sdist_digest,
-                "environment": dict(manifest.environment),
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
     for result in results:
         check = declared[result.check_id]
         authoritative[check.authoritative_evidence] = result.evidence_digest
         if check.check_id == "core.lifecycle":
             independent[check.independent_evidence] = host_observation_digest
         elif check.check_id == "core.lifecycle.host-wheel":
-            independent[check.independent_evidence] = subject_identity_digest
+            independent[check.independent_evidence] = independent[
+                "host_wheel_identity_mutation_digest"
+            ]
         elif check.check_id == "core.lifecycle.bundle-tamper":
             independent[check.independent_evidence] = independent[
                 "bundle_mutation_independent_digest"
@@ -646,6 +635,48 @@ def _controlled_bundle_mutation_evidence(
     raise RuntimeError("controlled Bundle mutation was not detected")
 
 
+def _controlled_identity_mutation_evidence(
+    manifest: AcceptanceManifest, *, artifact: Path, sdist: Path
+) -> str:
+    """Prove the public identity gate rejects every frozen subject mutation."""
+    mutations: tuple[tuple[str, object], ...] = (
+        ("source_commit", "0" * 40),
+        ("artifact_digest", "sha256:" + "0" * 64),
+        ("sdist_digest", "sha256:" + "0" * 64),
+        ("fixture_digest", "sha256:" + "0" * 64),
+        (
+            "environment",
+            {
+                **dict(manifest.environment),
+                "os": "counterfeit" if manifest.environment.get("os") != "counterfeit" else "other",
+            },
+        ),
+    )
+    rejected: list[str] = []
+    for field, value in mutations:
+        candidate = manifest.model_copy(update={field: value})
+        try:
+            validate_installed_identity(candidate, artifact=artifact, sdist=sdist)
+        except ValueError:
+            rejected.append(field)
+        else:
+            raise RuntimeError(f"identity mutation was accepted: {field}")
+    expected = [field for field, _ in mutations]
+    if rejected != expected:
+        raise RuntimeError("identity mutation evidence is incomplete")
+    measured = installed_identity(artifact=artifact, sdist=sdist)
+    payload = {
+        "manifest_digest": manifest.digest,
+        "measured_identity": measured,
+        "rejected_fields": rejected,
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
 def _run(arguments: argparse.Namespace) -> int:
     manifest = _read_manifest(arguments.manifest)
     validate_installed_identity(manifest, artifact=arguments.wheel, sdist=arguments.sdist)
@@ -668,6 +699,13 @@ def _run(arguments: argparse.Namespace) -> int:
         run_core_lifecycle(fixture_digest=manifest.fixture_digest)
     )
     host_results, host_evidence = _isolated_host_result()
+    host_wheel_identity_mutation_digest = _controlled_identity_mutation_evidence(
+        manifest, artifact=arguments.wheel, sdist=arguments.sdist
+    )
+    evidence_view = {
+        **evidence_view,
+        "host_wheel_identity_mismatches_rejected": True,
+    }
     provisional_mutation_result = AcceptanceCheckResult(
         check_id="core.lifecycle.bundle-tamper",
         status=AcceptanceCheckStatus.PASS,
@@ -704,6 +742,7 @@ def _run(arguments: argparse.Namespace) -> int:
         {
             **independent_evidence,
             **host_evidence,
+            "host_wheel_identity_mutation_digest": host_wheel_identity_mutation_digest,
             "bundle_mutation_independent_digest": provisional_mutation_independent_digest,
         },
         host_observation_digest=str(host_evidence["host_observation_digest"]),
@@ -731,6 +770,7 @@ def _run(arguments: argparse.Namespace) -> int:
         evidence_view,
         {
             **independent_evidence,
+            "host_wheel_identity_mutation_digest": host_wheel_identity_mutation_digest,
             "bundle_mutation_independent_digest": mutation_independent_digest,
         },
         host_observation_digest=str(host_evidence["host_observation_digest"]),

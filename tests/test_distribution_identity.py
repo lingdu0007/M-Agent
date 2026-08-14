@@ -142,9 +142,12 @@ import tarfile
 import time
 import zipfile
 
+from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
+
+assert "m_agent.adapters" not in sys.modules
+
 import m_agent
 from m_agent.adapters import DeterministicModelAdapter, InMemoryRunStore, PlaintextPayloadCodec
-from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
 from m_agent.testing import (
     AcceptanceCheckResult,
     AcceptanceCheckStatus,
@@ -336,8 +339,9 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     )
     assert (
         bundle["independent_evidence"]["host_wheel_independent_digest"]
-        != identity["fixture_digest"]
+        == bundle["independent_evidence"]["host_wheel_identity_mutation_digest"]
     )
+    assert bundle["evidence_view"]["host_wheel_identity_mismatches_rejected"] is True
     assert bundle["independent_evidence"]["bundle_tamper_independent_digest"].startswith(
         "sha256:"
     )
@@ -367,7 +371,12 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         key.removeprefix("host_"): value
         for key, value in bundle["independent_evidence"].items()
         if key.startswith("host_")
-        and key not in {"host_observation_digest", "host_wheel_independent_digest"}
+        and key
+        not in {
+            "host_observation_digest",
+            "host_wheel_independent_digest",
+            "host_wheel_identity_mutation_digest",
+        }
     }
     assert host_observation == {
         "module_under_prefix": True,
@@ -918,20 +927,6 @@ class DistributionIdentityTests(unittest.TestCase):
             commit = _run(
                 ["git", "rev-parse", "HEAD"], cwd=repository_root, env=clean_environment
             ).strip()
-            archive = temporary_root / "source.tar"
-            _run(
-                ["git", "archive", "--format=tar", "--output", str(archive), "HEAD"],
-                cwd=repository_root,
-                env=clean_environment,
-            )
-            source_root = temporary_root / "source"
-            source_root.mkdir()
-            _run(
-                ["tar", "-xf", str(archive), "-C", str(source_root)],
-                cwd=temporary_root,
-                env=clean_environment,
-            )
-
             sdist_dir = temporary_root / "sdist"
             _run(
                 [
@@ -942,7 +937,7 @@ class DistributionIdentityTests(unittest.TestCase):
                     "--out-dir",
                     str(sdist_dir),
                 ],
-                cwd=source_root,
+                cwd=repository_root,
                 env=clean_environment,
             )
             sdist = next(sdist_dir.glob("*.tar.gz"))

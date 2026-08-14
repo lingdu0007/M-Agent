@@ -120,7 +120,6 @@ from ._steps import (
     StepStatus,
     StepType,
 )
-from .adapters import InMemoryRunStore, SQLiteRunStore
 from ._store import RunLease, RunStore
 from ._telemetry import (
     JsonlTelemetrySink,
@@ -235,3 +234,17 @@ __all__ = [
     "serialize_model_response",
     "serialize_tool_outcome",
 ]
+
+
+_LAZY_ADAPTER_FACADE = frozenset({"InMemoryRunStore", "SQLiteRunStore"})
+
+
+def __getattr__(name: str) -> object:
+    """Keep 0.2 root Store imports without loading Adapters for Runtime imports."""
+    if name not in _LAZY_ADAPTER_FACADE:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from . import adapters
+
+    value = getattr(adapters, name)
+    globals()[name] = value
+    return value
