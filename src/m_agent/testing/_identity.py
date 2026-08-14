@@ -41,6 +41,8 @@ _INSTALLER_METADATA = {
     "direct_url.json",
     "uv_cache.json",
 }
+_BUILD_IDENTITY_PATH = PurePosixPath("src/m_agent/_build_identity.py")
+_SOURCE_INTEGRITY_PATH = PurePosixPath("SOURCE_INTEGRITY.json")
 
 
 def _installed_distribution() -> Distribution:
@@ -89,7 +91,7 @@ def _artifact_digest() -> str:
 
 def _file_digest(path: Path) -> str:
     if not path.is_file():
-        raise ValueError(f"candidate wheel is not a file: {path}")
+        raise ValueError(f"candidate artifact is not a file: {path}")
     digest = hashlib.sha256()
     with path.open("rb") as artifact:
         for chunk in iter(lambda: artifact.read(65536), b""):
@@ -101,19 +103,75 @@ def _assert_sdist_matches_installed(source_artifact: Path) -> None:
     """Bind a source distribution to the embedded identity without executing it."""
     try:
         with tarfile.open(source_artifact, "r:*") as source_distribution:
-            members = [
-                member
-                for member in source_distribution.getmembers()
-                if member.name.endswith("/src/m_agent/_build_identity.py")
-                and member.isfile()
-            ]
-            if len(members) != 1:
+            members = source_distribution.getmembers()
+            regular_files = [member for member in members if member.isfile()]
+            if not regular_files or any(
+                not member.isfile() and not member.isdir() for member in members
+            ):
+                raise ValueError("source distribution contains unsupported members")
+            paths = [PurePosixPath(member.name) for member in regular_files]
+            if any(
+                not path.parts or path.is_absolute() or ".." in path.parts
+                for path in paths
+            ):
+                raise ValueError("source distribution contains unsafe member paths")
+            roots = {path.parts[0] for path in paths}
+            if len(roots) != 1:
+                raise ValueError("source distribution has no unique root")
+            root = roots.pop()
+            files_by_path = {
+                path.as_posix(): member
+                for path, member in zip(paths, regular_files, strict=True)
+            }
+            if len(files_by_path) != len(regular_files):
+                raise ValueError("source distribution contains duplicate files")
+            identity_path = str(PurePosixPath(root) / _BUILD_IDENTITY_PATH)
+            integrity_path = str(PurePosixPath(root) / _SOURCE_INTEGRITY_PATH)
+            if identity_path not in files_by_path:
                 raise ValueError("source distribution has no unique build identity")
-            source = source_distribution.extractfile(members[0])
+            if integrity_path not in files_by_path:
+                raise ValueError("source distribution has no source integrity manifest")
+            source = source_distribution.extractfile(files_by_path[identity_path])
             if source is None:
                 raise ValueError("source distribution build identity is unreadable")
             tree = ast.parse(source.read().decode("utf-8"))
-    except (OSError, tarfile.TarError, UnicodeDecodeError, SyntaxError) as error:
+            integrity = source_distribution.extractfile(files_by_path[integrity_path])
+            if integrity is None:
+                raise ValueError("source distribution integrity manifest is unreadable")
+            declared = json.loads(integrity.read().decode("utf-8"))
+            declared_files = declared.get("files")
+            if (
+                declared.get("schema_version") != "1"
+                or not isinstance(declared_files, dict)
+                or any(
+                    not isinstance(path, str) or not isinstance(digest, str)
+                    for path, digest in declared_files.items()
+                )
+            ):
+                raise ValueError("source distribution integrity manifest is invalid")
+            actual_files: dict[str, str] = {}
+            for path, member in files_by_path.items():
+                relative = str(PurePosixPath(path).relative_to(root))
+                if relative == str(_SOURCE_INTEGRITY_PATH):
+                    continue
+                content = source_distribution.extractfile(member)
+                if content is None:
+                    raise ValueError("source distribution file is unreadable")
+                actual_files[relative] = "sha256:" + hashlib.sha256(
+                    content.read()
+                ).hexdigest()
+            if declared_files != actual_files:
+                raise ValueError(
+                    "source distribution content does not match integrity manifest"
+                )
+    except (
+        AttributeError,
+        json.JSONDecodeError,
+        OSError,
+        tarfile.TarError,
+        UnicodeDecodeError,
+        SyntaxError,
+    ) as error:
         raise ValueError("candidate source distribution is invalid") from error
     values: dict[str, object] = {}
     for node in tree.body:

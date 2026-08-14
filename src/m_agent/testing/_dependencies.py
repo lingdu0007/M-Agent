@@ -19,6 +19,7 @@ _CONCRETE_ADAPTER_IMPORTS = frozenset(
         "m_agent._store.InMemoryRunStore",
     }
 )
+_CONCRETE_ADAPTER_CLASSES = frozenset({"InMemoryRunStore", "SQLiteRunStore"})
 
 
 def find_runtime_dependency_violations(
@@ -37,6 +38,14 @@ def find_runtime_dependency_violations(
         if relative == Path("__init__.py"):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name in _CONCRETE_ADAPTER_CLASSES
+            ):
+                violations.append(
+                    f"{path}: concrete Adapter {node.name} is defined in Runtime Core"
+                )
         parts = relative.with_suffix("").parts
         package_parts = parts[:-1]
         package = ".".join(("m_agent", *package_parts))

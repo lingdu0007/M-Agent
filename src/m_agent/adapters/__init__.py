@@ -8,8 +8,8 @@ from .._clock import FakeClock, SystemClock
 from .._codec import PlaintextPayloadCodec
 from .._context import DeterministicContextProvider
 from .._model import DeterministicModelAdapter, DeterministicStreamingModelAdapter
-from .._sqlite_store import SQLiteRunStore
-from .._store import InMemoryRunStore
+from ._in_memory_store import InMemoryRunStore
+from ._sqlite_store import SQLiteRunStore
 from .._telemetry import JsonlTelemetrySink
 from .._tools import DeterministicTool
 

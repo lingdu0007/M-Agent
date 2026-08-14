@@ -72,6 +72,21 @@ class AcceptanceCheck(BaseModel, frozen=True):
     evidence_level: EvidenceLevel = EvidenceLevel.CONTRACT
     required: bool = True
 
+    @model_validator(mode="after")
+    def _validate_complete_coverage(self) -> "AcceptanceCheck":
+        coverage = (
+            self.owner,
+            self.positive_check,
+            self.negative_check,
+            self.authoritative_evidence,
+            self.independent_evidence,
+            self.milestone,
+            self.non_claim,
+        )
+        if any(not value.strip() for value in coverage):
+            raise ValueError("Acceptance Check coverage declarations must be nonempty")
+        return self
+
 
 class AcceptanceCheckResult(BaseModel, frozen=True):
     model_config = ConfigDict(extra="forbid")
@@ -331,13 +346,6 @@ class PackExecution(BaseModel, frozen=True):
                 }
             )
         required = [by_id.get(check.check_id) for check in manifest.required_checks]
-        if any(result is None for result in required):
-            return self.model_copy(
-                update={
-                    "status": PackExecutionStatus.INCOMPLETE,
-                    "exit_code": EXIT_INCOMPLETE,
-                }
-            )
         if any(
             result.evidence_level is not check.evidence_level
             for check, result in zip(manifest.required_checks, required, strict=True)
@@ -349,21 +357,16 @@ class PackExecution(BaseModel, frozen=True):
                     "exit_code": EXIT_HARNESS_ERROR,
                 }
             )
-        if any(
-            check.evidence_level not in {EvidenceLevel.CONTRACT, EvidenceLevel.HOST}
-            for check in manifest.required_checks
-        ):
-            return self.model_copy(
-                update={
-                    "status": PackExecutionStatus.INCOMPLETE,
-                    "exit_code": EXIT_INCOMPLETE,
-                }
-            )
         statuses = {result.status for result in required if result is not None}
         if AcceptanceCheckStatus.ERROR in statuses:
             status, exit_code = PackExecutionStatus.ERROR, EXIT_HARNESS_ERROR
         elif AcceptanceCheckStatus.FAIL in statuses:
             status, exit_code = PackExecutionStatus.FAILED, EXIT_SUBJECT_FAILURE
+        elif any(result is None for result in required) or any(
+            check.evidence_level not in {EvidenceLevel.CONTRACT, EvidenceLevel.HOST}
+            for check in manifest.required_checks
+        ):
+            status, exit_code = PackExecutionStatus.INCOMPLETE, EXIT_INCOMPLETE
         elif statuses & {
             AcceptanceCheckStatus.NOT_RUN,
             AcceptanceCheckStatus.INCONCLUSIVE,
@@ -470,6 +473,15 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
                 )
 
     @staticmethod
+    def _assert_scenario_checks_match_execution(
+        checks: tuple[AcceptanceCheckResult, ...],
+        execution_checks: tuple[AcceptanceCheckResult, ...],
+    ) -> None:
+        execution_by_id = {result.check_id: result for result in execution_checks}
+        if any(execution_by_id.get(result.check_id) != result for result in checks):
+            raise ValueError("Bundle scenario checks must match execution checks")
+
+    @staticmethod
     def _assert_terminal_execution(
         manifest: AcceptanceManifest,
         execution: PackExecution,
@@ -542,6 +554,7 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
         cls._assert_minimal_check_results(checks)
         cls._assert_execution_checks(manifest, execution_checks)
         cls._assert_minimal_check_results(execution_checks)
+        cls._assert_scenario_checks_match_execution(checks, execution_checks)
         cls._ensure_minimal_evidence(evidence_view)
         if not independent_evidence:
             raise ValueError("Scenario Evidence Bundle requires independent evidence")
@@ -594,6 +607,9 @@ class ScenarioEvidenceBundle(BaseModel, frozen=True):
             self._assert_minimal_check_results(self.checks)
             self._assert_execution_checks(declared_manifest, self.execution_checks)
             self._assert_minimal_check_results(self.execution_checks)
+            self._assert_scenario_checks_match_execution(
+                self.checks, self.execution_checks
+            )
             self._ensure_minimal_evidence(self.evidence_view)
             if not self.independent_evidence:
                 raise ValueError("Scenario Evidence Bundle requires independent evidence")

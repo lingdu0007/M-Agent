@@ -130,18 +130,28 @@ print("m-agent installed artifact import passed")
 """
 
 _FOUNDATION_INSTALLED_PROBE = """
+import copy
 import hashlib
+import io
 import json
 from importlib.metadata import metadata
 from pathlib import Path
 import sys
 import tempfile
+import tarfile
 import zipfile
 
 import m_agent
 from m_agent.adapters import DeterministicModelAdapter, InMemoryRunStore, PlaintextPayloadCodec
 from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
-from m_agent.testing import core_lifecycle_manifest, installed_identity
+from m_agent.testing import (
+    AcceptanceCheckResult,
+    AcceptanceCheckStatus,
+    PackExecution,
+    ScenarioEvidenceBundle,
+    core_lifecycle_manifest,
+    installed_identity,
+)
 
 assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 wheel = Path(sys.argv[1])
@@ -174,6 +184,23 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         pass
     else:
         raise AssertionError("identity accepted a wheel that was not installed")
+    altered_sdist = Path(temporary_directory) / "altered.tar.gz"
+    with tarfile.open(sdist, "r:gz") as source, tarfile.open(altered_sdist, "w:gz") as altered:
+        for member in source.getmembers():
+            copied = copy.copy(member)
+            content = source.extractfile(member)
+            payload = content.read() if content is not None else None
+            if member.isfile() and member.name.endswith("/README.md"):
+                assert payload is not None
+                payload += b"\ncontrolled source tamper\n"
+                copied.size = len(payload)
+            altered.addfile(copied, io.BytesIO(payload) if payload is not None else None)
+    try:
+        installed_identity(artifact=wheel, sdist=altered_sdist)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("identity accepted an altered source distribution")
     manifest_path.write_text(manifest.model_dump_json())
     import subprocess
 
@@ -241,6 +268,18 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert completed.returncode == 2, completed.stderr
     manifest_path.write_text(manifest.model_dump_json())
 
+    altered_sdist_digest = "sha256:" + hashlib.sha256(altered_sdist.read_bytes()).hexdigest()
+    manifest_path.write_text(
+        manifest.model_copy(update={"sdist_digest": altered_sdist_digest}).model_dump_json()
+    )
+    completed = invoke(
+        "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(altered_sdist),
+        "--output-dir", str(output_dir),
+    )
+    assert completed.returncode == 2, completed.stderr
+    manifest_path.write_text(manifest.model_dump_json())
+
     completed = invoke(
         "inspect", "--manifest", str(manifest_path), "--wheel", str(wheel),
         "--sdist", str(sdist),
@@ -259,12 +298,48 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "--bundle", str(bundle_path),
     )
     assert completed.returncode == 0, completed.stderr
+    assert "Execution: PASSED (exit 0)" in completed.stdout
     for command in ("inspect", "verify", "render"):
         completed = invoke(
             command, "--wheel", str(wheel), "--sdist", str(sdist),
             "--bundle", str(bundle_path),
         )
         assert completed.returncode == 0, completed.stderr
+
+    reduced_manifest = manifest.model_copy(
+        update={
+            "pack_version": "counterfeit",
+            "profile": "reduced",
+            "required_checks": (manifest.required_checks[0],),
+        }
+    )
+    reduced_check = AcceptanceCheckResult(
+        check_id=reduced_manifest.required_checks[0].check_id,
+        status=AcceptanceCheckStatus.PASS,
+        evidence_level=reduced_manifest.required_checks[0].evidence_level,
+        reason_code="reduced_profile_result",
+        evidence_digest="sha256:" + "0" * 64,
+    )
+    reduced_execution = PackExecution.create(
+        reduced_manifest, execution_id="counterfeit-profile"
+    ).complete(reduced_manifest, (reduced_check,))
+    reduced_bundle = ScenarioEvidenceBundle.create(
+        manifest=reduced_manifest,
+        execution=reduced_execution,
+        execution_checks=(reduced_check,),
+        scenario="core-lifecycle",
+        checks=(reduced_check,),
+        evidence_view={"run_succeeded": True},
+        independent_evidence={"fixture_digest": identity["fixture_digest"]},
+    )
+    reduced_bundle_path = Path(temporary_directory) / "reduced-bundle.json"
+    reduced_bundle_path.write_text(reduced_bundle.model_dump_json())
+    for command in ("inspect", "verify", "render"):
+        completed = invoke(
+            command, "--wheel", str(wheel), "--sdist", str(sdist),
+            "--bundle", str(reduced_bundle_path),
+        )
+        assert completed.returncode == 2, completed.stderr
 
     bundle["checks"][0]["status"] = "FAIL"
     bundle_path.write_text(json.dumps(bundle))

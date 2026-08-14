@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -19,6 +20,7 @@ _COMMIT = re.compile(r"[0-9a-f]{40,64}\Z")
 _TREE = re.compile(r"[0-9a-f]{40}\Z")
 _ARCHIVAL_TEMPLATE = b"commit $Format:%H$\ntree $Format:%T$\n"
 _GENERATED_PATHS = {".git", ".venv", ".pytest_cache", "__pycache__", "build", "dist"}
+_SOURCE_INTEGRITY_NAME = "SOURCE_INTEGRITY.json"
 
 
 def _git_blob(data: bytes) -> bytes:
@@ -93,6 +95,24 @@ def _write_build_identity(
     )
 
 
+def _write_source_integrity(root: Path) -> None:
+    files = {
+        path.relative_to(root).as_posix(): "sha256:"
+        + hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.name != _SOURCE_INTEGRITY_NAME
+    }
+    (root / _SOURCE_INTEGRITY_NAME).write_text(
+        json.dumps(
+            {"schema_version": "1", "files": files},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
 class build_py(_build_py):
     """Replace the source-checkout fallback only in the generated wheel tree."""
 
@@ -110,6 +130,7 @@ class sdist(_sdist):
         _write_build_identity(
             Path(base_dir) / "src" / "m_agent" / "_build_identity.py", identity
         )
+        _write_source_integrity(Path(base_dir))
 
 
 setup(cmdclass={"build_py": build_py, "sdist": sdist})

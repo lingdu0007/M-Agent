@@ -120,8 +120,8 @@ from ._steps import (
     StepStatus,
     StepType,
 )
-from ._sqlite_store import SQLiteRunStore
-from ._store import InMemoryRunStore, RunLease, RunStore
+from .adapters import InMemoryRunStore, SQLiteRunStore
+from ._store import RunLease, RunStore
 from ._telemetry import (
     JsonlTelemetrySink,
     TelemetryEvent,

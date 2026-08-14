@@ -157,6 +157,20 @@ def _read_bundle(path: Path) -> ScenarioEvidenceBundle:
     return ScenarioEvidenceBundle.model_validate_json(path.read_text())
 
 
+def _assert_core_lifecycle_manifest(manifest: AcceptanceManifest) -> None:
+    expected = core_lifecycle_manifest(
+        source_commit=manifest.source_commit,
+        artifact_digest=manifest.artifact_digest,
+        sdist_digest=manifest.sdist_digest,
+        fixture_digest=manifest.fixture_digest,
+        environment=manifest.environment,
+    )
+    if manifest != expected:
+        raise ValueError(
+            "Ticket 07 CLI supports only the frozen core-lifecycle foundation profile"
+        )
+
+
 def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
     bundle = _read_bundle(arguments.bundle)
     if arguments.manifest is not None:
@@ -167,23 +181,14 @@ def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
         bundle.manifest, artifact=arguments.wheel, sdist=arguments.sdist
     )
     bundle.verify()
+    _assert_core_lifecycle_manifest(bundle.manifest)
     return bundle
 
 
 def _run(arguments: argparse.Namespace) -> int:
     manifest = _read_manifest(arguments.manifest)
     validate_installed_identity(manifest, artifact=arguments.wheel, sdist=arguments.sdist)
-    expected_manifest = core_lifecycle_manifest(
-        source_commit=manifest.source_commit,
-        artifact_digest=manifest.artifact_digest,
-        sdist_digest=manifest.sdist_digest,
-        fixture_digest=manifest.fixture_digest,
-        environment=manifest.environment,
-    )
-    if manifest != expected_manifest:
-        raise ValueError(
-            "Ticket 07 CLI supports only the frozen core-lifecycle foundation profile"
-        )
+    _assert_core_lifecycle_manifest(manifest)
     execution = PackExecution.create(
         manifest, execution_id=f"core-lifecycle-{uuid4().hex}"
     ).start(manifest)
@@ -337,6 +342,7 @@ def _render(arguments: argparse.Namespace) -> int:
     print(f"# {bundle.scenario}")
     print()
     print(f"Bundle: {bundle.content_digest}")
+    print(f"Execution: {bundle.execution.status} (exit {bundle.execution.exit_code})")
     for check in bundle.checks:
         print(f"- {check.check_id}: {check.status}")
     return 0

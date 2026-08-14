@@ -41,6 +41,22 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             evidence_digest="sha256:" + "0" * 64,
         )
 
+    @staticmethod
+    def _acceptance_check(**values: object) -> object:
+        """Create complete test coverage through the public schema."""
+        from m_agent.testing import AcceptanceCheck
+
+        coverage = {
+            "owner": "test-owner",
+            "positive_check": "public_positive_check",
+            "negative_check": "public_negative_check",
+            "authoritative_evidence": "public_evidence",
+            "independent_evidence": "independent_evidence",
+            "milestone": "test-milestone",
+            "non_claim": "not_a_release_claim",
+        }
+        return AcceptanceCheck(**coverage, **values)
+
     def test_root_facade_and_runtime_namespace_complete_one_lifecycle(self) -> None:
         """An integrator can use only public imports for a deterministic Run."""
         from m_agent import (
@@ -136,7 +152,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"python": "3.11", "os": "linux"},
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
@@ -174,7 +190,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
 
         from m_agent.testing import AcceptanceCheck, AcceptanceManifest, EvidenceLevel
 
-        required_check = AcceptanceCheck(
+        required_check = self._acceptance_check(
             check_id="core.lifecycle.host-wheel",
             scenario="core-lifecycle",
             public_seam="python -I -m m_agent.testing",
@@ -194,6 +210,31 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             AcceptanceManifest(
                 sdist_digest="sdist", environment={"os": "windows"}, **common
+            )
+
+    def test_manifest_rejects_a_required_check_without_complete_coverage(self) -> None:
+        """Required Pack coverage cannot omit its owner, evidence, or non-claim."""
+        from pydantic import ValidationError
+
+        from m_agent.testing import AcceptanceCheck, AcceptanceManifest
+
+        with self.assertRaises(ValidationError):
+            AcceptanceManifest(
+                pack_version="foundation-v1",
+                profile="core-lifecycle-foundation",
+                source_commit="source",
+                artifact_digest="artifact",
+                sdist_digest="sdist",
+                fixture_digest="fixture",
+                environment={"os": "linux"},
+                scenarios=("core-lifecycle",),
+                required_checks=(
+                    AcceptanceCheck(
+                        check_id="core.lifecycle",
+                        scenario="core-lifecycle",
+                        public_seam="m_agent.runtime.Runner",
+                    ),
+                ),
             )
 
     def test_core_lifecycle_foundation_profile_freezes_coverage_declarations(self) -> None:
@@ -236,7 +277,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"os": "linux", "python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
@@ -264,7 +305,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
@@ -298,7 +339,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
@@ -401,7 +442,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
@@ -440,6 +481,73 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                         independent_evidence=independent_evidence,
                     )
 
+    def test_bundle_rejects_scenario_checks_that_contradict_execution(self) -> None:
+        """A Bundle cannot render a PASS for an execution check that failed."""
+        from m_agent.testing import (
+            AcceptanceManifest,
+            BundleIntegrityError,
+            EvidenceLevel,
+            PackExecution,
+            ScenarioEvidenceBundle,
+        )
+
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit="source",
+            artifact_digest="artifact",
+            sdist_digest="sdist",
+            fixture_digest="fixture",
+            environment={"python": "3.11"},
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                self._acceptance_check(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
+        )
+        failed = self._check_result(
+            "core.lifecycle", status="FAIL", evidence_level=EvidenceLevel.CONTRACT
+        )
+        passed = self._check_result(
+            "core.lifecycle", status="PASS", evidence_level=EvidenceLevel.CONTRACT
+        )
+        execution = PackExecution.create(manifest, execution_id="exec-1").complete(
+            manifest, (failed,)
+        )
+
+        with self.assertRaises(ValueError):
+            ScenarioEvidenceBundle.create(
+                manifest=manifest,
+                execution=execution,
+                execution_checks=(failed,),
+                scenario="core-lifecycle",
+                checks=(passed,),
+                evidence_view={"run_succeeded": False},
+                independent_evidence={"fixture_digest": "sha256:" + "f" * 64},
+            )
+
+        consistent = ScenarioEvidenceBundle.create(
+            manifest=manifest,
+            execution=execution,
+            execution_checks=(failed,),
+            scenario="core-lifecycle",
+            checks=(failed,),
+            evidence_view={"run_succeeded": False},
+            independent_evidence={"fixture_digest": "sha256:" + "f" * 64},
+        ).model_dump(mode="json")
+        consistent["checks"][0]["status"] = "PASS"
+        payload = {key: value for key, value in consistent.items() if key != "content_digest"}
+        consistent["content_digest"] = "sha256:" + hashlib.sha256(
+            json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        with self.assertRaises(BundleIntegrityError):
+            ScenarioEvidenceBundle.model_validate(consistent).verify()
+
     def test_multi_scenario_pack_creates_a_bundle_per_declared_scenario(self) -> None:
         """A terminal Pack can retain its full result set in each Scenario Bundle."""
         from m_agent.testing import (
@@ -460,12 +568,12 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"python": "3.11"},
             scenarios=("first", "second"),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="first.check",
                     scenario="first",
                     public_seam="m_agent.runtime.Runner",
                 ),
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="second.check",
                     scenario="second",
                     public_seam="m_agent.runtime.Runner",
@@ -535,7 +643,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             "environment": {"python": "3.11"},
             "scenarios": ("core-lifecycle",),
             "required_checks": (
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
@@ -585,7 +693,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 **common,
                 scenarios=("core-lifecycle",),
                 required_checks=(
-                    AcceptanceCheck(
+                    self._acceptance_check(
                         check_id="wrong-scenario",
                         scenario="other",
                         public_seam="m_agent.runtime.Runner",
@@ -597,7 +705,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 **common,
                 scenarios=("core-lifecycle",),
                 required_checks=(
-                    AcceptanceCheck(
+                    self._acceptance_check(
                         check_id="not-required",
                         scenario="core-lifecycle",
                         public_seam="m_agent.runtime.Runner",
@@ -634,6 +742,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertEqual(companion.__all__, [])
         self.assertTrue(hasattr(testing, "AcceptanceManifest"))
         self.assertEqual(find_runtime_dependency_violations(), ())
+        self.assertEqual(runtime.RunStore.__module__, "m_agent._store")
+        self.assertTrue(adapters.InMemoryRunStore.__module__.startswith("m_agent.adapters"))
+        self.assertTrue(adapters.SQLiteRunStore.__module__.startswith("m_agent.adapters"))
+        self.assertNotEqual(runtime.RunStore.__module__, adapters.InMemoryRunStore.__module__)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             source_root = Path(temporary_directory)
@@ -658,6 +770,18 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
 
         self.assertEqual(len(violations), 1)
         self.assertIn("m_agent.adapters", violations[0])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source_root = Path(temporary_directory)
+            package_directory = source_root / "m_agent"
+            package_directory.mkdir()
+            (package_directory / "_store.py").write_text(
+                "class InMemoryRunStore:\n    pass\n"
+            )
+            violations = find_runtime_dependency_violations(source_root)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("InMemoryRunStore", violations[0])
 
         for source, expected_module in (
             ("from .. import adapters\n", "m_agent.adapters"),
@@ -708,17 +832,17 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment=environment,
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
                 ),
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle.unknown-definition",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.DefinitionRegistry",
                 ),
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle.bundle-tamper",
                     scenario="core-lifecycle",
                     public_seam="m_agent.testing.ScenarioEvidenceBundle",
@@ -772,7 +896,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
@@ -803,6 +927,49 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 self.assertIs(completed.status, expected_status)
                 self.assertEqual(completed.exit_code, expected_exit)
 
+    def test_known_required_failure_precedes_a_missing_required_result(self) -> None:
+        """A supplied required FAIL remains the Pack verdict when coverage is missing."""
+        from m_agent.testing import (
+            AcceptanceManifest,
+            EvidenceLevel,
+            PackExecution,
+            PackExecutionStatus,
+        )
+
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit="source",
+            artifact_digest="artifact",
+            sdist_digest="sdist",
+            fixture_digest="fixture",
+            environment={"python": "3.11"},
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                self._acceptance_check(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+                self._acceptance_check(
+                    check_id="core.lifecycle.other",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
+        )
+        completed = PackExecution.create(manifest, execution_id="exec-1").complete(
+            manifest,
+            (
+                self._check_result(
+                    "core.lifecycle", status="FAIL", evidence_level=EvidenceLevel.CONTRACT
+                ),
+            ),
+        )
+
+        self.assertIs(completed.status, PackExecutionStatus.FAILED)
+        self.assertEqual(completed.exit_code, 1)
+
     def test_pack_marks_mismatched_required_evidence_level_as_harness_error(self) -> None:
         """A CONTRACT result cannot satisfy a required HOST declaration."""
         from m_agent.testing import (
@@ -824,7 +991,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="core.lifecycle",
                     scenario="core-lifecycle",
                     public_seam="m_agent.runtime.Runner",
@@ -868,7 +1035,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(
-                AcceptanceCheck(
+                self._acceptance_check(
                     check_id="provider.contract",
                     scenario="core-lifecycle",
                     public_seam="m_agent.adapters.provider",
