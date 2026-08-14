@@ -353,8 +353,6 @@ def installed_identity(
             "build_tool": f"{BUILD_TOOL}=={BUILD_TOOL_VERSION}",
             "dependency_summary": _dependency_summary(installed),
             "installed_distribution_summary": _distribution_summary(installed_versions),
-            "environment_prefix_digest": "sha256:"
-            + hashlib.sha256(str(Path(sys.prefix).resolve()).encode("utf-8")).hexdigest(),
         },
     }
 
