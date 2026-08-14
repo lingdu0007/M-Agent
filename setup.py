@@ -11,6 +11,7 @@ from pathlib import Path
 import setuptools
 from setuptools import setup
 from setuptools.command.build_py import build_py as _build_py
+from setuptools.command.sdist import sdist as _sdist
 
 
 _ROOT = Path(__file__).resolve().parent
@@ -80,19 +81,35 @@ def _source_identity() -> tuple[str, str]:
     return "unavailable", "unknown"
 
 
+def _write_build_identity(
+    target: Path, identity: tuple[str, str] | None = None
+) -> None:
+    commit, state = identity or _source_identity()
+    target.write_text(
+        f"SOURCE_COMMIT = {commit!r}\n"
+        f"SOURCE_STATE = {state!r}\n"
+        "BUILD_TOOL = 'setuptools'\n"
+        f"BUILD_TOOL_VERSION = {setuptools.__version__!r}\n"
+    )
+
+
 class build_py(_build_py):
     """Replace the source-checkout fallback only in the generated wheel tree."""
 
     def run(self) -> None:
         super().run()
-        target = Path(self.build_lib) / "m_agent" / "_build_identity.py"
-        commit, state = _source_identity()
-        target.write_text(
-            f"SOURCE_COMMIT = {commit!r}\n"
-            f"SOURCE_STATE = {state!r}\n"
-            "BUILD_TOOL = 'setuptools'\n"
-            f"BUILD_TOOL_VERSION = {setuptools.__version__!r}\n"
+        _write_build_identity(Path(self.build_lib) / "m_agent" / "_build_identity.py")
+
+
+class sdist(_sdist):
+    """Embed the same clean source provenance in the generated source artifact."""
+
+    def make_release_tree(self, base_dir: str, files: list[str]) -> None:
+        identity = _source_identity()
+        super().make_release_tree(base_dir, files)
+        _write_build_identity(
+            Path(base_dir) / "src" / "m_agent" / "_build_identity.py", identity
         )
 
 
-setup(cmdclass={"build_py": build_py})
+setup(cmdclass={"build_py": build_py, "sdist": sdist})

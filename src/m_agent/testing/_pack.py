@@ -17,6 +17,7 @@ _SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _EVIDENCE_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _MANIFEST_SCHEMA_VERSION = "1"
 _BUNDLE_SCHEMA_VERSION = "4"
+_SUPPORTED_HOST_OSES = frozenset({"darwin", "linux"})
 
 
 class EvidenceLevel(StrEnum):
@@ -61,6 +62,13 @@ class AcceptanceCheck(BaseModel, frozen=True):
     check_id: str
     scenario: str
     public_seam: str
+    owner: str = ""
+    positive_check: str = ""
+    negative_check: str = ""
+    authoritative_evidence: str = ""
+    independent_evidence: str = ""
+    milestone: str = ""
+    non_claim: str = ""
     evidence_level: EvidenceLevel = EvidenceLevel.CONTRACT
     required: bool = True
 
@@ -96,6 +104,7 @@ class AcceptanceManifest(BaseModel, frozen=True):
     profile: str
     source_commit: str
     artifact_digest: str
+    sdist_digest: str
     fixture_digest: str
     environment: Mapping[str, str] = Field(default_factory=dict)
     scenarios: tuple[str, ...] = ()
@@ -119,6 +128,14 @@ class AcceptanceManifest(BaseModel, frozen=True):
             raise ValueError(
                 "Manifest required checks must be required and name a declared Scenario"
             )
+        if (
+            any(
+                check.evidence_level is EvidenceLevel.HOST
+                for check in self.required_checks
+            )
+            and self.environment.get("os") == "windows"
+        ):
+            raise ValueError("Windows is unsupported for Acceptance Pack HOST evidence")
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
         return self
 
@@ -138,6 +155,120 @@ class AcceptanceManifest(BaseModel, frozen=True):
     @property
     def digest(self) -> str:
         return "sha256:" + hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
+CORE_LIFECYCLE_PACK_VERSION = "foundation-v1"
+CORE_LIFECYCLE_PROFILE = "core-lifecycle-foundation"
+CORE_LIFECYCLE_SCENARIO = "core-lifecycle"
+_CORE_LIFECYCLE_REQUIRED_CHECKS = (
+    AcceptanceCheck(
+        check_id="core.lifecycle",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Runtime Core",
+        public_seam="m_agent.runtime.Runner",
+        positive_check="create_start_inspect_deterministic_run",
+        negative_check="non_success_terminal_is_fail",
+        authoritative_evidence="public_runinspection_counts",
+        independent_evidence="fixture_digest_isolated_wheel_observation",
+        milestone="foundation",
+        non_claim="provider_or_production_execution",
+    ),
+    AcceptanceCheck(
+        check_id="core.lifecycle.unknown-definition",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Runtime Core",
+        public_seam="m_agent.runtime.DefinitionRegistry",
+        positive_check="unknown_definition_raises_public_error",
+        negative_check="successful_unknown_resolution_is_fail",
+        authoritative_evidence="public_registry_result",
+        independent_evidence="isolated_wheel_observation_digest",
+        milestone="foundation",
+        non_claim="definition_persistence",
+    ),
+    AcceptanceCheck(
+        check_id="core.lifecycle.public-namespaces",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Distribution API",
+        public_seam="m_agent.runtime,m_agent.adapters,m_agent.companion,m_agent.testing",
+        positive_check="four_public_namespaces_import",
+        negative_check="missing_or_wrong_binding_is_fail",
+        authoritative_evidence="installed_wheel_import_view",
+        independent_evidence="isolated_wheel_observation_digest",
+        milestone="foundation",
+        non_claim="future_companion_capabilities",
+    ),
+    AcceptanceCheck(
+        check_id="core.lifecycle.dependency-direction",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Runtime Core",
+        public_seam="m_agent.testing.find_runtime_dependency_violations",
+        positive_check="installed_core_has_no_reverse_layer_import",
+        negative_check="forbidden_import_is_fail",
+        authoritative_evidence="static_installed_core_scan",
+        independent_evidence="isolated_wheel_observation_digest",
+        milestone="foundation",
+        non_claim="dynamic_behavior_outside_core_files",
+    ),
+    AcceptanceCheck(
+        check_id="core.lifecycle.expand-compatibility",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Distribution API",
+        public_seam="m_agent,m_agent.runtime",
+        positive_check="root_runner_and_clock_retain_runtime_binding",
+        negative_check="changed_binding_is_fail",
+        authoritative_evidence="public_import_identity",
+        independent_evidence="isolated_wheel_observation_digest",
+        milestone="0_2_expand",
+        non_claim="0_3_root_retention",
+    ),
+    AcceptanceCheck(
+        check_id="core.lifecycle.bundle-tamper",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Testing",
+        public_seam="m_agent.testing.ScenarioEvidenceBundle",
+        positive_check="controlled_bundle_mutation_is_detected",
+        negative_check="undetected_mutation_is_harness_error",
+        authoritative_evidence="content_digest",
+        independent_evidence="measured_fixture_digest",
+        milestone="foundation",
+        non_claim="external_ledger_integrity",
+    ),
+    AcceptanceCheck(
+        check_id="core.lifecycle.host-wheel",
+        scenario=CORE_LIFECYCLE_SCENARIO,
+        owner="Testing",
+        public_seam="python -I -m m_agent.testing",
+        positive_check="exact_wheel_and_sdist_install_in_clean_external_venv",
+        negative_check="source_artifact_fixture_or_environment_mismatch_is_rejected",
+        authoritative_evidence="wheel_and_sdist_sha256",
+        independent_evidence="isolated_sqlite_restart_observation",
+        milestone="foundation",
+        non_claim="live_provider_behavior",
+        evidence_level=EvidenceLevel.HOST,
+    ),
+)
+
+
+def core_lifecycle_manifest(
+    *,
+    source_commit: str,
+    artifact_digest: str,
+    sdist_digest: str,
+    fixture_digest: str,
+    environment: Mapping[str, str],
+) -> AcceptanceManifest:
+    """Build the complete, one-scenario Ticket 07 foundation declaration."""
+    return AcceptanceManifest(
+        pack_version=CORE_LIFECYCLE_PACK_VERSION,
+        profile=CORE_LIFECYCLE_PROFILE,
+        source_commit=source_commit,
+        artifact_digest=artifact_digest,
+        sdist_digest=sdist_digest,
+        fixture_digest=fixture_digest,
+        environment=environment,
+        scenarios=(CORE_LIFECYCLE_SCENARIO,),
+        required_checks=_CORE_LIFECYCLE_REQUIRED_CHECKS,
+    )
 
 
 class PackExecution(BaseModel, frozen=True):

@@ -131,6 +131,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
             artifact_digest="sha256:" + "a" * 64,
+            sdist_digest="sha256:" + "c" * 64,
             fixture_digest="sha256:" + "b" * 64,
             environment={"python": "3.11", "os": "linux"},
             scenarios=("core-lifecycle",),
@@ -155,6 +156,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             ("schema_version", "2"),
             ("source_commit", "different"),
             ("artifact_digest", "different"),
+            ("sdist_digest", "different"),
             ("fixture_digest", "different"),
             ("environment", {"python": "3.12", "os": "linux"}),
             ("scenarios", ("other-scenario",)),
@@ -166,6 +168,61 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     execution.assert_matches(changed)
 
+    def test_foundation_manifest_requires_a_source_distribution_and_supported_host(self) -> None:
+        """The public Manifest cannot claim a HOST result without both artifacts."""
+        from pydantic import ValidationError
+
+        from m_agent.testing import AcceptanceCheck, AcceptanceManifest, EvidenceLevel
+
+        required_check = AcceptanceCheck(
+            check_id="core.lifecycle.host-wheel",
+            scenario="core-lifecycle",
+            public_seam="python -I -m m_agent.testing",
+            evidence_level=EvidenceLevel.HOST,
+        )
+        common = {
+            "pack_version": "foundation-v1",
+            "profile": "core-lifecycle-foundation",
+            "source_commit": "source",
+            "artifact_digest": "artifact",
+            "fixture_digest": "fixture",
+            "scenarios": ("core-lifecycle",),
+            "required_checks": (required_check,),
+        }
+        with self.assertRaises(ValidationError):
+            AcceptanceManifest(environment={"os": "linux"}, **common)
+        with self.assertRaises(ValidationError):
+            AcceptanceManifest(
+                sdist_digest="sdist", environment={"os": "windows"}, **common
+            )
+
+    def test_core_lifecycle_foundation_profile_freezes_coverage_declarations(self) -> None:
+        """The only Ticket 07 profile is not a substitute for foundation-release."""
+        from m_agent.testing import core_lifecycle_manifest
+
+        manifest = core_lifecycle_manifest(
+            source_commit="source",
+            artifact_digest="artifact",
+            sdist_digest="sdist",
+            fixture_digest="fixture",
+            environment={"os": "linux"},
+        )
+
+        self.assertEqual(manifest.profile, "core-lifecycle-foundation")
+        self.assertEqual(manifest.pack_version, "foundation-v1")
+        self.assertEqual(manifest.scenarios, ("core-lifecycle",))
+        self.assertEqual(len(manifest.required_checks), 7)
+        for check in manifest.required_checks:
+            with self.subTest(check_id=check.check_id):
+                self.assertTrue(check.owner)
+                self.assertTrue(check.public_seam)
+                self.assertTrue(check.positive_check)
+                self.assertTrue(check.negative_check)
+                self.assertTrue(check.authoritative_evidence)
+                self.assertTrue(check.independent_evidence)
+                self.assertTrue(check.milestone)
+                self.assertTrue(check.non_claim)
+
     def test_manifest_digest_is_canonical_and_not_python_repr(self) -> None:
         from m_agent.testing import AcceptanceCheck, AcceptanceManifest
 
@@ -174,6 +231,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit="source",
             artifact_digest="artifact",
+            sdist_digest="sdist",
             fixture_digest="fixture",
             environment={"os": "linux", "python": "3.11"},
             scenarios=("core-lifecycle",),
@@ -201,6 +259,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit="source",
             artifact_digest="artifact",
+            sdist_digest="sdist",
             fixture_digest="fixture",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
@@ -234,6 +293,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit="source",
             artifact_digest="artifact",
+            sdist_digest="sdist",
             fixture_digest="fixture",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
@@ -336,6 +396,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit="source",
             artifact_digest="artifact",
+            sdist_digest="sdist",
             fixture_digest="fixture",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
@@ -394,6 +455,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit="source",
             artifact_digest="artifact",
+            sdist_digest="sdist",
             fixture_digest="fixture",
             environment={"python": "3.11"},
             scenarios=("first", "second"),
@@ -468,6 +530,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             "profile": "0.3",
             "source_commit": "source",
             "artifact_digest": "artifact",
+            "sdist_digest": "sdist",
             "fixture_digest": "fixture",
             "environment": {"python": "3.11"},
             "scenarios": ("core-lifecycle",),
@@ -511,6 +574,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             "profile": "0.3",
             "source_commit": "source",
             "artifact_digest": "artifact",
+            "sdist_digest": "sdist",
             "fixture_digest": "fixture",
             "environment": {"python": "3.11"},
         }
@@ -554,6 +618,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 profile="0.3",
                 source_commit="source",
                 artifact_digest="artifact",
+                sdist_digest="sdist",
                 fixture_digest="fixture",
                 environment={"python": "3.11"},
                 scenarios=("core-lifecycle",),
@@ -602,13 +667,27 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 "import importlib\nimportlib.import_module('m_agent.testing')\n",
                 "m_agent.testing",
             ),
+            (
+                "from ._sqlite_store import SQLiteRunStore\n",
+                "m_agent._sqlite_store.SQLiteRunStore",
+            ),
+            (
+                "from ._store import InMemoryRunStore\n",
+                "m_agent._store.InMemoryRunStore",
+            ),
         ):
             with self.subTest(source=source):
                 with tempfile.TemporaryDirectory() as temporary_directory:
                     source_root = Path(temporary_directory)
-                    runtime_directory = source_root / "m_agent" / "runtime"
-                    runtime_directory.mkdir(parents=True)
-                    (runtime_directory / "__init__.py").write_text(source)
+                    if expected_module.startswith("m_agent._"):
+                        package_directory = source_root / "m_agent"
+                        package_directory.mkdir()
+                        target = package_directory / "_runner.py"
+                    else:
+                        runtime_directory = source_root / "m_agent" / "runtime"
+                        runtime_directory.mkdir(parents=True)
+                        target = runtime_directory / "__init__.py"
+                    target.write_text(source)
                     violations = find_runtime_dependency_violations(source_root)
 
                 self.assertEqual(len(violations), 1)
@@ -624,6 +703,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit=source_commit,
             artifact_digest=artifact_digest,
+            sdist_digest="sdist",
             fixture_digest="fixture",
             environment=environment,
             scenarios=("core-lifecycle",),
@@ -659,6 +739,8 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                     str(manifest_path),
                     "--wheel",
                     str(root / "candidate.whl"),
+                    "--sdist",
+                    str(root / "candidate.tar.gz"),
                     "--output-dir",
                     str(root / "bundles"),
                 ],
@@ -685,6 +767,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit="source",
             artifact_digest="artifact",
+            sdist_digest="sdist",
             fixture_digest="fixture",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
@@ -736,6 +819,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             profile="0.3",
             source_commit="source",
             artifact_digest="artifact",
+            sdist_digest="sdist",
             fixture_digest="fixture",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
@@ -777,9 +861,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         manifest = AcceptanceManifest(
             pack_version="0.3.0",
             profile="0.3",
-            source_commit="source",
-            artifact_digest="artifact",
-            fixture_digest="fixture",
+           source_commit="source",
+           artifact_digest="artifact",
+            sdist_digest="sdist",
+           fixture_digest="fixture",
             environment={"python": "3.11"},
             scenarios=("core-lifecycle",),
             required_checks=(

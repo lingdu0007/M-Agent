@@ -13,6 +13,12 @@ _FORBIDDEN_PREFIXES = (
     "m_agent.provider",
     "m_agent.testing",
 )
+_CONCRETE_ADAPTER_IMPORTS = frozenset(
+    {
+        "m_agent._sqlite_store.SQLiteRunStore",
+        "m_agent._store.InMemoryRunStore",
+    }
+)
 
 
 def find_runtime_dependency_violations(
@@ -27,6 +33,8 @@ def find_runtime_dependency_violations(
     for path in sorted(package_root.rglob("*.py")):
         relative = path.relative_to(package_root)
         if relative.parts[0] in excluded_layers:
+            continue
+        if relative == Path("__init__.py"):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         parts = relative.with_suffix("").parts
@@ -82,6 +90,9 @@ def find_runtime_dependency_violations(
             ):
                 modules.append(node.args[0].value)
             for module in modules:
-                if module.startswith(_FORBIDDEN_PREFIXES):
+                if (
+                    module.startswith(_FORBIDDEN_PREFIXES)
+                    or module in _CONCRETE_ADAPTER_IMPORTS
+                ):
                     violations.append(f"{path}: import {module}")
     return tuple(violations)

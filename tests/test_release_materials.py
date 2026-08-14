@@ -17,7 +17,8 @@ class ReleaseMaterialTests(unittest.TestCase):
         self.assertEqual(project["version"], "0.2.0")
         self.assertEqual(project["description"], "An embeddable Agent Application Runtime for Python")
         self.assertEqual(project["requires-python"], ">=3.11")
-        self.assertEqual(project["dependencies"], ["packaging>=23", "pydantic>=2"])
+        self.assertEqual(project["dependencies"], ["pydantic>=2"])
+        self.assertEqual(project["optional-dependencies"]["testing"], ["packaging>=23"])
         self.assertEqual(project["license"], "Apache-2.0")
         self.assertIn("httpx>=0.27", project["optional-dependencies"]["provider"])
         for extra in ("storage", "telemetry", "security"):

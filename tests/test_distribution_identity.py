@@ -141,62 +141,24 @@ import zipfile
 import m_agent
 from m_agent.adapters import DeterministicModelAdapter, InMemoryRunStore, PlaintextPayloadCodec
 from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
-from m_agent.testing import AcceptanceCheck, AcceptanceManifest, EvidenceLevel, installed_identity
+from m_agent.testing import core_lifecycle_manifest, installed_identity
 
 assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 wheel = Path(sys.argv[1])
-identity = installed_identity(artifact=wheel)
+sdist = Path(sys.argv[2])
+identity = installed_identity(artifact=wheel, sdist=sdist)
 assert identity["environment"]["installation"] == "wheel"
 assert identity["source_commit"] not in {"development", "unavailable"}
 assert identity["environment"]["source_state"] == "clean"
 assert identity["environment"]["build_tool"].startswith("setuptools==")
 assert identity["environment"]["dependency_summary"].startswith("sha256:")
-manifest = AcceptanceManifest(
-    pack_version="0.3.0",
-    profile="0.3",
+assert identity["sdist_digest"].startswith("sha256:")
+manifest = core_lifecycle_manifest(
     source_commit=identity["source_commit"],
     artifact_digest=identity["artifact_digest"],
+    sdist_digest=identity["sdist_digest"],
     fixture_digest=identity["fixture_digest"],
     environment=identity["environment"],
-    scenarios=("core-lifecycle",),
-    required_checks=(
-        AcceptanceCheck(
-            check_id="core.lifecycle",
-            scenario="core-lifecycle",
-            public_seam="m_agent.runtime.Runner",
-        ),
-        AcceptanceCheck(
-            check_id="core.lifecycle.unknown-definition",
-            scenario="core-lifecycle",
-            public_seam="m_agent.runtime.DefinitionRegistry",
-        ),
-        AcceptanceCheck(
-            check_id="core.lifecycle.public-namespaces",
-            scenario="core-lifecycle",
-            public_seam="m_agent.runtime,m_agent.adapters,m_agent.companion,m_agent.testing",
-        ),
-        AcceptanceCheck(
-            check_id="core.lifecycle.dependency-direction",
-            scenario="core-lifecycle",
-            public_seam="m_agent.testing.find_runtime_dependency_violations",
-        ),
-        AcceptanceCheck(
-            check_id="core.lifecycle.expand-compatibility",
-            scenario="core-lifecycle",
-            public_seam="m_agent,m_agent.runtime",
-        ),
-        AcceptanceCheck(
-            check_id="core.lifecycle.host-wheel",
-            scenario="core-lifecycle",
-            public_seam="python -I -m m_agent.testing",
-            evidence_level=EvidenceLevel.HOST,
-        ),
-        AcceptanceCheck(
-            check_id="core.lifecycle.bundle-tamper",
-            scenario="core-lifecycle",
-            public_seam="m_agent.testing.ScenarioEvidenceBundle",
-        ),
-    ),
 )
 with tempfile.TemporaryDirectory() as temporary_directory:
     manifest_path = Path(temporary_directory) / "manifest.json"
@@ -207,7 +169,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             altered.writestr(member, source.read(member.filename))
         altered.writestr("unexpected-member.txt", b"not installed")
     try:
-        installed_identity(artifact=altered_wheel)
+        installed_identity(artifact=altered_wheel, sdist=sdist)
     except ValueError:
         pass
     else:
@@ -225,6 +187,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
 
     completed = invoke(
         "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(sdist),
         "--output-dir", str(output_dir),
     )
     assert completed.returncode == 0, completed.stderr
@@ -260,6 +223,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     )
     completed = invoke(
         "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(sdist),
         "--output-dir", str(output_dir),
     )
     assert completed.returncode == 2, completed.stderr
@@ -271,6 +235,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     )
     completed = invoke(
         "run", "--manifest", str(manifest_path), "--wheel", str(altered_wheel),
+        "--sdist", str(sdist),
         "--output-dir", str(output_dir),
     )
     assert completed.returncode == 2, completed.stderr
@@ -278,21 +243,27 @@ with tempfile.TemporaryDirectory() as temporary_directory:
 
     completed = invoke(
         "inspect", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(sdist),
         "--bundle", str(bundle_path),
     )
     assert completed.returncode == 0, completed.stderr
     completed = invoke(
         "verify", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(sdist),
         "--bundle", str(bundle_path),
     )
     assert completed.returncode == 0, completed.stderr
     completed = invoke(
         "render", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(sdist),
         "--bundle", str(bundle_path),
     )
     assert completed.returncode == 0, completed.stderr
     for command in ("inspect", "verify", "render"):
-        completed = invoke(command, "--wheel", str(wheel), "--bundle", str(bundle_path))
+        completed = invoke(
+            command, "--wheel", str(wheel), "--sdist", str(sdist),
+            "--bundle", str(bundle_path),
+        )
         assert completed.returncode == 0, completed.stderr
 
     bundle["checks"][0]["status"] = "FAIL"
@@ -300,12 +271,14 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     for command in ("inspect", "verify", "render"):
         completed = invoke(
             command, "--manifest", str(manifest_path), "--wheel", str(wheel),
+            "--sdist", str(sdist),
             "--bundle", str(bundle_path),
         )
         assert completed.returncode == 5, completed.stderr
 
     completed = invoke(
         "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(sdist),
         "--output-dir", str(output_dir),
     )
     assert completed.returncode == 0, completed.stderr
@@ -316,14 +289,17 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert second_bundle["execution"]["execution_id"] != bundle["execution"]["execution_id"]
 
     for update in (
+        {"profile": "foundation-release", "pack_version": "counterfeit"},
         {"source_commit": "counterfeit-source"},
         {"artifact_digest": "sha256:" + "0" * 64},
+        {"sdist_digest": "sha256:" + "0" * 64},
         {"fixture_digest": "sha256:" + "0" * 64},
         {"environment": {**identity["environment"], "os": "counterfeit"}},
     ):
         manifest_path.write_text(manifest.model_copy(update=update).model_dump_json())
         completed = invoke(
             "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+            "--sdist", str(sdist),
             "--output-dir", str(output_dir),
         )
         assert completed.returncode == 2, completed.stderr
@@ -338,6 +314,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert completed.returncode == 0, completed.stderr
     completed = invoke(
         "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(sdist),
         "--output-dir", str(output_dir),
     )
     assert completed.returncode == 2, completed.stderr
@@ -352,30 +329,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-from m_agent.testing import AcceptanceCheck, AcceptanceManifest, EvidenceLevel, installed_identity
+from m_agent.testing import core_lifecycle_manifest, installed_identity
 
 wheel = Path(sys.argv[1])
-identity = installed_identity(artifact=wheel)
-manifest = AcceptanceManifest(
-    pack_version="0.3.0",
-    profile="0.3",
+sdist = Path(sys.argv[2])
+identity = installed_identity(artifact=wheel, sdist=sdist)
+manifest = core_lifecycle_manifest(
     source_commit=identity["source_commit"],
     artifact_digest=identity["artifact_digest"],
+    sdist_digest=identity["sdist_digest"],
     fixture_digest=identity["fixture_digest"],
     environment=identity["environment"],
-    scenarios=("core-lifecycle",),
-    required_checks=tuple(
-        AcceptanceCheck(check_id=check_id, scenario="core-lifecycle", public_seam=seam, evidence_level=level)
-        for check_id, seam, level in (
-            ("core.lifecycle", "m_agent.runtime.Runner", EvidenceLevel.CONTRACT),
-            ("core.lifecycle.unknown-definition", "m_agent.runtime.DefinitionRegistry", EvidenceLevel.CONTRACT),
-            ("core.lifecycle.public-namespaces", "m_agent.runtime,m_agent.adapters,m_agent.companion,m_agent.testing", EvidenceLevel.CONTRACT),
-            ("core.lifecycle.dependency-direction", "m_agent.testing.find_runtime_dependency_violations", EvidenceLevel.CONTRACT),
-            ("core.lifecycle.expand-compatibility", "m_agent,m_agent.runtime", EvidenceLevel.CONTRACT),
-            ("core.lifecycle.host-wheel", "python -I -m m_agent.testing", EvidenceLevel.HOST),
-            ("core.lifecycle.bundle-tamper", "m_agent.testing.ScenarioEvidenceBundle", EvidenceLevel.CONTRACT),
-        )
-    ),
 )
 with tempfile.TemporaryDirectory() as temporary_directory:
     manifest_path = Path(temporary_directory) / "manifest.json"
@@ -391,6 +355,8 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             str(manifest_path),
             "--wheel",
             str(wheel),
+            "--sdist",
+            str(sdist),
             "--output-dir",
             str(Path(temporary_directory) / "bundles"),
         ],
@@ -426,7 +392,15 @@ class DistributionIdentityTests(unittest.TestCase):
             clean_environment = _clean_environment()
 
             _run(
-                ["uv", "build", "--offline", "--wheel", "--out-dir", str(dist_dir)],
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--sdist",
+                    "--out-dir",
+                    str(dist_dir),
+                ],
                 cwd=_ROOT,
                 env=clean_environment,
             )
@@ -495,11 +469,20 @@ class DistributionIdentityTests(unittest.TestCase):
             dist_dir = temporary_root / "dist"
             clean_environment = _clean_environment()
             _run(
-                ["uv", "build", "--offline", "--wheel", "--out-dir", str(dist_dir)],
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--sdist",
+                    "--out-dir",
+                    str(dist_dir),
+                ],
                 cwd=_ROOT,
                 env=clean_environment,
             )
             wheel = next(dist_dir.glob("*.whl"))
+            sdist = next(dist_dir.glob("*.tar.gz"))
             environment_dir = temporary_root / "environment"
             _run(
                 [
@@ -523,13 +506,20 @@ class DistributionIdentityTests(unittest.TestCase):
                     "--offline",
                     "--python",
                     str(python),
-                    str(wheel),
+                    f"{wheel}[testing]",
                 ],
                 cwd=temporary_root,
                 env=clean_environment,
             )
             output = _run(
-                [str(python), "-I", "-c", _FOUNDATION_INSTALLED_PROBE, str(wheel)],
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    _FOUNDATION_INSTALLED_PROBE,
+                    str(wheel),
+                    str(sdist),
+                ],
                 cwd=temporary_root,
                 env=clean_environment,
             )
@@ -581,11 +571,20 @@ class DistributionIdentityTests(unittest.TestCase):
 
             dist_dir = temporary_root / "dist"
             _run(
-                ["uv", "build", "--offline", "--wheel", "--out-dir", str(dist_dir)],
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--sdist",
+                    "--out-dir",
+                    str(dist_dir),
+                ],
                 cwd=source_root,
                 env=clean_environment,
             )
             wheel = next(dist_dir.glob("*.whl"))
+            sdist = next(dist_dir.glob("*.tar.gz"))
             environment_dir = temporary_root / "environment"
             _run(
                 [
@@ -609,13 +608,20 @@ class DistributionIdentityTests(unittest.TestCase):
                     "--offline",
                     "--python",
                     str(python),
-                    str(wheel),
+                    f"{wheel}[testing]",
                 ],
                 cwd=temporary_root,
                 env=clean_environment,
             )
             output = _run(
-                [str(python), "-I", "-c", _HOST_SUBJECT_FAILURE_PROBE, str(wheel)],
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    _HOST_SUBJECT_FAILURE_PROBE,
+                    str(wheel),
+                    str(sdist),
+                ],
                 cwd=temporary_root,
                 env=clean_environment,
             )
@@ -671,7 +677,7 @@ class DistributionIdentityTests(unittest.TestCase):
                     "--offline",
                     "--python",
                     str(python),
-                    str(wheel),
+                    f"{wheel}[testing]",
                 ],
                 cwd=temporary_root,
                 env=clean_environment,

@@ -6,6 +6,9 @@ from ._pack import (
     AcceptanceCheckStatus,
     AcceptanceManifest,
     BundleIntegrityError,
+    CORE_LIFECYCLE_PACK_VERSION,
+    CORE_LIFECYCLE_PROFILE,
+    CORE_LIFECYCLE_SCENARIO,
     EvidenceLevel,
     EXIT_HARNESS_ERROR,
     EXIT_INCOMPLETE,
@@ -16,6 +19,7 @@ from ._pack import (
     PackExecution,
     PackExecutionStatus,
     ScenarioEvidenceBundle,
+    core_lifecycle_manifest,
 )
 from ._dependencies import find_runtime_dependency_violations
 from ._identity import installed_identity
@@ -26,6 +30,9 @@ __all__ = [
     "AcceptanceCheckStatus",
     "AcceptanceManifest",
     "BundleIntegrityError",
+    "CORE_LIFECYCLE_PACK_VERSION",
+    "CORE_LIFECYCLE_PROFILE",
+    "CORE_LIFECYCLE_SCENARIO",
     "EvidenceLevel",
     "EXIT_HARNESS_ERROR",
     "EXIT_INCOMPLETE",
@@ -38,4 +45,5 @@ __all__ = [
     "PackExecution",
     "PackExecutionStatus",
     "ScenarioEvidenceBundle",
+    "core_lifecycle_manifest",
 ]

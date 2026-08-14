@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import base64
 import binascii
@@ -10,6 +11,7 @@ from importlib.resources import files
 import json
 import platform
 import sys
+import tarfile
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 from importlib.metadata import Distribution, PackageNotFoundError, distribution, distributions
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
 
 
 _DISTRIBUTION_NAME = "m-agent"
+_SUPPORTED_HOST_OSES = frozenset({"darwin", "linux"})
 _INSTALLER_METADATA = {
     "RECORD",
     "INSTALLER",
@@ -94,17 +97,54 @@ def _file_digest(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _assert_sdist_matches_installed(source_artifact: Path) -> None:
+    """Bind a source distribution to the embedded identity without executing it."""
+    try:
+        with tarfile.open(source_artifact, "r:*") as source_distribution:
+            members = [
+                member
+                for member in source_distribution.getmembers()
+                if member.name.endswith("/src/m_agent/_build_identity.py")
+                and member.isfile()
+            ]
+            if len(members) != 1:
+                raise ValueError("source distribution has no unique build identity")
+            source = source_distribution.extractfile(members[0])
+            if source is None:
+                raise ValueError("source distribution build identity is unreadable")
+            tree = ast.parse(source.read().decode("utf-8"))
+    except (OSError, tarfile.TarError, UnicodeDecodeError, SyntaxError) as error:
+        raise ValueError("candidate source distribution is invalid") from error
+    values: dict[str, object] = {}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            try:
+                values[node.targets[0].id] = ast.literal_eval(node.value)
+            except ValueError:
+                continue
+    if (
+        values.get("SOURCE_COMMIT") != SOURCE_COMMIT
+        or values.get("SOURCE_STATE") != SOURCE_STATE
+        or SOURCE_STATE != "clean"
+    ):
+        raise ValueError("source distribution does not match installed wheel provenance")
+
+
 def _fixture_digest() -> str:
     fixture = files("m_agent.testing").joinpath("fixtures/core_lifecycle.json")
     return "sha256:" + hashlib.sha256(fixture.read_bytes()).hexdigest()
 
 
 def _runtime_dependencies(installed: Distribution) -> dict[str, str]:
-    """Measure the active, non-extra runtime dependency closure."""
+    """Measure the active dependency closure for the Testing profile."""
     pending = list(installed.requires or ())
     observed: dict[str, str] = {}
     environment = default_environment()
-    environment["extra"] = ""
+    environment["extra"] = "testing"
     while pending:
         try:
             requirement = Requirement(pending.pop())
@@ -230,16 +270,19 @@ def _installation_kind() -> str:
 
 
 def installed_identity(
-    *, artifact: Path | None = None
+    *, artifact: Path | None = None, sdist: Path | None = None
 ) -> dict[str, str | dict[str, str]]:
     """Return the installed distribution and host identity for a frozen Manifest."""
     installed = _installed_distribution()
     if artifact is not None:
         _assert_installed_wheel_matches(artifact, installed)
+    if sdist is not None:
+        _assert_sdist_matches_installed(sdist)
     installed_versions = _installed_distribution_versions()
     return {
         "source_commit": SOURCE_COMMIT,
         "artifact_digest": _file_digest(artifact) if artifact else _artifact_digest(),
+        "sdist_digest": _file_digest(sdist) if sdist else "",
         "fixture_digest": _fixture_digest(),
         "environment": {
             "distribution": installed.metadata["Name"],
@@ -259,19 +302,23 @@ def installed_identity(
 
 
 def validate_installed_identity(
-    manifest: "AcceptanceManifest", *, artifact: Path
+    manifest: "AcceptanceManifest", *, artifact: Path, sdist: Path
 ) -> None:
     """Reject a Manifest whose claimed subject differs from this installation."""
     installation = _installation_kind()
     if installation != "wheel" or SOURCE_STATE != "clean":
         raise ValueError("Acceptance Pack requires a clean wheel subject")
+    if platform.system().lower() not in _SUPPORTED_HOST_OSES:
+        raise ValueError("Acceptance Pack HOST evidence is unsupported on this platform")
     _assert_fresh_external_environment(_installed_distribution())
-    measured = installed_identity(artifact=artifact)
+    measured = installed_identity(artifact=artifact, sdist=sdist)
     mismatches: list[str] = []
     if manifest.source_commit != measured["source_commit"]:
         mismatches.append("source_commit")
     if manifest.artifact_digest != measured["artifact_digest"]:
         mismatches.append("artifact_digest")
+    if manifest.sdist_digest != measured["sdist_digest"]:
+        mismatches.append("sdist_digest")
     if manifest.fixture_digest != measured["fixture_digest"]:
         mismatches.append("fixture_digest")
     if dict(manifest.environment) != measured["environment"]:

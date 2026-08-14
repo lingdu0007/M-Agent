@@ -26,18 +26,9 @@ from ._pack import (
     EvidenceLevel,
     PackExecution,
     ScenarioEvidenceBundle,
+    core_lifecycle_manifest,
 )
 
-
-_CORE_LIFECYCLE_CHECKS = {
-    "core.lifecycle": EvidenceLevel.CONTRACT,
-    "core.lifecycle.unknown-definition": EvidenceLevel.CONTRACT,
-    "core.lifecycle.public-namespaces": EvidenceLevel.CONTRACT,
-    "core.lifecycle.dependency-direction": EvidenceLevel.CONTRACT,
-    "core.lifecycle.expand-compatibility": EvidenceLevel.CONTRACT,
-    "core.lifecycle.host-wheel": EvidenceLevel.HOST,
-    "core.lifecycle.bundle-tamper": EvidenceLevel.CONTRACT,
-}
 
 _ISOLATED_HOST_PROBE = """
 import asyncio
@@ -172,20 +163,27 @@ def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
         supplied = _read_manifest(arguments.manifest)
         if supplied.digest != bundle.manifest.digest:
             raise BundleIntegrityError("Bundle does not match supplied Manifest")
-    validate_installed_identity(bundle.manifest, artifact=arguments.wheel)
+    validate_installed_identity(
+        bundle.manifest, artifact=arguments.wheel, sdist=arguments.sdist
+    )
     bundle.verify()
     return bundle
 
 
 def _run(arguments: argparse.Namespace) -> int:
     manifest = _read_manifest(arguments.manifest)
-    validate_installed_identity(manifest, artifact=arguments.wheel)
-    declared_checks = {check.check_id: check.evidence_level for check in manifest.required_checks}
-    if (
-        manifest.scenarios != ("core-lifecycle",)
-        or declared_checks != _CORE_LIFECYCLE_CHECKS
-    ):
-        raise ValueError("Ticket 07 CLI supports only the core-lifecycle Scenario")
+    validate_installed_identity(manifest, artifact=arguments.wheel, sdist=arguments.sdist)
+    expected_manifest = core_lifecycle_manifest(
+        source_commit=manifest.source_commit,
+        artifact_digest=manifest.artifact_digest,
+        sdist_digest=manifest.sdist_digest,
+        fixture_digest=manifest.fixture_digest,
+        environment=manifest.environment,
+    )
+    if manifest != expected_manifest:
+        raise ValueError(
+            "Ticket 07 CLI supports only the frozen core-lifecycle foundation profile"
+        )
     execution = PackExecution.create(
         manifest, execution_id=f"core-lifecycle-{uuid4().hex}"
     ).start(manifest)
@@ -350,21 +348,25 @@ def _parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run the offline core-lifecycle Scenario")
     run.add_argument("--manifest", type=Path, required=True)
     run.add_argument("--wheel", type=Path, required=True)
+    run.add_argument("--sdist", type=Path, required=True)
     run.add_argument("--output-dir", type=Path, required=True)
     run.set_defaults(handler=_run)
     inspect = subparsers.add_parser("inspect", help="print a Bundle's public JSON")
     inspect.add_argument("--manifest", type=Path)
     inspect.add_argument("--wheel", type=Path, required=True)
+    inspect.add_argument("--sdist", type=Path, required=True)
     inspect.add_argument("--bundle", type=Path, required=True)
     inspect.set_defaults(handler=_inspect)
     verify = subparsers.add_parser("verify", help="verify Bundle integrity")
     verify.add_argument("--manifest", type=Path)
     verify.add_argument("--wheel", type=Path, required=True)
+    verify.add_argument("--sdist", type=Path, required=True)
     verify.add_argument("--bundle", type=Path, required=True)
     verify.set_defaults(handler=_verify)
     render = subparsers.add_parser("render", help="render a Bundle summary")
     render.add_argument("--manifest", type=Path)
     render.add_argument("--wheel", type=Path, required=True)
+    render.add_argument("--sdist", type=Path, required=True)
     render.add_argument("--bundle", type=Path, required=True)
     render.set_defaults(handler=_render)
     return parser
