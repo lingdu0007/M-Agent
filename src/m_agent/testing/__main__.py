@@ -57,6 +57,15 @@ from m_agent.adapters import SQLiteRunStore
 from m_agent.testing import find_runtime_dependency_violations
 
 
+_EXPAND_ONLY_EXPORTS = {
+    "CrashPoint",
+    "deserialize_model_response",
+    "deserialize_tool_outcome",
+    "serialize_model_response",
+    "serialize_tool_outcome",
+}
+
+
 _REOPEN_PROBE = '''
 import asyncio
 import json
@@ -119,6 +128,15 @@ async def observe():
         unknown_definition_rejected = True
     else:
         unknown_definition_rejected = False
+    root_exports = tuple(m_agent.__all__)
+    root_expand_compatibility = (
+        len(root_exports) == len(set(root_exports))
+        and set(root_exports)
+        == set(runtime.__all__) | set(adapters.__all__) | _EXPAND_ONLY_EXPORTS
+        and all(getattr(m_agent, name, None) is getattr(runtime, name) for name in runtime.__all__)
+        and all(getattr(m_agent, name, None) is getattr(adapters, name) for name in adapters.__all__)
+        and all(name in m_agent.__all__ and hasattr(m_agent, name) for name in _EXPAND_ONLY_EXPORTS)
+    )
     print(json.dumps({
         "module_under_prefix": Path(m_agent.__file__).resolve().is_relative_to(
             Path(sys.prefix).resolve()
@@ -142,6 +160,7 @@ async def observe():
             and testing.AcceptanceManifest is not None
         ),
         "runtime_dependency_violation_count": len(find_runtime_dependency_violations()),
+        "root_expand_compatibility": root_expand_compatibility,
     }, sort_keys=True))
 
 
@@ -277,6 +296,7 @@ def _isolated_host_result() -> tuple[
         "unknown_definition_rejected": True,
         "public_layers_available": True,
         "runtime_dependency_violation_count": 0,
+        "root_expand_compatibility": True,
     }
     valid_observation = set(observation) == set(expected_observation) and all(
         type(observation[key]) is type(expected)

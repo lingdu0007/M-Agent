@@ -26,6 +26,97 @@ from ._pack import (
 )
 
 
+_EXPAND_RUNTIME_EXPORTS = (
+    "AgentDefinition",
+    "ALLOWED_FOR_DEFINITION_UNAVAILABLE",
+    "ALLOWED_FOR_UNCERTAIN_NON_IDEMPOTENT",
+    "Clock",
+    "ContextItem",
+    "ContextProvider",
+    "ContextRequest",
+    "DEFAULT_LEASE_TTL",
+    "DEFAULT_TOOL_PARAMETERS",
+    "DefinitionConflictError",
+    "DefinitionNotFoundError",
+    "DefinitionRegistry",
+    "DefinitionSnapshot",
+    "DuplicateRunError",
+    "ERROR_EFFECT_UNCONFIRMED",
+    "FailureClassification",
+    "IllegalRunTransitionError",
+    "LeaseNotHeldError",
+    "MAgentError",
+    "ModelAdapter",
+    "ModelCapabilities",
+    "ModelCapabilityError",
+    "ModelDelta",
+    "ModelFailure",
+    "ModelRequest",
+    "ModelResponse",
+    "ModelUsage",
+    "PayloadCodec",
+    "REASON_DEFINITION_UNAVAILABLE",
+    "REASON_UNCERTAIN_NON_IDEMPOTENT",
+    "ResolutionAction",
+    "ResolutionNotAllowedError",
+    "RetryPolicy",
+    "RunInspection",
+    "RunLease",
+    "RunNotFoundError",
+    "RunRecord",
+    "RunResolution",
+    "RunStatus",
+    "RunStore",
+    "RunUpdate",
+    "RunUpdateType",
+    "Runner",
+    "StaleRunVersionError",
+    "StepAttempt",
+    "StepCheckpoint",
+    "StepFailure",
+    "StepRecord",
+    "StepStatus",
+    "StepType",
+    "SyncRunner",
+    "TelemetryEvent",
+    "TelemetryEventType",
+    "TelemetrySink",
+    "Tool",
+    "ToolCall",
+    "ToolDeclaration",
+    "ToolEffect",
+    "ToolFailure",
+    "ToolOutcome",
+    "ToolOutcomeStatus",
+    "ToolRequest",
+    "ToolSpec",
+    "allowed_resolutions",
+    "is_terminal",
+)
+_EXPAND_ADAPTER_EXPORTS = (
+    "DeterministicContextProvider",
+    "DeterministicModelAdapter",
+    "DeterministicStreamingModelAdapter",
+    "DeterministicTool",
+    "FakeClock",
+    "InMemoryRunStore",
+    "JsonlTelemetrySink",
+    "PlaintextPayloadCodec",
+    "SQLiteRunStore",
+    "SystemClock",
+)
+_EXPAND_ONLY_EXPORTS = (
+    "CrashPoint",
+    "deserialize_model_response",
+    "deserialize_tool_outcome",
+    "serialize_model_response",
+    "serialize_tool_outcome",
+)
+_EXPAND_ROOT_EXPORTS = frozenset(
+    _EXPAND_RUNTIME_EXPORTS + _EXPAND_ADAPTER_EXPORTS + _EXPAND_ONLY_EXPORTS
+)
+
+
 def _evidence_digest(value: dict[str, bool | int]) -> str:
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
@@ -41,6 +132,43 @@ def _fixture_response() -> tuple[str, str]:
     if not isinstance(response, str) or not response:
         raise ValueError("core-lifecycle fixture must define a nonempty response")
     return response, "sha256:" + hashlib.sha256(fixture_bytes).hexdigest()
+
+
+def _expand_compatibility_observation() -> dict[str, bool | int]:
+    """Measure every documented 0.2 root binding through public namespaces."""
+    import m_agent
+    from m_agent import adapters, runtime
+
+    root_exports = tuple(m_agent.__all__)
+    runtime_bindings = all(
+        getattr(m_agent, name, None) is getattr(runtime, name)
+        for name in _EXPAND_RUNTIME_EXPORTS
+    )
+    adapter_bindings = all(
+        getattr(m_agent, name, None) is getattr(adapters, name)
+        for name in _EXPAND_ADAPTER_EXPORTS
+    )
+    legacy_bindings = all(
+        name in m_agent.__all__ and hasattr(m_agent, name)
+        for name in _EXPAND_ONLY_EXPORTS
+    )
+    complete_exports = (
+        len(root_exports) == len(set(root_exports))
+        and set(root_exports) == _EXPAND_ROOT_EXPORTS
+    )
+    return {
+        "expand_binding_count": len(root_exports),
+        "expand_exports_complete": complete_exports,
+        "expand_runtime_bindings": runtime_bindings,
+        "expand_adapter_bindings": adapter_bindings,
+        "expand_legacy_bindings": legacy_bindings,
+        "expand_compatibility": (
+            complete_exports
+            and runtime_bindings
+            and adapter_bindings
+            and legacy_bindings
+        ),
+    }
 
 
 async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
@@ -78,18 +206,17 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         unknown_definition_rejected = True
     else:
         unknown_definition_rejected = False
-    from m_agent import Clock, Runner as RootRunner
     from m_agent import adapters, companion, runtime, testing
 
     public_layers_available = (
-        RootRunner is Runner
-        and Clock is runtime.Clock
+        getattr(runtime, "Runner") is Runner
         and adapters.DeterministicModelAdapter is DeterministicModelAdapter
         and hasattr(companion, "__all__")
         and testing.AcceptanceManifest is not None
     )
     dependency_violations = find_runtime_dependency_violations()
     dependency_direction_passed = not dependency_violations
+    expand_observation = _expand_compatibility_observation()
     evidence_view = {
         "run_succeeded": terminal.status is RunStatus.SUCCEEDED,
         "step_count": len(inspection.steps),
@@ -98,6 +225,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         "unknown_definition_rejected": unknown_definition_rejected,
         "public_layers_available": public_layers_available,
         "runtime_dependency_violation_count": len(dependency_violations),
+        **expand_observation,
     }
     results = (
         AcceptanceCheckResult(
@@ -148,17 +276,12 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
             check_id="core.lifecycle.expand-compatibility",
             status=(
                 AcceptanceCheckStatus.PASS
-                if RootRunner is Runner and Clock is runtime.Clock
+                if expand_observation["expand_compatibility"]
                 else AcceptanceCheckStatus.FAIL
             ),
             evidence_level=EvidenceLevel.CONTRACT,
-            reason_code="root_runtime_compatibility_checked",
-            evidence_digest=_evidence_digest(
-                {
-                    "root_runtime_compatibility": RootRunner is Runner
-                    and Clock is runtime.Clock
-                }
-            ),
+            reason_code="root_expand_compatibility_checked",
+            evidence_digest=_evidence_digest(expand_observation),
         ),
         AcceptanceCheckResult(
             check_id="core.lifecycle.unknown-definition",
