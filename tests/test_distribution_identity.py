@@ -241,6 +241,30 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     )
     assert bundle["independent_evidence"]["fixture_digest"] == identity["fixture_digest"]
     assert bundle["independent_evidence"]["host_observation_digest"].startswith("sha256:")
+    host_observation = {
+        key.removeprefix("host_"): value
+        for key, value in bundle["independent_evidence"].items()
+        if key.startswith("host_") and key != "host_observation_digest"
+    }
+    assert host_observation == {
+        "module_under_prefix": True,
+        "run_succeeded": True,
+        "step_count": 1,
+        "attempt_count": 1,
+        "checkpoint_count": 1,
+        "sqlite_file_created": True,
+        "restart_observed": True,
+        "reopened_run_succeeded": True,
+        "reopened_step_count": 1,
+        "reopened_attempt_count": 1,
+        "reopened_checkpoint_count": 1,
+        "unknown_definition_rejected": True,
+        "public_layers_available": True,
+        "runtime_dependency_violation_count": 0,
+    }
+    assert bundle["independent_evidence"]["host_observation_digest"] == "sha256:" + hashlib.sha256(
+        json.dumps(host_observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     assert "model_digest" not in bundle["independent_evidence"]
     assert "network_disabled" not in bundle["independent_evidence"]
 
