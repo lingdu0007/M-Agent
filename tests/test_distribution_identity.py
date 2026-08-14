@@ -217,7 +217,11 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "--sdist", str(sdist),
         "--output-dir", str(output_dir),
     )
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, (
+        completed.returncode,
+        completed.stdout,
+        completed.stderr,
+    )
     bundle_path = Path(completed.stdout.strip())
     assert bundle_path.parent == output_dir
     bundle = json.loads(bundle_path.read_text())
