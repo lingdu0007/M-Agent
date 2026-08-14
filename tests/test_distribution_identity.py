@@ -337,6 +337,40 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         )
         assert completed.returncode == 0, completed.stderr
 
+    second_environment = Path(temporary_directory) / "second-environment"
+    completed = subprocess.run(
+        [
+            "uv", "venv", "--offline", "--no-project", "--python",
+            sys.executable, str(second_environment),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    second_python = second_environment / "bin" / "python"
+    completed = subprocess.run(
+        [
+            "uv", "pip", "install", "--offline", "--python", str(second_python),
+            f"{wheel}[testing]",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    completed = subprocess.run(
+        [
+            str(second_python), "-I", "-m", "m_agent.testing", "verify",
+            "--manifest", str(manifest_path), "--wheel", str(wheel),
+            "--sdist", str(sdist), "--bundle", str(bundle_path),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
     published_bundle = ScenarioEvidenceBundle.model_validate(bundle)
     repointed_bundle = ScenarioEvidenceBundle.create(
         manifest=published_bundle.manifest,
