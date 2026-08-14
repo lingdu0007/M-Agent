@@ -139,6 +139,7 @@ from pathlib import Path
 import sys
 import tempfile
 import tarfile
+import time
 import zipfile
 
 import m_agent
@@ -213,6 +214,57 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             capture_output=True,
             check=False,
         )
+
+    resumed_output_dir = Path(temporary_directory) / "resumed-bundles"
+    running_state = resumed_output_dir / ".core-lifecycle-running.json"
+    interrupted = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "m_agent.testing",
+            "run",
+            "--manifest",
+            str(manifest_path),
+            "--wheel",
+            str(wheel),
+            "--sdist",
+            str(sdist),
+            "--output-dir",
+            str(resumed_output_dir),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    for _ in range(5000):
+        if running_state.is_file() or interrupted.poll() is not None:
+            break
+        time.sleep(0.001)
+    if not running_state.is_file():
+        stdout, stderr = interrupted.communicate(timeout=20)
+        raise AssertionError(("running Pack state was not persisted", stdout, stderr))
+    running_snapshot = json.loads(running_state.read_text())
+    assert running_snapshot["execution"]["status"] == "RUNNING"
+    execution_id = running_snapshot["execution"]["execution_id"]
+    interrupted.terminate()
+    interrupted.communicate(timeout=20)
+    assert running_state.is_file()
+    resumed = invoke(
+        "run",
+        "--manifest",
+        str(manifest_path),
+        "--wheel",
+        str(wheel),
+        "--sdist",
+        str(sdist),
+        "--output-dir",
+        str(resumed_output_dir),
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    resumed_bundle = json.loads(Path(resumed.stdout.strip()).read_text())
+    assert resumed_bundle["execution"]["execution_id"] == execution_id
+    assert not running_state.exists()
 
     completed = invoke(
         "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
