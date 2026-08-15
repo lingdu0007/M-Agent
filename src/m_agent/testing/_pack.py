@@ -421,6 +421,13 @@ class PackExecution(BaseModel, frozen=True):
                     "exit_code": EXIT_INCOMPLETE,
                 }
             )
+        if set(by_id) - {check.check_id for check in manifest.required_checks}:
+            return self.model_copy(
+                update={
+                    "status": PackExecutionStatus.ERROR,
+                    "exit_code": EXIT_HARNESS_ERROR,
+                }
+            )
         required = [by_id.get(check.check_id) for check in manifest.required_checks]
         if any(
             result.evidence_level is not check.evidence_level

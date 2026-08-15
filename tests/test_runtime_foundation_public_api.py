@@ -1099,6 +1099,49 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 self.assertIs(completed.status, expected_status)
                 self.assertEqual(completed.exit_code, expected_exit)
 
+    def test_pack_marks_an_undeclared_result_as_a_harness_error(self) -> None:
+        """A result outside the frozen Manifest cannot be ignored as a pass."""
+        from m_agent.testing import (
+            AcceptanceManifest,
+            EvidenceLevel,
+            PackExecution,
+            PackExecutionStatus,
+        )
+
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:" + "a" * 64,
+            sdist_digest="sha256:" + "b" * 64,
+            fixture_digest="sha256:" + "c" * 64,
+            environment={"python": "3.11"},
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                self._acceptance_check(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
+        )
+        completed = PackExecution.create(manifest, execution_id="undeclared-result").complete(
+            manifest,
+            (
+                self._check_result(
+                    "core.lifecycle", evidence_level=EvidenceLevel.CONTRACT
+                ),
+                self._check_result(
+                    "undeclared.check",
+                    status="ERROR",
+                    evidence_level=EvidenceLevel.CONTRACT,
+                ),
+            ),
+        )
+
+        self.assertIs(completed.status, PackExecutionStatus.ERROR)
+        self.assertEqual(completed.exit_code, 3)
+
     def test_pack_execution_rejects_forged_identity_and_status_exit_combinations(self) -> None:
         """Persisted Pack facts fail closed unless identity and terminal semantics agree."""
         from pydantic import ValidationError
