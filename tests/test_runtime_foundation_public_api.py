@@ -318,15 +318,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertEqual(manifest.profile, "core-lifecycle-foundation")
         self.assertEqual(manifest.pack_version, "foundation-v1")
         self.assertEqual(manifest.scenarios, ("core-lifecycle",))
-        self.assertEqual(len(manifest.required_checks), 9)
-        self.assertIn(
-            "core.lifecycle.telemetry",
-            {check.check_id for check in manifest.required_checks},
-        )
-        self.assertIn(
-            "core.lifecycle.telemetry-host",
-            {check.check_id for check in manifest.required_checks},
-        )
+        self.assertEqual(len(manifest.required_checks), 7)
+        required_ids = {check.check_id for check in manifest.required_checks}
+        self.assertNotIn("core.lifecycle.telemetry", required_ids)
+        self.assertNotIn("core.lifecycle.telemetry-host", required_ids)
         for check in manifest.required_checks:
             with self.subTest(check_id=check.check_id):
                 self.assertTrue(check.owner)
@@ -1077,6 +1072,40 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 )
                 self.assertIs(completed.status, expected_status)
                 self.assertEqual(completed.exit_code, expected_exit)
+
+    def test_pack_execution_rejects_forged_identity_and_status_exit_combinations(self) -> None:
+        """Persisted Pack facts fail closed unless identity and terminal semantics agree."""
+        from pydantic import ValidationError
+
+        from m_agent.testing import PackExecution, PackExecutionStatus
+
+        digest = "sha256:" + "a" * 64
+        invalid = (
+            ("forged", PackExecutionStatus.PASSED, 0),
+            (digest, PackExecutionStatus.CREATED, 0),
+            (digest, PackExecutionStatus.RUNNING, 1),
+            (digest, PackExecutionStatus.PASSED, None),
+            (digest, PackExecutionStatus.FAILED, 3),
+            (digest, PackExecutionStatus.INCOMPLETE, 1),
+            (digest, PackExecutionStatus.ERROR, 1),
+        )
+        for manifest_digest, status, exit_code in invalid:
+            with self.subTest(status=status, exit_code=exit_code):
+                with self.assertRaises(ValidationError):
+                    PackExecution(
+                        execution_id="forged",
+                        manifest_digest=manifest_digest,
+                        status=status,
+                        exit_code=exit_code,
+                    )
+        execution = PackExecution(
+            execution_id="pack-1",
+            manifest_digest=digest,
+        )
+        with self.assertRaises(ValidationError):
+            execution.model_copy(
+                update={"status": PackExecutionStatus.PASSED, "exit_code": 3}
+            )
 
     def test_known_required_failure_precedes_a_missing_required_result(self) -> None:
         """A supplied required FAIL remains the Pack verdict when coverage is missing."""

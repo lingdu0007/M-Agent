@@ -9,9 +9,13 @@ import binascii
 import hashlib
 from importlib.resources import files
 import json
+import os
 import platform
+import shutil
+import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 from importlib.metadata import Distribution, PackageNotFoundError, distribution, distributions
@@ -99,7 +103,7 @@ def _file_digest(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _assert_sdist_matches_installed(source_artifact: Path) -> None:
+def _assert_sdist_matches_installed(source_artifact: Path) -> str:
     """Bind a source distribution to the embedded identity without executing it."""
     try:
         with tarfile.open(source_artifact, "r:*") as source_distribution:
@@ -190,6 +194,72 @@ def _assert_sdist_matches_installed(source_artifact: Path) -> None:
         or SOURCE_STATE != "clean"
     ):
         raise ValueError("source distribution does not match installed wheel provenance")
+    return root
+
+
+def _wheel_product_members(artifact: Path) -> dict[str, bytes]:
+    try:
+        with ZipFile(artifact) as wheel:
+            members = [info.filename for info in wheel.infolist() if not info.is_dir()]
+            if not members or len(members) != len(set(members)):
+                raise ValueError("candidate wheel has invalid members")
+            return {
+                member: wheel.read(member)
+                for member in members
+                if not _is_installer_metadata(member)
+            }
+    except BadZipFile as error:
+        raise ValueError("candidate wheel is not a valid zip archive") from error
+
+
+def _extract_sdist(source_artifact: Path, destination: Path, root: str) -> None:
+    with tarfile.open(source_artifact, "r:*") as source_distribution:
+        for member in source_distribution.getmembers():
+            if not member.isfile():
+                continue
+            relative = PurePosixPath(member.name).relative_to(root)
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = source_distribution.extractfile(member)
+            if source is None:
+                raise ValueError("source distribution file is unreadable")
+            target.write_bytes(source.read())
+
+
+def _assert_sdist_builds_candidate_wheel(source_artifact: Path, artifact: Path) -> None:
+    """Build the supplied source artifact offline and bind its product payload."""
+    root = _assert_sdist_matches_installed(source_artifact)
+    uv = shutil.which("uv")
+    if uv is None:
+        raise ValueError("offline source distribution build tool is unavailable")
+    with tempfile.TemporaryDirectory(prefix="m-agent-sdist-") as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        source_root = temporary_root / "source"
+        output_directory = temporary_root / "wheel"
+        _extract_sdist(source_artifact, source_root, root)
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"}
+        }
+        environment["M_AGENT_RUN_LIVE_TESTS"] = "0"
+        try:
+            completed = subprocess.run(
+                [uv, "build", "--offline", "--wheel", "--out-dir", str(output_directory)],
+                cwd=source_root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError("candidate source distribution cannot be built offline") from error
+        wheels = list(output_directory.glob("*.whl"))
+        if completed.returncode != 0 or len(wheels) != 1:
+            raise ValueError("candidate source distribution cannot be built offline")
+        if _wheel_product_members(artifact) != _wheel_product_members(wheels[0]):
+            raise ValueError("candidate wheel does not match supplied source distribution")
 
 
 def _fixture_digest() -> str:
@@ -358,7 +428,11 @@ def installed_identity(
 
 
 def validate_installed_identity(
-    manifest: "AcceptanceManifest", *, artifact: Path, sdist: Path
+    manifest: "AcceptanceManifest",
+    *,
+    artifact: Path,
+    sdist: Path,
+    verify_sdist_build: bool = True,
 ) -> None:
     """Reject a Manifest whose claimed subject differs from this installation."""
     installation = _installation_kind()
@@ -383,3 +457,5 @@ def validate_installed_identity(
         raise ValueError(
             "Manifest does not match installed identity: " + ", ".join(mismatches)
         )
+    if verify_sdist_build:
+        _assert_sdist_builds_candidate_wheel(sdist, artifact)

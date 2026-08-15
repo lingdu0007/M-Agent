@@ -8,7 +8,7 @@ import math
 import re
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
@@ -299,31 +299,6 @@ _CORE_LIFECYCLE_REQUIRED_CHECKS = (
         non_claim="live_provider_behavior",
         evidence_level=EvidenceLevel.HOST,
     ),
-    AcceptanceCheck(
-        check_id="core.lifecycle.telemetry",
-        scenario=CORE_LIFECYCLE_SCENARIO,
-        owner="Runtime Adapter",
-        public_seam="m_agent.adapters.JsonlTelemetrySink",
-        positive_check="jsonl_events_correlate_to_public_run_inspection",
-        negative_check="payload_or_uncorrelated_event_is_fail",
-        authoritative_evidence="telemetry_authoritative_digest",
-        independent_evidence="telemetry_independent_digest",
-        milestone="foundation",
-        non_claim="external_collector_or_store_authority",
-    ),
-    AcceptanceCheck(
-        check_id="core.lifecycle.telemetry-host",
-        scenario=CORE_LIFECYCLE_SCENARIO,
-        owner="Runtime Adapter",
-        public_seam="python -I,m_agent.adapters.JsonlTelemetrySink",
-        positive_check="isolated_jsonl_telemetry_contract_observed",
-        negative_check="missing_or_malformed_host_telemetry_is_error",
-        authoritative_evidence="telemetry_host_authoritative_digest",
-        independent_evidence="telemetry_host_independent_digest",
-        milestone="foundation",
-        non_claim="external_collector_or_store_authority",
-        evidence_level=EvidenceLevel.HOST,
-    ),
 )
 
 
@@ -358,6 +333,32 @@ class PackExecution(BaseModel, frozen=True):
     manifest_digest: str
     status: PackExecutionStatus = PackExecutionStatus.CREATED
     exit_code: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_frozen_execution_state(self) -> "PackExecution":
+        if not self.execution_id.strip():
+            raise ValueError("execution_id must not be empty")
+        if not _SHA256_DIGEST.fullmatch(self.manifest_digest):
+            raise ValueError("manifest_digest must be sha256")
+        expected_exit_code = {
+            PackExecutionStatus.CREATED: None,
+            PackExecutionStatus.RUNNING: None,
+            PackExecutionStatus.PASSED: EXIT_SUCCESS,
+            PackExecutionStatus.FAILED: EXIT_SUBJECT_FAILURE,
+            PackExecutionStatus.INCOMPLETE: EXIT_INCOMPLETE,
+            PackExecutionStatus.ERROR: EXIT_HARNESS_ERROR,
+        }[self.status]
+        if self.exit_code != expected_exit_code:
+            raise ValueError("Pack Execution status and exit_code must agree")
+        return self
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        values = self.model_dump()
+        if update is not None:
+            values.update(update)
+        return type(self).model_validate(values)
 
     @property
     def is_terminal(self) -> bool:

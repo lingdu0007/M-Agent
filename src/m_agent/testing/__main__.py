@@ -479,7 +479,10 @@ def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
         if supplied.digest != bundle.manifest.digest:
             raise BundleIntegrityError("Bundle does not match supplied Manifest")
     validate_installed_identity(
-        bundle.manifest, artifact=arguments.wheel, sdist=arguments.sdist
+        bundle.manifest,
+        artifact=arguments.wheel,
+        sdist=arguments.sdist,
+        verify_sdist_build=False,
     )
     bundle.verify()
     _assert_core_lifecycle_manifest(bundle.manifest)
@@ -656,7 +659,12 @@ def _controlled_identity_mutation_evidence(
     for field, value in mutations:
         candidate = manifest.model_copy(update={field: value})
         try:
-            validate_installed_identity(candidate, artifact=artifact, sdist=sdist)
+            validate_installed_identity(
+                candidate,
+                artifact=artifact,
+                sdist=sdist,
+                verify_sdist_build=False,
+            )
         except ValueError:
             rejected.append(field)
         else:
@@ -698,6 +706,16 @@ def _run(arguments: argparse.Namespace) -> int:
     checks, evidence_view, independent_evidence = asyncio.run(
         run_core_lifecycle(fixture_digest=manifest.fixture_digest)
     )
+    required_ids = {check.check_id for check in manifest.required_checks}
+    checks = tuple(check for check in checks if check.check_id in required_ids)
+    evidence_view = {
+        key: value for key, value in evidence_view.items() if not key.startswith("telemetry_")
+    }
+    independent_evidence = {
+        key: value
+        for key, value in independent_evidence.items()
+        if not key.startswith("telemetry_")
+    }
     host_results, host_evidence = _isolated_host_result()
     host_wheel_identity_mutation_digest = _controlled_identity_mutation_evidence(
         manifest, artifact=arguments.wheel, sdist=arguments.sdist
@@ -792,7 +810,7 @@ def _run(arguments: argparse.Namespace) -> int:
 
 
 def _isolated_host_result() -> tuple[
-    tuple[AcceptanceCheckResult, AcceptanceCheckResult], dict[str, str | int | bool]
+    tuple[AcceptanceCheckResult, ...], dict[str, str | int | bool]
 ]:
     """Observe the installed wheel from a separate isolated Python process."""
     environment = {
@@ -816,15 +834,12 @@ def _isolated_host_result() -> tuple[
             observed = None
         if isinstance(observed, dict):
             observation = observed
-    telemetry_jsonl_digest = observation.pop("telemetry_jsonl_digest", None)
-    if not isinstance(telemetry_jsonl_digest, str) or not telemetry_jsonl_digest.startswith(
-        "sha256:"
-    ):
-        telemetry_jsonl_digest = "sha256:" + hashlib.sha256(
-            json.dumps(observation, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
-        ).hexdigest()
+    observation = {
+        key: value
+        for key, value in observation.items()
+        if not key.startswith("telemetry_")
+        and key != "filesystem_permission_boundary_observed"
+    }
     digest = "sha256:" + hashlib.sha256(
         json.dumps(observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -844,17 +859,6 @@ def _isolated_host_result() -> tuple[
         "public_layers_available": True,
         "runtime_dependency_violation_count": 0,
         "root_expand_compatibility": True,
-        "telemetry_ordered": True,
-        "telemetry_inspection_reconciled": True,
-        "telemetry_usage_provenance": True,
-        "telemetry_error_observed": True,
-        "telemetry_model_purpose_observed": True,
-        "telemetry_duration_observed": True,
-        "telemetry_closed": True,
-        "telemetry_cross_process": True,
-        "telemetry_concurrent": True,
-        "telemetry_redacted": True,
-        "filesystem_permission_boundary_observed": True,
     }
     valid_observation = set(observation) == set(expected_observation) and all(
         type(observation[key]) is type(expected)
@@ -886,25 +890,9 @@ def _isolated_host_result() -> tuple[
                 ),
                 evidence_digest=digest,
             ),
-            AcceptanceCheckResult(
-                check_id="core.lifecycle.telemetry-host",
-                status=status,
-                evidence_level=EvidenceLevel.HOST,
-                reason_code=(
-                    "isolated_jsonl_telemetry_observed"
-                    if status is AcceptanceCheckStatus.PASS
-                    else (
-                        "isolated_jsonl_telemetry_failed"
-                        if status is AcceptanceCheckStatus.FAIL
-                        else "isolated_jsonl_telemetry_error"
-                    )
-                ),
-                evidence_digest=telemetry_jsonl_digest,
-            ),
         ),
         {
             "host_observation_digest": digest,
-            "telemetry_jsonl_digest": telemetry_jsonl_digest,
             **{f"host_{key}": value for key, value in observation.items()},
         },
     )

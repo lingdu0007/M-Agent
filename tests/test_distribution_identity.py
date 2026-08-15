@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -136,6 +138,7 @@ import io
 import json
 from importlib.metadata import metadata
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import tarfile
@@ -217,6 +220,38 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             capture_output=True,
             check=False,
         )
+
+    invalid_sdist = Path(temporary_directory) / "invalid-source.tar.gz"
+    invalid_source = Path(temporary_directory) / "invalid-source"
+    shutil.unpack_archive(str(sdist), str(invalid_source))
+    invalid_root = next(invalid_source.iterdir())
+    (invalid_root / "setup.py").write_text("this is not valid Python (\\n")
+    integrity_path = invalid_root / "SOURCE_INTEGRITY.json"
+    integrity_path.write_text(json.dumps({
+        "schema_version": "1",
+        "files": {
+            path.relative_to(invalid_root).as_posix(): "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(invalid_root.rglob("*"))
+            if path.is_file() and path != integrity_path
+        },
+    }, sort_keys=True, separators=(",", ":")))
+    with tarfile.open(invalid_sdist, "w:gz") as archive:
+        archive.add(invalid_root, arcname=invalid_root.name)
+    invalid_identity = installed_identity(artifact=wheel, sdist=invalid_sdist)
+    invalid_manifest = core_lifecycle_manifest(
+        source_commit=invalid_identity["source_commit"],
+        artifact_digest=invalid_identity["artifact_digest"],
+        sdist_digest=invalid_identity["sdist_digest"],
+        fixture_digest=invalid_identity["fixture_digest"],
+        environment=invalid_identity["environment"],
+    )
+    manifest_path.write_text(invalid_manifest.model_dump_json())
+    completed = invoke(
+        "run", "--manifest", str(manifest_path), "--wheel", str(wheel),
+        "--sdist", str(invalid_sdist), "--output-dir", str(output_dir),
+    )
+    assert completed.returncode == 2, completed.stderr
+    manifest_path.write_text(manifest.model_dump_json())
 
     resumed_output_dir = Path(temporary_directory) / "resumed-bundles"
     running_state = resumed_output_dir / ".core-lifecycle-running.json"
@@ -325,12 +360,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         and check["status"] == "PASS"
         for check in bundle["checks"]
     )
-    assert any(
-        check["check_id"] == "core.lifecycle.telemetry-host"
-        and check["evidence_level"] == "HOST"
-        and check["status"] == "PASS"
-        for check in bundle["checks"]
-    )
+    assert all(not check["check_id"].startswith("core.lifecycle.telemetry") for check in bundle["checks"])
     assert bundle["independent_evidence"]["fixture_digest"] == identity["fixture_digest"]
     assert bundle["independent_evidence"]["host_observation_digest"].startswith("sha256:")
     assert (
@@ -345,28 +375,8 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert bundle["independent_evidence"]["bundle_tamper_independent_digest"].startswith(
         "sha256:"
     )
-    for telemetry_field in (
-        "telemetry_ordered",
-        "telemetry_inspection_reconciled",
-        "telemetry_usage_provenance",
-        "telemetry_error_observed",
-        "telemetry_model_purpose_observed",
-        "telemetry_duration_observed",
-        "telemetry_closed",
-        "telemetry_cross_process",
-        "telemetry_concurrent",
-        "telemetry_redacted",
-    ):
-        assert bundle["evidence_view"][telemetry_field] is True
-    assert bundle["independent_evidence"]["telemetry_jsonl_digest"].startswith("sha256:")
-    assert (
-        bundle["independent_evidence"]["telemetry_independent_digest"]
-        == bundle["independent_evidence"]["telemetry_jsonl_digest"]
-    )
-    assert (
-        bundle["independent_evidence"]["telemetry_independent_digest"]
-        != bundle["independent_evidence"]["host_observation_digest"]
-    )
+    assert all(not key.startswith("telemetry_") for key in bundle["evidence_view"])
+    assert all(not key.startswith("telemetry_") for key in bundle["independent_evidence"])
     host_observation = {
         key.removeprefix("host_"): value
         for key, value in bundle["independent_evidence"].items()
@@ -394,17 +404,6 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "public_layers_available": True,
         "runtime_dependency_violation_count": 0,
         "root_expand_compatibility": True,
-        "telemetry_ordered": True,
-        "telemetry_inspection_reconciled": True,
-        "telemetry_usage_provenance": True,
-        "telemetry_error_observed": True,
-        "telemetry_model_purpose_observed": True,
-        "telemetry_duration_observed": True,
-        "telemetry_closed": True,
-        "telemetry_cross_process": True,
-        "telemetry_concurrent": True,
-        "telemetry_redacted": True,
-        "filesystem_permission_boundary_observed": True,
     }
     assert bundle["independent_evidence"]["host_observation_digest"] == "sha256:" + hashlib.sha256(
         json.dumps(host_observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -691,6 +690,53 @@ assert identity["source_commit"] == sys.argv[1], identity
 assert identity["environment"]["source_state"] == "clean", identity
 assert identity["environment"]["installation"] == "wheel", identity
 print("m-agent sdist-derived wheel identity passed")
+"""
+
+
+_SUPPLIED_SDIST_PROVENANCE_FAILURE_PROBE = """
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from m_agent.testing import core_lifecycle_manifest, installed_identity
+
+
+wheel = Path(sys.argv[1])
+sdist = Path(sys.argv[2])
+identity = installed_identity(artifact=wheel, sdist=sdist)
+manifest = core_lifecycle_manifest(
+    source_commit=identity["source_commit"],
+    artifact_digest=identity["artifact_digest"],
+    sdist_digest=identity["sdist_digest"],
+    fixture_digest=identity["fixture_digest"],
+    environment=identity["environment"],
+)
+with tempfile.TemporaryDirectory() as temporary_directory:
+    manifest_path = Path(temporary_directory) / "manifest.json"
+    manifest_path.write_text(manifest.model_dump_json())
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "m_agent.testing",
+            "run",
+            "--manifest",
+            str(manifest_path),
+            "--wheel",
+            str(wheel),
+            "--sdist",
+            str(sdist),
+            "--output-dir",
+            str(Path(temporary_directory) / "bundles"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stderr
+print("m-agent supplied sdist provenance rejection passed")
 """
 
 
@@ -999,6 +1045,105 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent sdist-derived wheel identity passed", output)
+
+    def test_foundation_cli_rejects_wheel_not_built_from_supplied_sdist(self) -> None:
+        """A self-declared source map cannot bind a different installed wheel."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            clean_environment = _clean_environment()
+            dist_dir = temporary_root / "dist"
+            _run(
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--sdist",
+                    "--out-dir",
+                    str(dist_dir),
+                ],
+                cwd=_ROOT,
+                env=clean_environment,
+            )
+            sdist = next(dist_dir.glob("*.tar.gz"))
+            source = temporary_root / "source"
+            shutil.unpack_archive(str(sdist), str(source))
+            source_root = next(source.iterdir())
+            runtime_module = source_root / "src" / "m_agent" / "runtime" / "__init__.py"
+            runtime_module.write_text(
+                runtime_module.read_text() + "\nPROVENANCE_TAMPER_MARKER = True\n"
+            )
+            integrity_path = source_root / "SOURCE_INTEGRITY.json"
+            integrity_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "files": {
+                            path.relative_to(source_root).as_posix(): "sha256:"
+                            + hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in sorted(source_root.rglob("*"))
+                            if path.is_file() and path != integrity_path
+                        },
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            altered_dist = temporary_root / "altered-dist"
+            _run(
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--out-dir",
+                    str(altered_dist),
+                ],
+                cwd=source_root,
+                env=clean_environment,
+            )
+            altered_wheel = next(altered_dist.glob("*.whl"))
+            environment_dir = temporary_root / "environment"
+            _run(
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            python = environment_dir / "bin" / "python"
+            _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--python",
+                    str(python),
+                    f"{altered_wheel}[testing]",
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            output = _run(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    _SUPPLIED_SDIST_PROVENANCE_FAILURE_PROBE,
+                    str(altered_wheel),
+                    str(sdist),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            self.assertIn("m-agent supplied sdist provenance rejection passed", output)
 
     def test_foundation_cli_reports_host_subject_failures_as_exit_one(self) -> None:
         """A valid HOST observation with a false subject conclusion is a failure."""

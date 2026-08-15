@@ -76,6 +76,8 @@ class ReleaseMaterialTests(unittest.TestCase):
             "core.lifecycle.host-wheel",
         ):
             self.assertIn(required_check, matrix)
+        self.assertNotIn("core.lifecycle.telemetry` |", matrix)
+        self.assertNotIn("core.lifecycle.telemetry-host` |", matrix)
 
     def test_public_docs_are_sanitized_and_scope_qualified(self) -> None:
         paths = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", ROOT / "SECURITY.md"]
