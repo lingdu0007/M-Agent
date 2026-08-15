@@ -29,6 +29,7 @@ from m_agent._build_identity import (
     BUILD_TOOL,
     BUILD_TOOL_VERSION,
     SOURCE_COMMIT,
+    SOURCE_INTEGRITY_DIGEST,
     SOURCE_STATE,
 )
 
@@ -47,6 +48,11 @@ _INSTALLER_METADATA = {
 }
 _BUILD_IDENTITY_PATH = PurePosixPath("src/m_agent/_build_identity.py")
 _SOURCE_INTEGRITY_PATH = PurePosixPath("SOURCE_INTEGRITY.json")
+_GENERATED_SOURCE_FILES = frozenset({"PKG-INFO", "setup.cfg", "SOURCE_INTEGRITY.json"})
+
+
+class AcceptanceHarnessError(RuntimeError):
+    """A required HOST observation could not run on this machine."""
 
 
 def _installed_distribution() -> Distribution:
@@ -156,7 +162,13 @@ def _assert_sdist_matches_installed(source_artifact: Path) -> str:
             actual_files: dict[str, str] = {}
             for path, member in files_by_path.items():
                 relative = str(PurePosixPath(path).relative_to(root))
-                if relative == str(_SOURCE_INTEGRITY_PATH):
+                relative_path = PurePosixPath(relative)
+                if (
+                    relative_path == _SOURCE_INTEGRITY_PATH
+                    or relative_path == _BUILD_IDENTITY_PATH
+                    or relative_path.name in _GENERATED_SOURCE_FILES
+                    or any(part.endswith(".egg-info") for part in relative_path.parts)
+                ):
                     continue
                 content = source_distribution.extractfile(member)
                 if content is None:
@@ -168,6 +180,11 @@ def _assert_sdist_matches_installed(source_artifact: Path) -> str:
                 raise ValueError(
                     "source distribution content does not match integrity manifest"
                 )
+            declared_digest = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    declared_files, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
     except (
         AttributeError,
         json.JSONDecodeError,
@@ -191,7 +208,9 @@ def _assert_sdist_matches_installed(source_artifact: Path) -> str:
     if (
         values.get("SOURCE_COMMIT") != SOURCE_COMMIT
         or values.get("SOURCE_STATE") != SOURCE_STATE
+        or values.get("SOURCE_INTEGRITY_DIGEST") != SOURCE_INTEGRITY_DIGEST
         or SOURCE_STATE != "clean"
+        or declared_digest != SOURCE_INTEGRITY_DIGEST
     ):
         raise ValueError("source distribution does not match installed wheel provenance")
     return root
@@ -226,12 +245,24 @@ def _extract_sdist(source_artifact: Path, destination: Path, root: str) -> None:
             target.write_bytes(source.read())
 
 
-def _assert_sdist_builds_candidate_wheel(source_artifact: Path, artifact: Path) -> None:
+def _wheel_product_digest(members: dict[str, bytes]) -> str:
+    payload = {
+        member: "sha256:" + hashlib.sha256(content).hexdigest()
+        for member, content in sorted(members.items())
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def assert_sdist_builds_candidate_wheel(source_artifact: Path, artifact: Path) -> str:
     """Build the supplied source artifact offline and bind its product payload."""
     root = _assert_sdist_matches_installed(source_artifact)
     uv = shutil.which("uv")
     if uv is None:
-        raise ValueError("offline source distribution build tool is unavailable")
+        raise AcceptanceHarnessError("offline source distribution build tool is unavailable")
     with tempfile.TemporaryDirectory(prefix="m-agent-sdist-") as temporary_directory:
         temporary_root = Path(temporary_directory)
         source_root = temporary_root / "source"
@@ -254,12 +285,26 @@ def _assert_sdist_builds_candidate_wheel(source_artifact: Path, artifact: Path) 
                 timeout=30,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            raise ValueError("candidate source distribution cannot be built offline") from error
+            raise AcceptanceHarnessError(
+                "candidate source distribution build could not be observed"
+            ) from error
         wheels = list(output_directory.glob("*.whl"))
         if completed.returncode != 0 or len(wheels) != 1:
             raise ValueError("candidate source distribution cannot be built offline")
-        if _wheel_product_members(artifact) != _wheel_product_members(wheels[0]):
+        candidate_members = _wheel_product_members(artifact)
+        rebuilt_members = _wheel_product_members(wheels[0])
+        if candidate_members != rebuilt_members:
             raise ValueError("candidate wheel does not match supplied source distribution")
+        payload = {
+            "candidate_product_digest": _wheel_product_digest(candidate_members),
+            "rebuilt_product_digest": _wheel_product_digest(rebuilt_members),
+            "sdist_digest": _file_digest(source_artifact),
+        }
+        return "sha256:" + hashlib.sha256(
+            json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
 
 
 def _fixture_digest() -> str:
@@ -458,4 +503,4 @@ def validate_installed_identity(
             "Manifest does not match installed identity: " + ", ".join(mismatches)
         )
     if verify_sdist_build:
-        _assert_sdist_builds_candidate_wheel(sdist, artifact)
+        assert_sdist_builds_candidate_wheel(sdist, artifact)

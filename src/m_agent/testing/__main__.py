@@ -14,7 +14,12 @@ from typing import NoReturn
 from uuid import uuid4
 
 from ._core_lifecycle import run_core_lifecycle
-from ._identity import installed_identity, validate_installed_identity
+from ._identity import (
+    AcceptanceHarnessError,
+    assert_sdist_builds_candidate_wheel,
+    installed_identity,
+    validate_installed_identity,
+)
 from ._pack import (
     AcceptanceCheckResult,
     AcceptanceCheckStatus,
@@ -685,9 +690,76 @@ def _controlled_identity_mutation_evidence(
     ).hexdigest()
 
 
+def _evidence_digest(payload: object) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _complete_host_harness_error(
+    output_dir: Path,
+    manifest: AcceptanceManifest,
+    execution: PackExecution,
+) -> int:
+    """Persist a required HOST observation failure as Pack ERROR."""
+    results = tuple(
+        AcceptanceCheckResult(
+            check_id=check.check_id,
+            status=(
+                AcceptanceCheckStatus.ERROR
+                if check.check_id == "core.lifecycle.host-wheel"
+                else AcceptanceCheckStatus.NOT_RUN
+            ),
+            evidence_level=check.evidence_level,
+            reason_code=(
+                "supplied_sdist_rebuild_harness_error"
+                if check.check_id == "core.lifecycle.host-wheel"
+                else "not_run_after_harness_error"
+            ),
+            evidence_digest=_evidence_digest(
+                {
+                    "check_id": check.check_id,
+                    "manifest_digest": manifest.digest,
+                    "status": (
+                        "ERROR"
+                        if check.check_id == "core.lifecycle.host-wheel"
+                        else "NOT_RUN"
+                    ),
+                }
+            ),
+        )
+        for check in manifest.required_checks
+    )
+    completed = execution.complete(manifest, results)
+    bundle = ScenarioEvidenceBundle.create(
+        manifest=manifest,
+        execution=completed,
+        execution_checks=results,
+        scenario="core-lifecycle",
+        checks=results,
+        evidence_view={"host_wheel_sdist_rebuild_matches": False},
+        independent_evidence={
+            "host_wheel_sdist_provenance_digest": _evidence_digest(
+                {"manifest_digest": manifest.digest, "outcome": "harness_error"}
+            )
+        },
+    )
+    _write_run_state(output_dir, manifest, completed, bundle)
+    _publish_bundle(output_dir, bundle)
+    _clear_run_state(output_dir)
+    return completed.exit_code or EXIT_HARNESS_ERROR
+
+
 def _run(arguments: argparse.Namespace) -> int:
     manifest = _read_manifest(arguments.manifest)
-    validate_installed_identity(manifest, artifact=arguments.wheel, sdist=arguments.sdist)
+    validate_installed_identity(
+        manifest,
+        artifact=arguments.wheel,
+        sdist=arguments.sdist,
+        verify_sdist_build=False,
+    )
     _assert_core_lifecycle_manifest(manifest)
     prior = _load_run_state(arguments.output_dir, manifest)
     if prior is not None and prior[1] is not None:
@@ -703,6 +775,12 @@ def _run(arguments: argparse.Namespace) -> int:
         ).start(manifest)
     )
     _write_run_state(arguments.output_dir, manifest, execution)
+    try:
+        host_wheel_sdist_provenance_digest = assert_sdist_builds_candidate_wheel(
+            arguments.sdist, arguments.wheel
+        )
+    except AcceptanceHarnessError:
+        return _complete_host_harness_error(arguments.output_dir, manifest, execution)
     checks, evidence_view, independent_evidence = asyncio.run(
         run_core_lifecycle(fixture_digest=manifest.fixture_digest)
     )
@@ -717,12 +795,24 @@ def _run(arguments: argparse.Namespace) -> int:
         if not key.startswith("telemetry_")
     }
     host_results, host_evidence = _isolated_host_result()
+    host_wheel_authoritative_digest = _evidence_digest(
+        {
+            "host_observation_digest": host_results[0].evidence_digest,
+            "host_wheel_sdist_provenance_digest": host_wheel_sdist_provenance_digest,
+        }
+    )
+    host_results = (
+        host_results[0].model_copy(
+            update={"evidence_digest": host_wheel_authoritative_digest}
+        ),
+    )
     host_wheel_identity_mutation_digest = _controlled_identity_mutation_evidence(
         manifest, artifact=arguments.wheel, sdist=arguments.sdist
     )
     evidence_view = {
         **evidence_view,
         "host_wheel_identity_mismatches_rejected": True,
+        "host_wheel_sdist_rebuild_matches": True,
     }
     provisional_mutation_result = AcceptanceCheckResult(
         check_id="core.lifecycle.bundle-tamper",
@@ -761,6 +851,7 @@ def _run(arguments: argparse.Namespace) -> int:
             **independent_evidence,
             **host_evidence,
             "host_wheel_identity_mutation_digest": host_wheel_identity_mutation_digest,
+            "host_wheel_sdist_provenance_digest": host_wheel_sdist_provenance_digest,
             "bundle_mutation_independent_digest": provisional_mutation_independent_digest,
         },
         host_observation_digest=str(host_evidence["host_observation_digest"]),
@@ -789,6 +880,7 @@ def _run(arguments: argparse.Namespace) -> int:
         {
             **independent_evidence,
             "host_wheel_identity_mutation_digest": host_wheel_identity_mutation_digest,
+            "host_wheel_sdist_provenance_digest": host_wheel_sdist_provenance_digest,
             "bundle_mutation_independent_digest": mutation_independent_digest,
         },
         host_observation_digest=str(host_evidence["host_observation_digest"]),

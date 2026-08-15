@@ -137,6 +137,7 @@ import hashlib
 import io
 import json
 from importlib.metadata import metadata
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -210,6 +211,26 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         pass
     else:
         raise AssertionError("identity accepted an altered source distribution")
+    forged_sdist_root = Path(temporary_directory) / "forged-source"
+    shutil.unpack_archive(str(sdist), str(forged_sdist_root))
+    forged_root = next(forged_sdist_root.iterdir())
+    provenance_document = forged_root / "docs" / "adr" / "0042-reference-acceptance-pack-over-monolithic-demo.md"
+    provenance_document.write_text(provenance_document.read_text() + "\\ncontrolled provenance tamper\\n")
+    forged_integrity_path = forged_root / "SOURCE_INTEGRITY.json"
+    forged_integrity = json.loads(forged_integrity_path.read_text())
+    forged_integrity["files"][provenance_document.relative_to(forged_root).as_posix()] = (
+        "sha256:" + hashlib.sha256(provenance_document.read_bytes()).hexdigest()
+    )
+    forged_integrity_path.write_text(json.dumps(forged_integrity, sort_keys=True, separators=(",", ":")))
+    forged_sdist = Path(temporary_directory) / "forged-source.tar.gz"
+    with tarfile.open(forged_sdist, "w:gz") as archive:
+        archive.add(forged_root, arcname=forged_root.name)
+    try:
+        installed_identity(artifact=wheel, sdist=forged_sdist)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("identity accepted self-authored source provenance")
     manifest_path.write_text(manifest.model_dump_json())
     import subprocess
 
@@ -237,13 +258,10 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     }, sort_keys=True, separators=(",", ":")))
     with tarfile.open(invalid_sdist, "w:gz") as archive:
         archive.add(invalid_root, arcname=invalid_root.name)
-    invalid_identity = installed_identity(artifact=wheel, sdist=invalid_sdist)
-    invalid_manifest = core_lifecycle_manifest(
-        source_commit=invalid_identity["source_commit"],
-        artifact_digest=invalid_identity["artifact_digest"],
-        sdist_digest=invalid_identity["sdist_digest"],
-        fixture_digest=invalid_identity["fixture_digest"],
-        environment=invalid_identity["environment"],
+    invalid_manifest = manifest.model_copy(
+        update={
+            "sdist_digest": "sha256:" + hashlib.sha256(invalid_sdist.read_bytes()).hexdigest()
+        }
     )
     manifest_path.write_text(invalid_manifest.model_dump_json())
     completed = invoke(
@@ -372,6 +390,20 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         == bundle["independent_evidence"]["host_wheel_identity_mutation_digest"]
     )
     assert bundle["evidence_view"]["host_wheel_identity_mismatches_rejected"] is True
+    assert bundle["evidence_view"]["host_wheel_sdist_rebuild_matches"] is True
+    assert bundle["independent_evidence"]["host_wheel_sdist_provenance_digest"].startswith(
+        "sha256:"
+    )
+    assert checks_by_id["core.lifecycle.host-wheel"]["evidence_digest"] == "sha256:" + hashlib.sha256(
+        json.dumps(
+            {
+                "host_observation_digest": bundle["independent_evidence"]["host_observation_digest"],
+                "host_wheel_sdist_provenance_digest": bundle["independent_evidence"]["host_wheel_sdist_provenance_digest"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     assert bundle["independent_evidence"]["bundle_tamper_independent_digest"].startswith(
         "sha256:"
     )
@@ -386,6 +418,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             "host_observation_digest",
             "host_wheel_independent_digest",
             "host_wheel_identity_mutation_digest",
+            "host_wheel_sdist_provenance_digest",
         }
     }
     assert host_observation == {
@@ -615,6 +648,40 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         assert completed.returncode == 2, completed.stderr
 
     manifest_path.write_text(manifest.model_dump_json())
+    harness_output_dir = Path(temporary_directory) / "harness-bundles"
+    no_uv_environment = {**os.environ, "PATH": "/usr/bin:/bin"}
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "m_agent.testing",
+            "run",
+            "--manifest",
+            str(manifest_path),
+            "--wheel",
+            str(wheel),
+            "--sdist",
+            str(sdist),
+            "--output-dir",
+            str(harness_output_dir),
+        ],
+        env=no_uv_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 3, completed.stderr
+    harness_bundle = json.loads(Path(completed.stdout.strip()).read_text())
+    assert harness_bundle["execution"]["status"] == "ERROR"
+    assert harness_bundle["execution"]["exit_code"] == 3
+    assert next(
+        check["status"]
+        for check in harness_bundle["checks"]
+        if check["check_id"] == "core.lifecycle.host-wheel"
+    ) == "ERROR"
+
+    manifest_path.write_text(manifest.model_dump_json())
     completed = subprocess.run(
         ["uv", "pip", "install", "--offline", "--python", sys.executable, "pytest"],
         text=True,
@@ -694,6 +761,7 @@ print("m-agent sdist-derived wheel identity passed")
 
 
 _SUPPLIED_SDIST_PROVENANCE_FAILURE_PROBE = """
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -704,11 +772,11 @@ from m_agent.testing import core_lifecycle_manifest, installed_identity
 
 wheel = Path(sys.argv[1])
 sdist = Path(sys.argv[2])
-identity = installed_identity(artifact=wheel, sdist=sdist)
+identity = installed_identity(artifact=wheel)
 manifest = core_lifecycle_manifest(
     source_commit=identity["source_commit"],
     artifact_digest=identity["artifact_digest"],
-    sdist_digest=identity["sdist_digest"],
+    sdist_digest="sha256:" + hashlib.sha256(sdist.read_bytes()).hexdigest(),
     fixture_digest=identity["fixture_digest"],
     environment=identity["environment"],
 )
