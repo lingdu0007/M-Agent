@@ -132,6 +132,7 @@ class AcceptanceManifest(BaseModel, frozen=True):
     environment: Mapping[str, str] = Field(default_factory=dict)
     scenarios: tuple[str, ...] = ()
     required_checks: tuple[AcceptanceCheck, ...] = ()
+    required_cli_commands: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_frozen_declarations(self) -> "AcceptanceManifest":
@@ -181,6 +182,10 @@ class AcceptanceManifest(BaseModel, frozen=True):
             raise ValueError(
                 "Manifest required checks must be required and name a declared Scenario"
             )
+        if len(set(self.required_cli_commands)) != len(self.required_cli_commands) or any(
+            not command.strip() for command in self.required_cli_commands
+        ):
+            raise ValueError("Manifest required CLI commands must be unique and nonempty")
         if (
             any(
                 check.evidence_level is EvidenceLevel.HOST
@@ -321,6 +326,7 @@ def core_lifecycle_manifest(
         environment=environment,
         scenarios=(CORE_LIFECYCLE_SCENARIO,),
         required_checks=_CORE_LIFECYCLE_REQUIRED_CHECKS,
+        required_cli_commands=("run", "inspect", "verify", "render"),
     )
 
 
@@ -396,6 +402,10 @@ class PackExecution(BaseModel, frozen=True):
     ) -> "PackExecution":
         """Derive the terminal Pack result from all frozen required checks."""
         self.assert_matches(manifest)
+        results = tuple(
+            AcceptanceCheckResult.model_validate(dict(result))
+            for result in results
+        )
         if self.status not in {
             PackExecutionStatus.CREATED,
             PackExecutionStatus.RUNNING,

@@ -184,6 +184,32 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     execution.assert_matches(changed)
 
+    def test_foundation_manifest_freezes_the_public_cli_contract_outside_bundle_results(
+        self,
+    ) -> None:
+        """CLI acceptance is frozen without asking a Bundle to attest itself."""
+        from m_agent.testing import PackExecution, core_lifecycle_manifest
+
+        manifest = core_lifecycle_manifest(
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:" + "a" * 64,
+            sdist_digest="sha256:" + "b" * 64,
+            fixture_digest="sha256:" + "c" * 64,
+            environment={"os": "linux"},
+        )
+        execution = PackExecution.create(manifest, execution_id="cli-contract")
+
+        self.assertEqual(
+            manifest.required_cli_commands, ("run", "inspect", "verify", "render")
+        )
+        self.assertFalse(
+            any("cli" in check.check_id for check in manifest.required_checks)
+        )
+        changed = manifest.model_copy(update={"required_cli_commands": ("run",)})
+        self.assertNotEqual(changed.digest, manifest.digest)
+        with self.assertRaises(ValueError):
+            execution.assert_matches(changed)
+
     def test_foundation_manifest_requires_a_source_distribution_and_supported_host(self) -> None:
         """The public Manifest cannot claim a HOST result without both artifacts."""
         from pydantic import ValidationError
@@ -1106,6 +1132,71 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             execution.model_copy(
                 update={"status": PackExecutionStatus.PASSED, "exit_code": 3}
             )
+
+    def test_pack_and_bundle_reject_a_forged_check_status(self) -> None:
+        """Only the five public result statuses may affect a terminal Pack."""
+        from pydantic import ValidationError
+
+        from m_agent.testing import (
+            AcceptanceManifest,
+            BundleIntegrityError,
+            EvidenceLevel,
+            PackExecution,
+            ScenarioEvidenceBundle,
+        )
+
+        manifest = AcceptanceManifest(
+            pack_version="0.3.0",
+            profile="0.3",
+            source_commit="b70919487a5aed78d9780efd24219ec77b670d92",
+            artifact_digest="sha256:" + "a" * 64,
+            sdist_digest="sha256:" + "b" * 64,
+            fixture_digest="sha256:" + "c" * 64,
+            environment={"python": "3.11"},
+            scenarios=("core-lifecycle",),
+            required_checks=(
+                self._acceptance_check(
+                    check_id="core.lifecycle",
+                    scenario="core-lifecycle",
+                    public_seam="m_agent.runtime.Runner",
+                ),
+            ),
+        )
+        valid = self._check_result(
+            "core.lifecycle", evidence_level=EvidenceLevel.CONTRACT
+        )
+        forged = valid.model_copy(update={"status": "UNRECOGNIZED"})
+        execution = PackExecution.create(manifest, execution_id="forged-status")
+
+        with self.assertRaises(ValidationError):
+            execution.complete(manifest, (forged,))
+
+        completed = execution.complete(manifest, (valid,))
+        with self.assertRaises(ValidationError):
+            ScenarioEvidenceBundle.create(
+                manifest=manifest,
+                execution=completed,
+                execution_checks=(forged,),
+                scenario="core-lifecycle",
+                checks=(forged,),
+                evidence_view={"public_evidence": valid.evidence_digest},
+                independent_evidence={
+                    "independent_evidence": "sha256:" + "f" * 64,
+                },
+            )
+        bundle = ScenarioEvidenceBundle.create(
+            manifest=manifest,
+            execution=completed,
+            execution_checks=(valid,),
+            scenario="core-lifecycle",
+            checks=(valid,),
+            evidence_view={"public_evidence": valid.evidence_digest},
+            independent_evidence={"independent_evidence": "sha256:" + "f" * 64},
+        )
+        with self.assertRaises(BundleIntegrityError):
+            bundle.model_copy(
+                update={"execution_checks": (forged,), "checks": (forged,)}
+            ).verify()
 
     def test_known_required_failure_precedes_a_missing_required_result(self) -> None:
         """A supplied required FAIL remains the Pack verdict when coverage is missing."""

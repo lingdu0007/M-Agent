@@ -681,6 +681,48 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         if check["check_id"] == "core.lifecycle.host-wheel"
     ) == "ERROR"
 
+    failed_build_bin = Path(temporary_directory) / "failed-build-bin"
+    failed_build_bin.mkdir()
+    failed_uv = failed_build_bin / "uv"
+    failed_uv.write_text("#!/bin/sh\\nexit 1\\n", encoding="utf-8")
+    failed_uv.chmod(0o755)
+    failed_build_output_dir = Path(temporary_directory) / "failed-build-bundles"
+    failed_build_environment = {
+        **os.environ,
+        "PATH": str(failed_build_bin) + os.pathsep + os.environ["PATH"],
+    }
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "m_agent.testing",
+            "run",
+            "--manifest",
+            str(manifest_path),
+            "--wheel",
+            str(wheel),
+            "--sdist",
+            str(sdist),
+            "--output-dir",
+            str(failed_build_output_dir),
+        ],
+        env=failed_build_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 1, completed.stderr
+    failed_build_bundle = json.loads(Path(completed.stdout.strip()).read_text())
+    assert failed_build_bundle["execution"]["status"] == "FAILED"
+    assert failed_build_bundle["execution"]["exit_code"] == 1
+    assert next(
+        check["status"]
+        for check in failed_build_bundle["checks"]
+        if check["check_id"] == "core.lifecycle.host-wheel"
+    ) == "FAIL"
+    assert not (failed_build_output_dir / ".core-lifecycle-running.json").exists()
+
     manifest_path.write_text(manifest.model_dump_json())
     completed = subprocess.run(
         ["uv", "pip", "install", "--offline", "--python", sys.executable, "pytest"],

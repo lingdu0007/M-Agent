@@ -698,32 +698,35 @@ def _evidence_digest(payload: object) -> str:
     ).hexdigest()
 
 
-def _complete_host_harness_error(
+def _complete_host_wheel_terminal(
     output_dir: Path,
     manifest: AcceptanceManifest,
     execution: PackExecution,
+    *,
+    status: AcceptanceCheckStatus,
+    reason_code: str,
 ) -> int:
-    """Persist a required HOST observation failure as Pack ERROR."""
+    """Persist a completed HOST-wheel observation with its Pack verdict."""
     results = tuple(
         AcceptanceCheckResult(
             check_id=check.check_id,
             status=(
-                AcceptanceCheckStatus.ERROR
+                status
                 if check.check_id == "core.lifecycle.host-wheel"
                 else AcceptanceCheckStatus.NOT_RUN
             ),
             evidence_level=check.evidence_level,
             reason_code=(
-                "supplied_sdist_rebuild_harness_error"
+                reason_code
                 if check.check_id == "core.lifecycle.host-wheel"
-                else "not_run_after_harness_error"
+                else "not_run_after_host_wheel_terminal"
             ),
             evidence_digest=_evidence_digest(
                 {
                     "check_id": check.check_id,
                     "manifest_digest": manifest.digest,
                     "status": (
-                        "ERROR"
+                        status.value
                         if check.check_id == "core.lifecycle.host-wheel"
                         else "NOT_RUN"
                     ),
@@ -742,7 +745,7 @@ def _complete_host_harness_error(
         evidence_view={"host_wheel_sdist_rebuild_matches": False},
         independent_evidence={
             "host_wheel_sdist_provenance_digest": _evidence_digest(
-                {"manifest_digest": manifest.digest, "outcome": "harness_error"}
+                {"manifest_digest": manifest.digest, "outcome": reason_code}
             )
         },
     )
@@ -780,7 +783,21 @@ def _run(arguments: argparse.Namespace) -> int:
             arguments.sdist, arguments.wheel
         )
     except AcceptanceHarnessError:
-        return _complete_host_harness_error(arguments.output_dir, manifest, execution)
+        return _complete_host_wheel_terminal(
+            arguments.output_dir,
+            manifest,
+            execution,
+            status=AcceptanceCheckStatus.ERROR,
+            reason_code="supplied_sdist_rebuild_harness_error",
+        )
+    except ValueError:
+        return _complete_host_wheel_terminal(
+            arguments.output_dir,
+            manifest,
+            execution,
+            status=AcceptanceCheckStatus.FAIL,
+            reason_code="supplied_sdist_rebuild_failed",
+        )
     checks, evidence_view, independent_evidence = asyncio.run(
         run_core_lifecycle(fixture_digest=manifest.fixture_digest)
     )

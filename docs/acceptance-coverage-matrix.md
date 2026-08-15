@@ -9,6 +9,12 @@ non-claim, is frozen in a passing `core-lifecycle` Manifest. The Testing CLI
 rejects a Manifest that differs from this complete set; a row cannot be
 omitted based on an execution result.
 
+The same Manifest freezes `required_cli_commands` as `run`, `inspect`,
+`verify`, and `render`. This is a required public command mapping, rather than
+a check result: `inspect`, `verify`, and `render` operate on a completed
+Bundle and are proved by the external-wheel contract after `run`; a Bundle
+therefore never attests to its own later verification or rendering.
+
 | Check ID | Owner | Scenario and public seam | Positive and negative check | Authority and independent evidence | Level / milestone | Non-claim |
 | --- | --- | --- | --- | --- | --- | --- |
 | `core.lifecycle` | Runtime Core | `core-lifecycle`; `m_agent.runtime.Runner` | Create, start, inspect one deterministic Run; a non-success terminal is `FAIL`. | Public `RunInspection` counts, packaged fixture digest, and isolated wheel-process observation. | CONTRACT / Foundation | Does not prove provider or production execution. |
