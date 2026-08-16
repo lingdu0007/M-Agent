@@ -9,6 +9,7 @@ ADR 0030：注册时校验 required Model Capabilities 被 Adapter 声明。
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -101,6 +102,12 @@ class AgentDefinition(BaseModel, frozen=True):
         default_factory=ModelExecutionBudget
     )
     model_adapter: ModelAdapter = Field(exclude=True)
+    #: Direct non-primary bindings must retain the Adapter instance that owns
+    #: their selected Contract. PRIMARY reuse deliberately resolves through
+    #: ``model_adapter`` and does not need a duplicate entry here.
+    model_adapters: Mapping[ModelPurpose, ModelAdapter] = Field(
+        default_factory=dict, exclude=True
+    )
     #: 应用选择的、在依赖的 Model Step 之前确定性执行的 Context
     #: Provider（ADR 0014）。None 表示该 Run 不注入外部上下文。
     #: 与 model_adapter 一样从不随 Definition 序列化（ADR 0023）。
@@ -178,6 +185,21 @@ class AgentDefinition(BaseModel, frozen=True):
             )
         )
 
+    def model_adapter_for(self, purpose: ModelPurpose) -> ModelAdapter:
+        """Return the executable Adapter selected for one frozen purpose."""
+        binding = self.model_bindings.resolved().for_purpose(purpose)
+        if (
+            purpose is ModelPurpose.PRIMARY
+            or binding.source_purpose is ModelPurpose.PRIMARY
+        ):
+            return self.model_adapter
+        try:
+            return self.model_adapters[purpose]
+        except KeyError:
+            raise ModelCapabilityError(
+                f"Model Binding {purpose.value} has no Adapter owner"
+            ) from None
+
     def frozen_snapshot(self) -> DefinitionSnapshot:
         """冻结当前版本为 Run 使用的不可变 Definition Snapshot。"""
         return DefinitionSnapshot(
@@ -218,34 +240,45 @@ class DefinitionRegistry:
                 f"definition {definition.definition_id}@{definition.version} "
                 "is already registered and immutable"
             )
-        adapter = definition.model_adapter
-        contract = adapter.model_contract
-        configuration_fingerprint = contract.configuration_fingerprint
-        if not adapter.deterministic and not configuration_fingerprint:
-            raise ValueError(
-                f"live adapter {type(adapter).__name__} must declare a "
-                "non-empty definition contract configuration fingerprint"
-            )
-        current_configuration_fingerprint = (
-            adapter.definition_contract_fingerprint()
-        )
-        if not adapter.deterministic:
-            if not current_configuration_fingerprint:
-                raise ValueError(
-                    f"live adapter {type(adapter).__name__} must provide a "
-                    "non-empty current configuration fingerprint"
-                )
-            if current_configuration_fingerprint != configuration_fingerprint:
-                raise ValueError(
-                    f"adapter {type(adapter).__name__} configuration fingerprint "
-                    "does not match its ModelContract fingerprint"
-                )
         try:
             bindings = definition.effective_model_bindings()
         except ModelCapabilityError:
             raise
         contract_fingerprints = dict(self._contract_fingerprints)
+        adapter_contracts: dict[int, ModelContract] = {}
         for binding in bindings.bindings:
+            adapter = definition.model_adapter_for(binding.purpose)
+            adapter_key = id(adapter)
+            adapter_contract = adapter_contracts.get(adapter_key)
+            if adapter_contract is None:
+                adapter_contract = adapter.model_contract
+                configuration_fingerprint = adapter_contract.configuration_fingerprint
+                if not adapter.deterministic and not configuration_fingerprint:
+                    raise ValueError(
+                        f"live adapter {type(adapter).__name__} must declare a "
+                        "non-empty definition contract configuration fingerprint"
+                    )
+                current_configuration_fingerprint = (
+                    adapter.definition_contract_fingerprint()
+                )
+                if not adapter.deterministic:
+                    if not current_configuration_fingerprint:
+                        raise ValueError(
+                            f"live adapter {type(adapter).__name__} must provide a "
+                            "non-empty current configuration fingerprint"
+                        )
+                    if current_configuration_fingerprint != configuration_fingerprint:
+                        raise ValueError(
+                            f"adapter {type(adapter).__name__} configuration "
+                            "fingerprint does not match its ModelContract "
+                            "fingerprint"
+                        )
+                adapter_contracts[adapter_key] = adapter_contract
+            if adapter_contract != binding.contract:
+                raise ModelCapabilityError(
+                    f"Model Binding {binding.purpose.value} Adapter owner "
+                    "does not match its Model Contract"
+                )
             match = binding.requirements.match(binding.contract)
             if not match.compatible:
                 missing = match.reason.value

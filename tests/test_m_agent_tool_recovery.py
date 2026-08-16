@@ -34,7 +34,6 @@ from m_agent import (
     FakeClock,
     InMemoryRunStore,
     ModelCapabilities,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -45,12 +44,12 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     deserialize_model_response,
     deserialize_tool_outcome,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 TOOL_CALLING_CAPABILITIES = ModelCapabilities(
     tool_calling=ToolCallingMode.NATIVE

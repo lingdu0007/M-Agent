@@ -32,7 +32,6 @@ from m_agent import (
     InMemoryRunStore,
     JsonlTelemetrySink,
     ModelCapabilities,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -47,13 +46,12 @@ from m_agent import (
     TelemetryEvent,
     TelemetryEventType,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
     ToolRequest,
-    UsageProvenance,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode, UsageProvenance
 
 #: 穿过 Run input / 模型 / Context / Tool / resolution 路径的哨兵值，
 #: 断言它们绝不出现在 telemetry JSONL 中。

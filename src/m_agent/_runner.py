@@ -1188,13 +1188,16 @@ class Runner:
         expected = snapshot.model_bindings.for_purpose(
             ModelPurpose.PRIMARY
         ).contract
-        if expected != definition.model_adapter.model_contract:
+        if (
+            expected
+            != definition.model_adapter_for(ModelPurpose.PRIMARY).model_contract
+        ):
             raise RuntimeError(
                 f"run {run.run_id} snapshot Model Contract does not "
                 "match the resolved definition; refusing to silently change "
                 "recovery behavior"
             )
-        adapter = definition.model_adapter
+        adapter = definition.model_adapter_for(ModelPurpose.PRIMARY)
         configuration_fingerprint = adapter.definition_contract_fingerprint()
         if not adapter.deterministic:
             if not configuration_fingerprint:
@@ -1809,8 +1812,8 @@ class Runner:
         # 重试决策只依据 Run 启动时冻结的 Retry Policy（ADR 0022/0023），
         # 运行中修改 Agent Definition 不能改变已有 Run 的重试行为。
         policy = run.snapshot.retry_policy
-        adapter = definition.model_adapter
         purpose = ModelPurpose.PRIMARY
+        adapter = definition.model_adapter_for(purpose)
         binding = run.snapshot.model_bindings.for_purpose(purpose)
         model_contract = binding.contract
         streaming = (

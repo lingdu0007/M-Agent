@@ -205,6 +205,158 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(registry.is_registered("conflicting-contract-user", "1"))
 
+    def test_secondary_binding_requires_an_explicit_adapter_owner(self) -> None:
+        """A direct secondary Contract cannot exist without its Adapter."""
+        from m_agent.adapters import DeterministicModelAdapter
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelBinding,
+            ModelBindingSet,
+            ModelCapabilityError,
+            ModelContract,
+            ModelLimits,
+            ModelPurpose,
+            RevisionStability,
+        )
+
+        def contract(contract_id: str) -> ModelContract:
+            return ModelContract(
+                contract_id=contract_id,
+                version="1",
+                revision_stability=RevisionStability.PINNED,
+                model_identity=f"deterministic:{contract_id}",
+                limits=ModelLimits(
+                    context_window_tokens=128, max_output_tokens=32
+                ),
+                input_sizer_id="deterministic-v1",
+                serialization_id="deterministic-text-v1",
+            )
+
+        primary_adapter = DeterministicModelAdapter(
+            ("primary",), model_contract=contract("primary")
+        )
+        secondary_adapter = DeterministicModelAdapter(
+            ("secondary",), model_contract=contract("secondary")
+        )
+        primary = ModelBinding(
+            purpose=ModelPurpose.PRIMARY,
+            contract=primary_adapter.model_contract,
+        )
+        bindings = ModelBindingSet(
+            bindings=(
+                primary,
+                ModelBinding(
+                    purpose=ModelPurpose.CONTEXT_COMPRESSION,
+                    contract=secondary_adapter.model_contract,
+                ),
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.OUTPUT_REPAIR,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+            )
+        )
+
+        with self.assertRaisesRegex(ModelCapabilityError, "Adapter owner"):
+            DefinitionRegistry().register(
+                AgentDefinition.for_adapter(
+                    definition_id="secondary-owner-missing",
+                    version="1",
+                    instructions="Reply.",
+                    model_bindings=bindings,
+                    model_adapter=primary_adapter,
+                )
+            )
+        with self.assertRaisesRegex(ModelCapabilityError, "does not match"):
+            DefinitionRegistry().register(
+                AgentDefinition.for_adapter(
+                    definition_id="secondary-owner-mismatch",
+                    version="1",
+                    instructions="Reply.",
+                    model_bindings=bindings,
+                    model_adapter=primary_adapter,
+                    model_adapters={
+                        ModelPurpose.CONTEXT_COMPRESSION: primary_adapter
+                    },
+                )
+            )
+
+    def test_secondary_binding_resolves_its_explicit_adapter_owner(self) -> None:
+        """A complete Binding Set exposes every declared execution owner."""
+        from m_agent.adapters import DeterministicModelAdapter
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelBinding,
+            ModelBindingSet,
+            ModelContract,
+            ModelLimits,
+            ModelPurpose,
+            RevisionStability,
+        )
+
+        def contract(contract_id: str) -> ModelContract:
+            return ModelContract(
+                contract_id=contract_id,
+                version="1",
+                revision_stability=RevisionStability.PINNED,
+                model_identity=f"deterministic:{contract_id}",
+                limits=ModelLimits(
+                    context_window_tokens=128, max_output_tokens=32
+                ),
+                input_sizer_id="deterministic-v1",
+                serialization_id="deterministic-text-v1",
+            )
+
+        primary_adapter = DeterministicModelAdapter(
+            ("primary",), model_contract=contract("primary")
+        )
+        secondary_adapter = DeterministicModelAdapter(
+            ("secondary",), model_contract=contract("secondary")
+        )
+        primary = ModelBinding(
+            purpose=ModelPurpose.PRIMARY,
+            contract=primary_adapter.model_contract,
+        )
+        bindings = ModelBindingSet(
+            bindings=(
+                primary,
+                ModelBinding(
+                    purpose=ModelPurpose.CONTEXT_COMPRESSION,
+                    contract=secondary_adapter.model_contract,
+                ),
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.OUTPUT_REPAIR,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+            )
+        )
+        definition = AgentDefinition.for_adapter(
+            definition_id="secondary-owner-present",
+            version="1",
+            instructions="Reply.",
+            model_bindings=bindings,
+            model_adapter=primary_adapter,
+            model_adapters={
+                ModelPurpose.CONTEXT_COMPRESSION: secondary_adapter
+            },
+        )
+
+        DefinitionRegistry().register(definition)
+
+        self.assertIs(
+            definition.model_adapter_for(ModelPurpose.CONTEXT_COMPRESSION),
+            secondary_adapter,
+        )
+        self.assertIs(
+            definition.model_adapter_for(ModelPurpose.OUTPUT_REPAIR),
+            primary_adapter,
+        )
+
     def test_usage_value_cannot_claim_unavailable_provenance(self) -> None:
         from pydantic import ValidationError
 
@@ -1233,6 +1385,92 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 1)
 
+    async def test_malformed_tool_arguments_fail_before_non_idempotent_effect(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelRequest,
+            ModelResponse,
+            ModelRequirements,
+            Runner,
+            RunStatus,
+            ToolCall,
+            ToolCallingMode,
+            ToolEffect,
+            ToolOutcome,
+        )
+
+        class MalformedToolCallAdapter(DeterministicModelAdapter):
+            def __init__(self) -> None:
+                super().__init__(
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    )
+                )
+
+            async def generate(self, request: ModelRequest) -> ModelResponse:
+                self.call_count += 1
+                return ModelResponse(
+                    tool_calls=(
+                        ToolCall(
+                            call_id="write-1",
+                            tool_name="write",
+                            arguments="{",
+                        ),
+                    )
+                )
+
+        effects: list[str] = []
+        tool = DeterministicTool(
+            name="write",
+            effect=ToolEffect.NON_IDEMPOTENT,
+            handler=lambda request: (
+                effects.append(request.arguments)
+                or ToolOutcome.success(
+                    request.call_id, request.tool_name, "written"
+                )
+            ),
+        )
+        adapter = MalformedToolCallAdapter()
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="malformed-tool-arguments",
+                version="1",
+                instructions="Never invoke malformed calls.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    )
+                ),
+                model_adapter=adapter,
+                tools=(tool,),
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run(
+            "malformed-tool-arguments", "1", "write"
+        )
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(effects, [])
+
     async def test_malformed_nested_model_response_is_contract_violation(
         self,
     ) -> None:
@@ -1785,6 +2023,46 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         terminal = await Runner(initial_registry, store).start_run(created.run_id)
         self.assertIs(terminal.status, RunStatus.SUCCEEDED)
         self.assertEqual(original.call_count, 1)
+
+    async def test_default_deterministic_adapter_drift_is_rejected(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import AgentDefinition, DefinitionRegistry, Runner
+
+        original = DeterministicModelAdapter(("old",))
+        initial_registry = DefinitionRegistry()
+        initial_registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="deterministic-drift",
+                version="1",
+                instructions="Reply.",
+                model_adapter=original,
+            )
+        )
+        store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        created = await Runner(initial_registry, store).create_run(
+            "deterministic-drift", "1", "hi"
+        )
+
+        changed = DeterministicModelAdapter(("new",))
+        changed_registry = DefinitionRegistry()
+        changed_registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="deterministic-drift",
+                version="1",
+                instructions="Reply.",
+                model_adapter=changed,
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "snapshot Model Contract"):
+            await Runner(changed_registry, store).start_run(created.run_id)
+
+        self.assertEqual(original.call_count, 0)
+        self.assertEqual(changed.call_count, 0)
 
     async def test_model_contract_is_rechecked_after_reservation(self) -> None:
         from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
@@ -2652,7 +2930,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 probe.close()
 
-            adapter = LoggingModelAdapter(model_log, ("must not dispatch",))
+            adapter = LoggingModelAdapter(model_log, ("crash-safe answer",))
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition.for_adapter(

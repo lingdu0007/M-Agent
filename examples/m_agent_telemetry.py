@@ -28,17 +28,16 @@ from m_agent import (
     InMemoryRunStore,
     JsonlTelemetrySink,
     ModelCapabilities,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
     Runner,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 OUTPUT_PATH = Path(__file__).with_name("telemetry-example.jsonl")
 

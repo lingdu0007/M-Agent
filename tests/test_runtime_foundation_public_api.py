@@ -13,6 +13,39 @@ from pathlib import Path
 
 
 class LayeredRuntimePublicApiTests(unittest.TestCase):
+    def test_root_facade_does_not_flatten_typed_model_contracts(self) -> None:
+        """Advanced Model Contracts remain available only from runtime."""
+        import m_agent
+        import m_agent.runtime
+
+        typed_contracts = (
+            "ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED",
+            "ModelBinding",
+            "ModelBindingSet",
+            "ModelCapabilityCombination",
+            "ModelContract",
+            "ModelContractViolationError",
+            "ModelExecutionBudget",
+            "ModelLimits",
+            "ModelPurpose",
+            "ModelRequirementMatch",
+            "ModelRequirementReason",
+            "ModelRequirements",
+            "ModelUsageGuarantees",
+            "RevisionStability",
+            "StreamingMode",
+            "StructuredOutputMode",
+            "ToolCallingMode",
+            "UsageFieldGuarantee",
+            "UsageProvenance",
+            "UsageReportingMode",
+        )
+
+        for name in typed_contracts:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(m_agent, name))
+                self.assertTrue(hasattr(m_agent.runtime, name))
+
     @staticmethod
     def _installed_manifest_identity() -> tuple[str, str, dict[str, str]]:
         from m_agent.testing import installed_identity

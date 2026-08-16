@@ -81,6 +81,28 @@ _EXPAND_ONLY_EXPORTS = {
     "serialize_model_response",
     "serialize_tool_outcome",
 }
+_ROOT_TYPED_MODEL_CONTRACT_EXPORTS = {
+    "ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED",
+    "ModelBinding",
+    "ModelBindingSet",
+    "ModelCapabilityCombination",
+    "ModelContract",
+    "ModelContractViolationError",
+    "ModelExecutionBudget",
+    "ModelLimits",
+    "ModelPurpose",
+    "ModelRequirementMatch",
+    "ModelRequirementReason",
+    "ModelRequirements",
+    "ModelUsageGuarantees",
+    "RevisionStability",
+    "StreamingMode",
+    "StructuredOutputMode",
+    "ToolCallingMode",
+    "UsageFieldGuarantee",
+    "UsageProvenance",
+    "UsageReportingMode",
+}
 
 
 _REOPEN_PROBE = '''
@@ -409,11 +431,15 @@ async def observe():
     else:
         unknown_definition_rejected = False
     root_exports = tuple(m_agent.__all__)
+    root_runtime_exports = set(runtime.__all__) - _ROOT_TYPED_MODEL_CONTRACT_EXPORTS
     root_expand_compatibility = (
         len(root_exports) == len(set(root_exports))
         and set(root_exports)
-        == set(runtime.__all__) | set(adapters.__all__) | _EXPAND_ONLY_EXPORTS
-        and all(getattr(m_agent, name, None) is getattr(runtime, name) for name in runtime.__all__)
+        == root_runtime_exports | set(adapters.__all__) | _EXPAND_ONLY_EXPORTS
+        and all(
+            getattr(m_agent, name, None) is getattr(runtime, name)
+            for name in root_runtime_exports
+        )
         and all(getattr(m_agent, name, None) is getattr(adapters, name) for name in adapters.__all__)
         and all(name in m_agent.__all__ and hasattr(m_agent, name) for name in _EXPAND_ONLY_EXPORTS)
     )

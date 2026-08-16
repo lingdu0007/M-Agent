@@ -43,7 +43,6 @@ from m_agent import (
     InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -59,13 +58,13 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
     allowed_resolutions,
     deserialize_tool_outcome,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 _TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 

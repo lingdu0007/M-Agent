@@ -47,18 +47,17 @@ from m_agent import (
     DeterministicTool,
     FakeClock,
     ModelCapabilities,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
     RetryPolicy,
     SQLiteRunStore,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 #: 本示例使用的定义标识与版本（不可变、版本化，ADR 0022）。
 DEFINITION_ID = "durable-support-agent"

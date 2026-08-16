@@ -21,12 +21,14 @@ from m_agent import (
     DeterministicContextProvider,
     InMemoryRunStore,
     ModelCapabilities,
-    ModelContract,
-    ModelLimits,
-    ModelRequirements,
     PlaintextPayloadCodec,
     Runner,
     RunStatus,
+)
+from m_agent.runtime import (
+    ModelContract,
+    ModelLimits,
+    ModelRequirements,
     RevisionStability,
     StreamingMode,
     StructuredOutputMode,

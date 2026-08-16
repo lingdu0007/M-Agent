@@ -38,13 +38,13 @@ from m_agent import (  # noqa: E402
     DefinitionRegistry,
     DeterministicContextProvider,
     DeterministicModelAdapter,
-    ModelExecutionBudget,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
     Runner,
     SQLiteRunStore,
 )
+from m_agent.runtime import ModelExecutionBudget
 
 _CRASH_EXIT_CODE = 17
 

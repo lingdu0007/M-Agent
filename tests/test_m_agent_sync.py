@@ -14,7 +14,6 @@ from m_agent import (
     FailureClassification,
     InMemoryRunStore,
     ModelCapabilities,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -23,12 +22,12 @@ from m_agent import (
     Runner,
     SyncRunner,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 
 class FailingModel(DeterministicModelAdapter):

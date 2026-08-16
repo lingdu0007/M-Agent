@@ -16,11 +16,8 @@ from m_agent import (
     IllegalRunTransitionError,
     InMemoryRunStore,
     ModelAdapter,
-    ModelCapabilityCombination,
     ModelCapabilities,
     ModelCapabilityError,
-    ModelPurpose,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -29,11 +26,16 @@ from m_agent import (
     RunStatus,
     StepStatus,
     StepType,
-    StructuredOutputMode,
-    StreamingMode,
-    ToolCallingMode,
     deserialize_model_response,
     is_terminal,
+)
+from m_agent.runtime import (
+    ModelCapabilityCombination,
+    ModelPurpose,
+    ModelRequirements,
+    StreamingMode,
+    StructuredOutputMode,
+    ToolCallingMode,
 )
 
 

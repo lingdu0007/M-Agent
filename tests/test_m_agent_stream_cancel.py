@@ -36,7 +36,6 @@ from m_agent import (
     InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
-    ModelRequirements,
     ModelDelta,
     ModelFailure,
     ModelRequest,
@@ -52,13 +51,13 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
     ToolRequest,
     deserialize_model_response,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 
 # -- fake 流式模型（确定性，可注入失败/阻塞） --------------------------

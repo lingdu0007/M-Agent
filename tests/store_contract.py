@@ -24,10 +24,6 @@ from m_agent import (
     FakeClock,
     IllegalRunTransitionError,
     LeaseNotHeldError,
-    ModelBinding,
-    ModelBindingSet,
-    ModelPurpose,
-    ModelRequirements,
     PayloadCodec,
     PlaintextPayloadCodec,
     RunNotFoundError,
@@ -39,6 +35,12 @@ from m_agent import (
     StepRecord,
     StepStatus,
     StepType,
+)
+from m_agent.runtime import (
+    ModelBinding,
+    ModelBindingSet,
+    ModelPurpose,
+    ModelRequirements,
 )
 
 

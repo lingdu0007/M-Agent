@@ -255,8 +255,35 @@ _EXPAND_ONLY_EXPORTS = (
     "serialize_model_response",
     "serialize_tool_outcome",
 )
-_EXPAND_ROOT_EXPORTS = frozenset(
-    _EXPAND_RUNTIME_EXPORTS + _EXPAND_ADAPTER_EXPORTS + _EXPAND_ONLY_EXPORTS
+_ROOT_TYPED_MODEL_CONTRACT_EXPORTS = frozenset(
+    {
+        "ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED",
+        "ModelBinding",
+        "ModelBindingSet",
+        "ModelCapabilityCombination",
+        "ModelContract",
+        "ModelContractViolationError",
+        "ModelExecutionBudget",
+        "ModelLimits",
+        "ModelPurpose",
+        "ModelRequirementMatch",
+        "ModelRequirementReason",
+        "ModelRequirements",
+        "ModelUsageGuarantees",
+        "RevisionStability",
+        "StreamingMode",
+        "StructuredOutputMode",
+        "ToolCallingMode",
+        "UsageFieldGuarantee",
+        "UsageProvenance",
+        "UsageReportingMode",
+    }
+)
+_ROOT_RUNTIME_EXPORTS = frozenset(_EXPAND_RUNTIME_EXPORTS).difference(
+    _ROOT_TYPED_MODEL_CONTRACT_EXPORTS
+)
+_ROOT_FACADE_EXPORTS = _ROOT_RUNTIME_EXPORTS | frozenset(
+    _EXPAND_ADAPTER_EXPORTS + _EXPAND_ONLY_EXPORTS
 )
 
 
@@ -285,7 +312,7 @@ def _expand_compatibility_observation() -> dict[str, bool | int]:
     root_exports = tuple(m_agent.__all__)
     runtime_bindings = all(
         getattr(m_agent, name, None) is getattr(runtime, name)
-        for name in _EXPAND_RUNTIME_EXPORTS
+        for name in _ROOT_RUNTIME_EXPORTS
     )
     adapter_bindings = all(
         getattr(m_agent, name, None) is getattr(adapters, name)
@@ -297,7 +324,7 @@ def _expand_compatibility_observation() -> dict[str, bool | int]:
     )
     complete_exports = (
         len(root_exports) == len(set(root_exports))
-        and set(root_exports) == _EXPAND_ROOT_EXPORTS
+        and set(root_exports) == _ROOT_FACADE_EXPORTS
     )
     return {
         "expand_binding_count": len(root_exports),

@@ -44,7 +44,6 @@ from m_agent import (  # noqa: E402
     DeterministicTool,
     FakeClock,
     ModelCapabilities,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -53,11 +52,11 @@ from m_agent import (  # noqa: E402
     Runner,
     SQLiteRunStore,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     allowed_resolutions,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 _CRASH_EXIT_CODE = 17
 _TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)

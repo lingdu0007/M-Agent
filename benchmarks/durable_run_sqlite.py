@@ -26,7 +26,6 @@ from m_agent import (
     DeterministicModelAdapter,
     DeterministicTool,
     ModelCapabilities,
-    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -40,11 +39,11 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 
 MEASURED_RUNS = 100

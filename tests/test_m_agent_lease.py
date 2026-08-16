@@ -49,11 +49,11 @@ from m_agent import (
     TelemetryEvent,
     TelemetryEventType,
     ToolCall,
-    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.runtime import ToolCallingMode
 
 _ANSWER = "deterministic answer"
 

@@ -673,6 +673,17 @@ def normalize_model_response(
         raise ModelContractViolationError(
             "Model Contract does not declare native tool calling"
         )
+    for call in response.tool_calls:
+        try:
+            arguments = json.loads(call.arguments)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ModelContractViolationError(
+                "tool call arguments are not valid JSON"
+            ) from exc
+        if not isinstance(arguments, dict):
+            raise ModelContractViolationError(
+                "tool call arguments must be a JSON object"
+            )
     usage = response.usage
     fields = (
         "input_tokens",
@@ -901,20 +912,31 @@ class DeterministicModelAdapter(ModelAdapter):
         """最近一次请求，供测试断言（如验证 create 之前无模型调用）。"""
         return self._last_request
 
-    @property
-    def model_contract(self) -> ModelContract:
-        if self._model_contract is not None:
-            return self._model_contract
-        capability_identity = hashlib.sha256(
+    def _configuration_fingerprint_payload(self) -> dict[str, Any]:
+        """Stable behavior identity, excluding mutable test observation state."""
+        return {
+            "capabilities": self.capabilities.model_dump(mode="json"),
+            "responses": self._responses,
+        }
+
+    def definition_contract_fingerprint(self) -> str:
+        payload = self._configuration_fingerprint_payload()
+        return hashlib.sha256(
             json.dumps(
-                self.capabilities.model_dump(mode="json"),
+                payload,
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
             ).encode()
-        ).hexdigest()[:16]
+        ).hexdigest()
+
+    @property
+    def model_contract(self) -> ModelContract:
+        if self._model_contract is not None:
+            return self._model_contract
+        configuration_fingerprint = self.definition_contract_fingerprint()
         return ModelContract(
-            contract_id=f"deterministic-{capability_identity}",
+            contract_id=f"deterministic-{configuration_fingerprint[:16]}",
             version="1",
             revision_stability=RevisionStability.PINNED,
             model_identity="deterministic",
@@ -925,6 +947,7 @@ class DeterministicModelAdapter(ModelAdapter):
             ),
             input_sizer_id="deterministic-v1",
             serialization_id="deterministic-text-v1",
+            configuration_fingerprint=configuration_fingerprint,
         )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -979,6 +1002,16 @@ class DeterministicStreamingModelAdapter(DeterministicModelAdapter):
         self._chunks: tuple[str, ...] = tuple(chunks)
         self._tool_calls: tuple[ToolCall, ...] = tuple(tool_calls)
         self.requests: list[ModelRequest] = []
+
+    def _configuration_fingerprint_payload(self) -> dict[str, Any]:
+        return {
+            "capabilities": self.capabilities.model_dump(mode="json"),
+            "chunks": getattr(self, "_chunks", ()),
+            "tool_calls": [
+                call.model_dump(mode="json")
+                for call in getattr(self, "_tool_calls", ())
+            ],
+        }
 
     async def stream(
         self, request: ModelRequest,
