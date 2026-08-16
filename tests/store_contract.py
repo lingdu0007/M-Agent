@@ -72,19 +72,32 @@ def created_record(run_id: str = "run-1") -> RunRecord:
 
 
 def snapshot() -> DefinitionSnapshot:
+    primary = ModelBinding(
+        purpose=ModelPurpose.PRIMARY,
+        contract=DeterministicModelAdapter().model_contract,
+        requirements=ModelRequirements(),
+    )
     return DefinitionSnapshot(
         definition_id="assistant",
         version="1.0",
         instructions="x",
         model_bindings=ModelBindingSet(
             bindings=(
-                ModelBinding(
-                    purpose=ModelPurpose.PRIMARY,
-                    contract=DeterministicModelAdapter().model_contract,
-                    requirements=ModelRequirements(),
+                primary,
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.CONTEXT_COMPRESSION,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
                 ),
-            )
-        ).resolved(),
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.OUTPUT_REPAIR,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+            ),
+        ),
     )
 
 

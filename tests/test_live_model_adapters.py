@@ -50,6 +50,7 @@ from m_agent import (
     InMemoryRunStore,
     JsonlTelemetrySink,
     ModelAdapter,
+    ModelCapabilityCombination,
     ModelCapabilities,
     ModelCapabilityError,
     ModelContract,
@@ -683,6 +684,13 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                                 tool_calling=ToolCallingMode.NATIVE,
                                 structured_output=StructuredOutputMode.NONE,
                                 usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+                                supported_combinations=(
+                                    ModelCapabilityCombination(
+                                        streaming=StreamingMode.DELTA,
+                                        tool_calling=ToolCallingMode.NATIVE,
+                                        usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+                                    ),
+                                ),
                             )
 
             registry = DefinitionRegistry()
@@ -1054,18 +1062,62 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         # AC：provider 返回 usage 时透传；缺失时显式为 None（不伪造）。
         from m_agent.provider import extract_usage
 
-        self.assertEqual(
-            extract_usage({"usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
-            ModelUsage(input_tokens=10, output_tokens=5),
+        chat_usage = extract_usage(
+            {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
         )
         self.assertEqual(
-            extract_usage({"usage": {"input_tokens": 7, "output_tokens": 3}}),
-            ModelUsage(input_tokens=7, output_tokens=3),
+            chat_usage,
+            ModelUsage(
+                input_tokens=10,
+                output_tokens=5,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:prompt_tokens->input_tokens,"
+                    "completion_tokens->output_tokens"
+                ),
+            ),
+        )
+        assert chat_usage is not None
+        self.assertEqual(chat_usage.raw_unit, "tokens")
+        self.assertEqual(
+            chat_usage.normalization_source,
+            "openai-compatible-usage-v1:prompt_tokens->input_tokens,"
+            "completion_tokens->output_tokens",
+        )
+        responses_usage = extract_usage(
+            {"usage": {"input_tokens": 7, "output_tokens": 3}}
+        )
+        self.assertEqual(
+            responses_usage,
+            ModelUsage(
+                input_tokens=7,
+                output_tokens=3,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                    "output_tokens->output_tokens"
+                ),
+            ),
+        )
+        assert responses_usage is not None
+        self.assertEqual(responses_usage.raw_unit, "tokens")
+        self.assertEqual(
+            responses_usage.normalization_source,
+            "openai-compatible-usage-v1:input_tokens->input_tokens,"
+            "output_tokens->output_tokens",
         )
         # 合法的 0 不是缺失；不得被 truthy/falsy 映射吞掉。
         self.assertEqual(
             extract_usage({"usage": {"prompt_tokens": 0, "completion_tokens": 0}}),
-            ModelUsage(input_tokens=0, output_tokens=0),
+            ModelUsage(
+                input_tokens=0,
+                output_tokens=0,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:prompt_tokens->input_tokens,"
+                    "completion_tokens->output_tokens"
+                ),
+            ),
         )
         self.assertEqual(
             extract_usage(
@@ -1078,7 +1130,15 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     }
                 }
             ),
-            ModelUsage(input_tokens=0, output_tokens=0),
+            ModelUsage(
+                input_tokens=0,
+                output_tokens=0,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                    "output_tokens->output_tokens"
+                ),
+            ),
         )
         # 缺失 usage：显式 None，绝不猜测。
         self.assertIsNone(extract_usage({}))
@@ -1170,17 +1230,40 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             (
                 "complete",
                 {"input_tokens": 7, "output_tokens": 3},
-                ModelUsage(input_tokens=7, output_tokens=3),
+                ModelUsage(
+                    input_tokens=7,
+                    output_tokens=3,
+                    raw_unit="tokens",
+                    normalization_source=(
+                        "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                        "output_tokens->output_tokens"
+                    ),
+                ),
             ),
             (
                 "partial",
                 {"input_tokens": 7},
-                ModelUsage(input_tokens=7, output_tokens=None),
+                ModelUsage(
+                    input_tokens=7,
+                    output_tokens=None,
+                    raw_unit="tokens",
+                    normalization_source=(
+                        "openai-compatible-usage-v1:input_tokens->input_tokens"
+                    ),
+                ),
             ),
             (
                 "all_zero",
                 {"input_tokens": 0, "output_tokens": 0},
-                ModelUsage(input_tokens=0, output_tokens=0),
+                ModelUsage(
+                    input_tokens=0,
+                    output_tokens=0,
+                    raw_unit="tokens",
+                    normalization_source=(
+                        "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                        "output_tokens->output_tokens"
+                    ),
+                ),
             ),
             (
                 "missing",

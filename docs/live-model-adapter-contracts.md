@@ -38,7 +38,17 @@ timeout、structured-output schema 与 Chat mode 在首次注册时形成不可�
 才有契约案例；未声明的能力（本版本两者均无）绝不做静默降级。Runner
 只在声明支持时调用对应路径（如 `streaming=DELTA` 才走 `stream()`），
 定义注册在**发出任何网络请求前**校验 required capabilities
-（`DefinitionRegistry.register` 抛 `ModelCapabilityError`）。
+（`DefinitionRegistry.register` 抛 `ModelCapabilityError`）。同时启用两个
+或以上 mode 的 Contract 必须在 `supported_combinations` 中逐项列出允许
+并发的组合；仅分别声明 mode 不表示它们可以一起 dispatch。注册和
+dispatch 都把未声明组合拒绝为零 provider request。
+
+Definition Snapshot 总是持久化完整的 `PRIMARY`、`CONTEXT_COMPRESSION` 与
+`OUTPUT_REPAIR` Model Binding Set。非 PRIMARY purpose 只有以
+`source_purpose=PRIMARY` 的显式引用才能复用 primary 的 Contract 和
+Requirements；缺少 purpose 不是隐式 reuse。Definition 顶层的 minimum
+requirements 会与 PRIMARY binding 的 requirements 取更严格的并集，显式
+binding 因此不能绕过 Agent 声明的能力或 Limits。
 
 ## 与确定性 fake 的区分（禁止混淆）
 
@@ -128,7 +138,9 @@ compatibility 已验证。
   Schema 的 JSON；
 - **usage reporting**：provider 返回 usage 时透传为 `ModelUsage`
   （Adapter 缺失时显式为 `None`；Runner 将每个缺失 optional 字段持久化为
-  `UNAVAILABLE`，绝不伪造）；
+  `UNAVAILABLE`，绝不伪造）。provider 映射还保留 `raw_unit` 与版本化
+  `normalization_source`（包括实际使用的 provider-field alias），使历史
+  用量可说明其标准化来源；
 - **凭证隔离**：离线 `MockTransport` 的成功与 provider-failure case 使用
   sentinel 检查 SQLite 原始 bytes、Snapshot、Attempt、Checkpoint、Run
   Update 与 Telemetry 均不含凭证；真实 live 测试只检查环境是否已配置，

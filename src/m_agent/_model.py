@@ -71,12 +71,35 @@ class UsageProvenance(str, enum.Enum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
+class ModelCapabilityCombination(BaseModel, frozen=True):
+    """One explicitly supported concurrent protocol-mode combination."""
+
+    streaming: StreamingMode = StreamingMode.NONE
+    tool_calling: ToolCallingMode = ToolCallingMode.NONE
+    structured_output: StructuredOutputMode = StructuredOutputMode.NONE
+    usage_reporting: UsageReportingMode = UsageReportingMode.NONE
+
+    def supports(self, required: "ModelCapabilities") -> bool:
+        """Whether this combination contains every requested non-NONE mode."""
+        return all(
+            getattr(required, field).value == "NONE"
+            or getattr(self, field) == getattr(required, field)
+            for field in (
+                "streaming",
+                "tool_calling",
+                "structured_output",
+                "usage_reporting",
+            )
+        )
+
+
 class ModelRequirementReason(str, enum.Enum):
     SATISFIED = "SATISFIED"
     STREAMING_UNSUPPORTED = "STREAMING_UNSUPPORTED"
     TOOL_CALLING_UNSUPPORTED = "TOOL_CALLING_UNSUPPORTED"
     STRUCTURED_OUTPUT_UNSUPPORTED = "STRUCTURED_OUTPUT_UNSUPPORTED"
     USAGE_REPORTING_UNSUPPORTED = "USAGE_REPORTING_UNSUPPORTED"
+    CAPABILITY_COMBINATION_UNSUPPORTED = "CAPABILITY_COMBINATION_UNSUPPORTED"
     CONTEXT_WINDOW_TOO_SMALL = "CONTEXT_WINDOW_TOO_SMALL"
     MAX_OUTPUT_TOO_SMALL = "MAX_OUTPUT_TOO_SMALL"
 
@@ -93,10 +116,71 @@ class ModelCapabilities(BaseModel, frozen=True):
     tool_calling: ToolCallingMode = ToolCallingMode.NONE
     structured_output: StructuredOutputMode = StructuredOutputMode.NONE
     usage_reporting: UsageReportingMode = UsageReportingMode.NONE
+    #: Concurrent protocol modes that this Contract expressly permits.  A
+    #: multi-mode Contract without this list is invalid rather than implying
+    #: that every Cartesian-product pairing is available.
+    supported_combinations: tuple[ModelCapabilityCombination, ...] = Field(
+        default_factory=tuple
+    )
+
+    @model_validator(mode="after")
+    def _validate_supported_combinations(self) -> "ModelCapabilities":
+        fields = (
+            "streaming",
+            "tool_calling",
+            "structured_output",
+            "usage_reporting",
+        )
+        active = [field for field in fields if getattr(self, field).value != "NONE"]
+        if len(active) > 1 and not self.supported_combinations:
+            raise ValueError(
+                "multiple capability modes require supported_combinations"
+            )
+        seen: set[tuple[str, str, str, str]] = set()
+        for combination in self.supported_combinations:
+            key = tuple(getattr(combination, field).value for field in fields)
+            if key in seen:
+                raise ValueError("supported_combinations must be unique")
+            seen.add(key)
+            for field in fields:
+                mode = getattr(combination, field)
+                available = getattr(self, field)
+                if mode.value != "NONE" and mode != available:
+                    raise ValueError(
+                        "supported combination declares a mode absent from "
+                        f"capabilities: {field}={mode.value}"
+                    )
+        for field in active:
+            if self.supported_combinations and not any(
+                getattr(combination, field) == getattr(self, field)
+                for combination in self.supported_combinations
+            ):
+                raise ValueError(
+                    "supported_combinations must declare every enabled mode: "
+                    f"{field}"
+                )
+        return self
+
+    def _supports_combination(self, required: "ModelCapabilities") -> bool:
+        requested = sum(
+            getattr(required, field).value != "NONE"
+            for field in (
+                "streaming",
+                "tool_calling",
+                "structured_output",
+                "usage_reporting",
+            )
+        )
+        if requested <= 1:
+            return True
+        return any(
+            combination.supports(required)
+            for combination in self.supported_combinations
+        )
 
     def supports(self, required: "ModelCapabilities") -> bool:
         """Return whether every requested non-NONE mode is available."""
-        return all(
+        modes_match = all(
             getattr(required, field).value == "NONE"
             or getattr(self, field) == getattr(required, field)
             for field in (
@@ -105,6 +189,31 @@ class ModelCapabilities(BaseModel, frozen=True):
                 "structured_output",
                 "usage_reporting",
             )
+        )
+        return modes_match and self._supports_combination(required)
+
+    def merged_requirements(self, other: "ModelCapabilities") -> "ModelCapabilities":
+        """Combine two minimum-capability declarations without weakening either."""
+        values: dict[str, _CapabilityMode] = {}
+        fields = (
+            "streaming",
+            "tool_calling",
+            "structured_output",
+            "usage_reporting",
+        )
+        for field in fields:
+            left = getattr(self, field)
+            right = getattr(other, field)
+            if left.value != "NONE" and right.value != "NONE" and left != right:
+                raise ValueError(f"conflicting requirements for {field}")
+            values[field] = left if left.value != "NONE" else right
+        active = sum(value.value != "NONE" for value in values.values())
+        combinations = (
+            (ModelCapabilityCombination(**values),) if active > 1 else ()
+        )
+        return ModelCapabilities(
+            **values,
+            supported_combinations=combinations,
         )
 
 
@@ -175,6 +284,26 @@ class ModelRequirements(BaseModel, frozen=True):
     min_context_window_tokens: int = Field(default=1, ge=1)
     min_output_tokens: int = Field(default=1, ge=1)
 
+    @model_validator(mode="after")
+    def _validate_capability_combination(self) -> "ModelRequirements":
+        if not self.capabilities.supports(self.capabilities):
+            raise ValueError(
+                "multi-mode requirements must declare one supported combination"
+            )
+        return self
+
+    def merged_with(self, other: "ModelRequirements") -> "ModelRequirements":
+        """Return the stricter requirements required by both declarations."""
+        return ModelRequirements(
+            capabilities=self.capabilities.merged_requirements(other.capabilities),
+            min_context_window_tokens=max(
+                self.min_context_window_tokens, other.min_context_window_tokens
+            ),
+            min_output_tokens=max(
+                self.min_output_tokens, other.min_output_tokens
+            ),
+        )
+
     def match(self, contract: ModelContract) -> ModelRequirementMatch:
         required = self.capabilities
         available = contract.capabilities
@@ -195,6 +324,11 @@ class ModelRequirements(BaseModel, frozen=True):
                 and getattr(required, field) != getattr(available, field)
             ):
                 return ModelRequirementMatch(compatible=False, reason=reason)
+        if not available.supports(required):
+            return ModelRequirementMatch(
+                compatible=False,
+                reason=ModelRequirementReason.CAPABILITY_COMBINATION_UNSUPPORTED,
+            )
         if contract.limits.context_window_tokens < self.min_context_window_tokens:
             return ModelRequirementMatch(
                 compatible=False,
@@ -218,6 +352,17 @@ class ModelBinding(BaseModel, frozen=True):
     requirements: ModelRequirements = Field(default_factory=ModelRequirements)
     source_purpose: ModelPurpose | None = None
 
+    @model_validator(mode="after")
+    def _validate_source_purpose(self) -> "ModelBinding":
+        if self.purpose is ModelPurpose.PRIMARY and self.source_purpose is not None:
+            raise ValueError("PRIMARY binding cannot reuse another purpose")
+        if (
+            self.source_purpose is not None
+            and self.source_purpose is not ModelPurpose.PRIMARY
+        ):
+            raise ValueError("only explicit PRIMARY reuse is supported")
+        return self
+
 
 class ModelBindingSet(BaseModel, frozen=True):
     """Frozen purpose-to-Contract selection with explicit primary reuse."""
@@ -225,34 +370,36 @@ class ModelBindingSet(BaseModel, frozen=True):
     bindings: tuple[ModelBinding, ...]
 
     @model_validator(mode="after")
-    def _has_one_primary(self) -> "ModelBindingSet":
+    def _validate_complete_bindings(self) -> "ModelBindingSet":
         purposes = [binding.purpose for binding in self.bindings]
-        if purposes.count(ModelPurpose.PRIMARY) != 1 or len(set(purposes)) != len(
-            purposes
-        ):
-            raise ValueError("model bindings must contain one unique PRIMARY binding")
+        if set(purposes) != set(ModelPurpose) or len(purposes) != len(set(purposes)):
+            raise ValueError(
+                "model bindings must contain every ModelPurpose exactly once"
+            )
+        primary = next(
+            binding
+            for binding in self.bindings
+            if binding.purpose is ModelPurpose.PRIMARY
+        )
+        for binding in self.bindings:
+            if binding.source_purpose is ModelPurpose.PRIMARY and (
+                binding.contract != primary.contract
+                or binding.requirements != primary.requirements
+            ):
+                raise ValueError(
+                    "PRIMARY reuse must preserve its Contract and Requirements"
+                )
         return self
 
     def for_purpose(self, purpose: ModelPurpose) -> ModelBinding:
         for binding in self.bindings:
             if binding.purpose is purpose:
                 return binding
-        primary = next(
-            binding
-            for binding in self.bindings
-            if binding.purpose is ModelPurpose.PRIMARY
-        )
-        return primary.model_copy(
-            update={"purpose": purpose, "source_purpose": ModelPurpose.PRIMARY}
-        )
+        raise ValueError(f"no Model Binding for purpose {purpose.value}")
 
     def resolved(self) -> "ModelBindingSet":
-        return ModelBindingSet(
-            bindings=tuple(
-                self.for_purpose(purpose)
-                for purpose in ModelPurpose
-            )
-        )
+        """Return the already-complete, explicitly selected binding set."""
+        return self
 
 
 class ModelExecutionBudget(BaseModel, frozen=True):
@@ -282,6 +429,11 @@ class ModelUsage(BaseModel, frozen=True):
     output_tokens_provenance: UsageProvenance | None = None
     cached_input_tokens_provenance: UsageProvenance | None = None
     reasoning_tokens_provenance: UsageProvenance | None = None
+    #: Unit as reported by the source system, e.g. ``tokens``.  Missing usage
+    #: remains missing; Core never invents a unit.
+    raw_unit: str | None = None
+    #: Stable mapping/version that converted provider fields into this schema.
+    normalization_source: str | None = None
     #: Compatibility summary only; field-level provenance is authoritative.
     provenance: UsageProvenance = UsageProvenance.PROVIDER_REPORTED
 
@@ -397,15 +549,35 @@ def normalize_model_response(
 
 
 def assert_model_request_compatible(
-    contract: ModelContract, request: ModelRequest
+    contract: ModelContract,
+    request: ModelRequest,
+    *,
+    streaming: bool = False,
 ) -> None:
     """Reject an undeclared request protocol combination before dispatch."""
-    if (
-        (request.tools or request.tool_outcomes)
-        and contract.capabilities.tool_calling is ToolCallingMode.NONE
-    ):
+    streaming_mode = StreamingMode.DELTA if streaming else StreamingMode.NONE
+    tool_mode = (
+        ToolCallingMode.NATIVE
+        if request.tools or request.tool_outcomes
+        else ToolCallingMode.NONE
+    )
+    required = ModelCapabilities(
+        streaming=streaming_mode,
+        tool_calling=tool_mode,
+        supported_combinations=(
+            (
+                ModelCapabilityCombination(
+                    streaming=streaming_mode,
+                    tool_calling=tool_mode,
+                ),
+            )
+            if streaming and tool_mode is ToolCallingMode.NATIVE
+            else ()
+        ),
+    )
+    if not contract.capabilities.supports(required):
         raise ModelContractViolationError(
-            "Model Contract does not declare native tool calling"
+            "Model Contract does not declare the requested capability combination"
         )
 
 
@@ -568,6 +740,14 @@ class DeterministicStreamingModelAdapter(DeterministicModelAdapter):
                 tool_calling=ToolCallingMode.NATIVE,
                 structured_output=caps.structured_output,
                 usage_reporting=caps.usage_reporting,
+                supported_combinations=(
+                    ModelCapabilityCombination(
+                        streaming=StreamingMode.DELTA,
+                        tool_calling=ToolCallingMode.NATIVE,
+                        structured_output=caps.structured_output,
+                        usage_reporting=caps.usage_reporting,
+                    ),
+                ),
             )
         super().__init__(responses=("",), capabilities=caps)
         self._chunks: tuple[str, ...] = tuple(chunks)

@@ -93,6 +93,99 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    def test_binding_reuse_and_capability_combinations_are_explicit(self) -> None:
+        """Binding reuse and multi-mode protocols need durable declarations."""
+        from pydantic import ValidationError
+
+        from m_agent.runtime import (
+            ModelBinding,
+            ModelBindingSet,
+            ModelCapabilities,
+            ModelCapabilityCombination,
+            ModelContract,
+            ModelLimits,
+            ModelPurpose,
+            ModelRequirementReason,
+            ModelRequirements,
+            RevisionStability,
+            StreamingMode,
+            ToolCallingMode,
+        )
+
+        with self.assertRaises(ValidationError):
+            ModelCapabilities(
+                streaming=StreamingMode.DELTA,
+                tool_calling=ToolCallingMode.NATIVE,
+            )
+        capabilities = ModelCapabilities(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            supported_combinations=(
+                ModelCapabilityCombination(
+                    streaming=StreamingMode.DELTA,
+                    tool_calling=ToolCallingMode.NATIVE,
+                ),
+            ),
+        )
+        contract = ModelContract(
+            contract_id="explicit-reuse",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:explicit-reuse",
+            capabilities=capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+            fingerprint="explicit-reuse-v1",
+        )
+        primary = ModelBinding(
+            purpose=ModelPurpose.PRIMARY,
+            contract=contract,
+        )
+        with self.assertRaises(ValidationError):
+            ModelBindingSet(bindings=(primary,))
+        bindings = ModelBindingSet(
+            bindings=(
+                primary,
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.CONTEXT_COMPRESSION,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.OUTPUT_REPAIR,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+            )
+        )
+        self.assertEqual(bindings.resolved(), bindings)
+        self.assertIs(
+            bindings.for_purpose(ModelPurpose.OUTPUT_REPAIR).source_purpose,
+            ModelPurpose.PRIMARY,
+        )
+        split_capabilities = ModelCapabilities(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            supported_combinations=(
+                ModelCapabilityCombination(streaming=StreamingMode.DELTA),
+                ModelCapabilityCombination(tool_calling=ToolCallingMode.NATIVE),
+            ),
+        )
+        split_contract = contract.model_copy(
+            update={"capabilities": split_capabilities}
+        )
+        with self.assertRaises(ValidationError):
+            ModelRequirements(capabilities=split_capabilities)
+        match = ModelRequirements(capabilities=capabilities).match(split_contract)
+        self.assertFalse(match.compatible)
+        self.assertIs(
+            match.reason,
+            ModelRequirementReason.CAPABILITY_COMBINATION_UNSUPPORTED,
+        )
+
     async def test_create_run_freezes_explicit_primary_binding(self) -> None:
         """A CREATED Run preserves the caller's checked primary binding."""
         from m_agent.adapters import (
@@ -145,6 +238,24 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                                 min_context_window_tokens=64,
                                 min_output_tokens=16,
                             ),
+                        ),
+                        ModelBinding(
+                            purpose=ModelPurpose.CONTEXT_COMPRESSION,
+                            contract=contract,
+                            requirements=ModelRequirements(
+                                min_context_window_tokens=64,
+                                min_output_tokens=16,
+                            ),
+                            source_purpose=ModelPurpose.PRIMARY,
+                        ),
+                        ModelBinding(
+                            purpose=ModelPurpose.OUTPUT_REPAIR,
+                            contract=contract,
+                            requirements=ModelRequirements(
+                                min_context_window_tokens=64,
+                                min_output_tokens=16,
+                            ),
+                            source_purpose=ModelPurpose.PRIMARY,
                         ),
                     )
                 ),
@@ -205,6 +316,136 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         self.assertEqual(adapter.call_count, 0)
+
+    async def test_explicit_binding_still_enforces_definition_requirements(
+        self,
+    ) -> None:
+        """An explicit PRIMARY binding cannot discard Definition minima."""
+        from m_agent.adapters import DeterministicModelAdapter
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelBinding,
+            ModelBindingSet,
+            ModelCapabilities,
+            ModelCapabilityError,
+            ModelPurpose,
+            ModelRequirements,
+            ToolCallingMode,
+        )
+
+        adapter = DeterministicModelAdapter(("unreachable",))
+        primary = ModelBinding(
+            purpose=ModelPurpose.PRIMARY,
+            contract=adapter.model_contract,
+        )
+        with self.assertRaisesRegex(ModelCapabilityError, "TOOL_CALLING_UNSUPPORTED"):
+            DefinitionRegistry().register(
+                AgentDefinition(
+                    definition_id="explicit-binding-requirements",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            tool_calling=ToolCallingMode.NATIVE
+                        )
+                    ),
+                    model_bindings=ModelBindingSet(
+                        bindings=(
+                            primary,
+                            primary.model_copy(
+                                update={
+                                    "purpose": ModelPurpose.CONTEXT_COMPRESSION,
+                                    "source_purpose": ModelPurpose.PRIMARY,
+                                }
+                            ),
+                            primary.model_copy(
+                                update={
+                                    "purpose": ModelPurpose.OUTPUT_REPAIR,
+                                    "source_purpose": ModelPurpose.PRIMARY,
+                                }
+                            ),
+                        )
+                    ),
+                    model_adapter=adapter,
+                )
+            )
+        self.assertEqual(adapter.call_count, 0)
+
+    async def test_unsupported_stream_tool_combination_fails_before_dispatch(
+        self,
+    ) -> None:
+        """Declared modes do not imply their undeclared combined protocol."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelCapabilityCombination,
+            ModelContract,
+            ModelLimits,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StreamingMode,
+            ToolCallingMode,
+            ToolEffect,
+            ToolOutcome,
+        )
+
+        capabilities = ModelCapabilities(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            supported_combinations=(
+                ModelCapabilityCombination(streaming=StreamingMode.DELTA),
+                ModelCapabilityCombination(tool_calling=ToolCallingMode.NATIVE),
+            ),
+        )
+        contract = ModelContract(
+            contract_id="split-protocols",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:split-protocols",
+            capabilities=capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+            fingerprint="split-protocols-v1",
+        )
+        adapter = DeterministicModelAdapter(("unreachable",), model_contract=contract)
+        tool = DeterministicTool(
+            name="lookup",
+            effect=ToolEffect.READ_ONLY,
+            handler=lambda request: ToolOutcome.success(
+                request.call_id, request.tool_name, "found"
+            ),
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition(
+                definition_id="split-protocols",
+                version="1",
+                instructions="Never dispatch an undeclared combination.",
+                model_adapter=adapter,
+                tools=(tool,),
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+        created = await runner.create_run("split-protocols", "1", "lookup")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 0)
+
 
     async def test_start_rejects_contract_drift_after_run_creation(self) -> None:
         from m_agent.adapters import (

@@ -297,15 +297,29 @@ def extract_usage(data: dict[str, Any]) -> ModelUsage | None:
     usage = data.get("usage")
     if not isinstance(usage, dict):
         return None
-    input_tokens = usage.get("input_tokens")
-    if input_tokens is None:
-        input_tokens = usage.get("prompt_tokens")
-    output_tokens = usage.get("output_tokens")
-    if output_tokens is None:
-        output_tokens = usage.get("completion_tokens")
+    input_key = (
+        "input_tokens" if usage.get("input_tokens") is not None else "prompt_tokens"
+    )
+    output_key = (
+        "output_tokens"
+        if usage.get("output_tokens") is not None
+        else "completion_tokens"
+    )
+    input_tokens = usage.get(input_key)
+    output_tokens = usage.get(output_key)
     if input_tokens is None and output_tokens is None:
         return None
-    return ModelUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+    mappings = []
+    if input_tokens is not None:
+        mappings.append(f"{input_key}->input_tokens")
+    if output_tokens is not None:
+        mappings.append(f"{output_key}->output_tokens")
+    return ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        raw_unit="tokens",
+        normalization_source="openai-compatible-usage-v1:" + ",".join(mappings),
+    )
 
 
 def parse_chat_tool_calls(message: dict[str, Any]) -> tuple[ToolCall, ...]:

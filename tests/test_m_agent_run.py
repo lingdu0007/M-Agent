@@ -16,6 +16,7 @@ from m_agent import (
     IllegalRunTransitionError,
     InMemoryRunStore,
     ModelAdapter,
+    ModelCapabilityCombination,
     ModelCapabilities,
     ModelCapabilityError,
     ModelPurpose,
@@ -171,6 +172,12 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
                 capabilities=ModelCapabilities(
                     streaming=StreamingMode.DELTA,
                     tool_calling=ToolCallingMode.NATIVE,
+                    supported_combinations=(
+                        ModelCapabilityCombination(
+                            streaming=StreamingMode.DELTA,
+                            tool_calling=ToolCallingMode.NATIVE,
+                        ),
+                    ),
                 )
             ),
             model_adapter=adapter,
@@ -188,6 +195,13 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
                 streaming=StreamingMode.DELTA,
                 tool_calling=ToolCallingMode.NATIVE,
                 structured_output=StructuredOutputMode.NATIVE,
+                supported_combinations=(
+                    ModelCapabilityCombination(
+                        streaming=StreamingMode.DELTA,
+                        tool_calling=ToolCallingMode.NATIVE,
+                        structured_output=StructuredOutputMode.NATIVE,
+                    ),
+                ),
             ),
         )
         definition = AgentDefinition(
@@ -198,6 +212,12 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
                 capabilities=ModelCapabilities(
                     streaming=StreamingMode.DELTA,
                     tool_calling=ToolCallingMode.NATIVE,
+                    supported_combinations=(
+                        ModelCapabilityCombination(
+                            streaming=StreamingMode.DELTA,
+                            tool_calling=ToolCallingMode.NATIVE,
+                        ),
+                    ),
                 )
             ),
             model_adapter=adapter,

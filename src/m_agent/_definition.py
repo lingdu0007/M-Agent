@@ -59,8 +59,8 @@ class DefinitionSnapshot(BaseModel, frozen=True):
     definition_id: str
     version: str
     instructions: str
-    #: 完整、已解析的用途绑定；省略用途在快照中显式 materialize 为
-    #: PRIMARY 复用，恢复无需重新选择模型。
+    #: 完整、已解析的用途绑定；PRIMARY reuse 也以明确的 source_purpose
+    #: 持久化，恢复无需重新选择模型。
     model_bindings: ModelBindingSet
     #: Run 级与用途级模型 dispatch 尝试硬上限。
     model_execution_budget: ModelExecutionBudget = Field(
@@ -119,22 +119,55 @@ class AgentDefinition(BaseModel, frozen=True):
         requirements = self.effective_model_requirements()
         contract = self.model_adapter.model_contract
         if self.model_bindings is None:
+            primary = ModelBinding(
+                purpose=ModelPurpose.PRIMARY,
+                contract=contract,
+                requirements=requirements,
+            )
             return ModelBindingSet(
                 bindings=(
-                    ModelBinding(
-                        purpose=ModelPurpose.PRIMARY,
-                        contract=contract,
-                        requirements=requirements,
+                    primary,
+                    primary.model_copy(
+                        update={
+                            "purpose": ModelPurpose.CONTEXT_COMPRESSION,
+                            "source_purpose": ModelPurpose.PRIMARY,
+                        }
+                    ),
+                    primary.model_copy(
+                        update={
+                            "purpose": ModelPurpose.OUTPUT_REPAIR,
+                            "source_purpose": ModelPurpose.PRIMARY,
+                        }
                     ),
                 )
-            ).resolved()
-        primary = self.model_bindings.for_purpose(ModelPurpose.PRIMARY)
+            )
+        bindings = self.model_bindings.resolved()
+        primary = bindings.for_purpose(ModelPurpose.PRIMARY)
         if primary.contract != contract:
             raise ModelCapabilityError(
                 "PRIMARY Model Binding contract does not match the adapter "
                 "instance contract"
             )
-        return self.model_bindings.resolved()
+        effective_primary = primary.model_copy(
+            update={
+                "requirements": primary.requirements.merged_with(requirements)
+            }
+        )
+        return ModelBindingSet(
+            bindings=tuple(
+                effective_primary
+                if binding.purpose is ModelPurpose.PRIMARY
+                else effective_primary.model_copy(
+                    update={
+                        "purpose": binding.purpose,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                )
+                if binding.source_purpose is ModelPurpose.PRIMARY
+                else binding
+                for binding in bindings.bindings
+            )
+        )
 
     def frozen_snapshot(self) -> DefinitionSnapshot:
         """冻结当前版本为 Run 使用的不可变 Definition Snapshot。"""

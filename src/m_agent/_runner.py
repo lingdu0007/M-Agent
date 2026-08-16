@@ -1795,7 +1795,9 @@ class Runner:
                 tool_outcomes=tuple(tool_outcomes),
             )
             try:
-                assert_model_request_compatible(model_contract, request)
+                assert_model_request_compatible(
+                    model_contract, request, streaming=streaming
+                )
             except ModelContractViolationError as exc:
                 await self._record_failed_step(
                     run, lease, step_id, StepType.MODEL
@@ -1833,7 +1835,9 @@ class Runner:
                 self._assert_adapter_contract_matches_snapshot(
                     run, definition
                 )
-                assert_model_request_compatible(model_contract, request)
+                assert_model_request_compatible(
+                    model_contract, request, streaming=streaming
+                )
                 reserved = await self._reserve_model_attempt(
                     run, lease, step_id, attempt_id, purpose
                 )

@@ -39,6 +39,7 @@ from ._base import (
     transport_error,
 )
 from m_agent._model import (
+    ModelCapabilityCombination,
     ModelCapabilities,
     ModelContract,
     ModelDelta,
@@ -58,6 +59,14 @@ CHAT_COMPLETIONS_CAPABILITIES = ModelCapabilities(
     tool_calling=ToolCallingMode.NATIVE,
     structured_output=StructuredOutputMode.NATIVE,
     usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+    supported_combinations=(
+        ModelCapabilityCombination(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            structured_output=StructuredOutputMode.NATIVE,
+            usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+        ),
+    ),
 )
 
 
