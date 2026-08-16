@@ -1804,6 +1804,8 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             return terminal, inspection, calls
 
         cases = (
+            (ChatCompletionsModelAdapter, {}),
+            (ResponsesModelAdapter, {}),
             (
                 ChatCompletionsModelAdapter,
                 {"choices": [{"message": {"tool_calls": {"bad": True}}}]},
@@ -1811,6 +1813,27 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             (
                 ResponsesModelAdapter,
                 {"output": ["malformed output item"]},
+            ),
+            (
+                ChatCompletionsModelAdapter,
+                {
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": -1},
+                },
+            ),
+            (
+                ResponsesModelAdapter,
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "ok"}
+                            ],
+                        }
+                    ],
+                    "usage": {"input_tokens": True},
+                },
             ),
         )
         with credential_environment():

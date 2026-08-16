@@ -283,4 +283,7 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
 
 
 def _missing_field(url: str, field: str):
-    return invalid_response(url, f"missing field {field!r}")
+    del url, field
+    return ModelContractViolationError(
+        "provider response is missing required protocol structure"
+    )

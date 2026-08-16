@@ -19,7 +19,14 @@ import hashlib
 import json
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from ._context import ContextItem
 from ._errors import ModelCapabilityError, ModelContractViolationError
@@ -386,8 +393,31 @@ class ModelRequirements(_FrozenModelValue):
             ),
         )
 
+    def effective_for(self, contract: ModelContract) -> "ModelRequirements":
+        """Include response guarantees that require a provider protocol mode."""
+        if any(
+            getattr(contract.usage_guarantees, field)
+            is UsageFieldGuarantee.REQUIRED
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "reasoning_tokens",
+            )
+        ):
+            return self.merged_with(
+                ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        usage_reporting=UsageReportingMode.PROVIDER_REPORTED
+                    )
+                )
+            )
+        return self
+
     def match(self, contract: ModelContract) -> ModelRequirementMatch:
-        required = self.capabilities
+        # Required usage is a provider protocol guarantee, not merely a
+        # post-dispatch response check.
+        required = self.effective_for(contract).capabilities
         available = contract.capabilities
         for field, reason in (
             ("streaming", ModelRequirementReason.STREAMING_UNSUPPORTED),
@@ -434,6 +464,9 @@ class ModelBinding(_FrozenModelValue):
     purpose: ModelPurpose
     contract: ModelContract
     requirements: ModelRequirements = Field(default_factory=ModelRequirements)
+    #: Non-secret executable adapter identity frozen beside, not inside, an
+    #: explicitly declared Contract. This also binds deterministic behavior.
+    adapter_configuration_fingerprint: str | None = None
     source_purpose: ModelPurpose | None = None
 
     @model_validator(mode="after")
@@ -550,6 +583,21 @@ class ModelUsage(_FrozenModelValue):
     normalization_source: str | None = None
     #: Compatibility summary only; field-level provenance is authoritative.
     provenance: UsageProvenance = UsageProvenance.PROVIDER_REPORTED
+
+    @field_validator(
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens",
+        mode="before",
+    )
+    @classmethod
+    def _validate_token_count(cls, value: object) -> object:
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("usage token counts must be non-negative integers")
+        return value
 
     @model_validator(mode="after")
     def _normalize_field_provenance(self) -> "ModelUsage":
@@ -673,7 +721,15 @@ def normalize_model_response(
         raise ModelContractViolationError(
             "Model Contract does not declare native tool calling"
         )
+    seen_call_ids: set[str] = set()
     for call in response.tool_calls:
+        if not call.call_id.strip():
+            raise ModelContractViolationError("tool call id must be non-empty")
+        if call.call_id in seen_call_ids:
+            raise ModelContractViolationError("tool call ids must be unique")
+        seen_call_ids.add(call.call_id)
+        if not call.tool_name.strip():
+            raise ModelContractViolationError("tool call name must be non-empty")
         try:
             arguments = json.loads(call.arguments)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -775,6 +831,14 @@ def normalize_model_response(
         value = getattr(usage, field)
         if guarantee is UsageFieldGuarantee.REQUIRED and value is None:
             raise ModelContractViolationError(f"required usage field missing: {field}")
+        if (
+            guarantee is UsageFieldGuarantee.REQUIRED
+            and getattr(usage, f"{field}_provenance")
+            is not UsageProvenance.PROVIDER_REPORTED
+        ):
+            raise ModelContractViolationError(
+                f"required usage field is not provider-reported: {field}"
+            )
         if guarantee is UsageFieldGuarantee.UNSUPPORTED and value is not None:
             raise ModelContractViolationError(
                 f"unsupported usage field reported: {field}"

@@ -371,6 +371,9 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ModelUsage(
                 input_tokens_provenance=UsageProvenance.PROVIDER_REPORTED,
             )
+        for value in (-1, True, 1.0, "1"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                ModelUsage(input_tokens=value)
 
     def test_typed_model_contract_values_reject_unknown_fields(self) -> None:
         """Future modes and typos cannot silently weaken a frozen binding."""
@@ -1219,6 +1222,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             DefinitionRegistry,
             ModelCapabilities,
             ModelCapabilityCombination,
+            ModelCapabilityError,
             ModelContract,
             ModelLimits,
             ModelRequirements,
@@ -1274,33 +1278,114 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         adapter = UsageStream(("unused",), model_contract=contract)
         registry = DefinitionRegistry()
-        registry.register(
-            AgentDefinition.for_adapter(
-                definition_id="stream-usage-split",
-                version="1",
-                instructions="Stream without requesting provider usage.",
-                model_requirements=ModelRequirements(
-                    capabilities=ModelCapabilities(streaming=StreamingMode.DELTA)
-                ),
-                model_adapter=adapter,
+        with self.assertRaisesRegex(
+            ModelCapabilityError, "CAPABILITY_COMBINATION_UNSUPPORTED"
+        ):
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="stream-usage-split",
+                    version="1",
+                    instructions="Stream without requesting provider usage.",
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            streaming=StreamingMode.DELTA
+                        )
+                    ),
+                    model_adapter=adapter,
+                )
             )
+        self.assertFalse(registry.is_registered("stream-usage-split", "1"))
+        self.assertEqual(adapter.call_count, 0)
+
+    async def test_tool_call_identity_is_rejected_before_tool_effects(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
         )
-        runner = Runner(
-            registry=registry,
-            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelResponse,
+            Runner,
+            RunStatus,
+            ToolCall,
+            ToolCallingMode,
+            ToolEffect,
+            ToolOutcome,
         )
 
-        created = await runner.create_run("stream-usage-split", "1", "hello")
-        terminal = await runner.start_run(created.run_id)
+        class InvalidToolCalls(DeterministicModelAdapter):
+            def __init__(self, calls: tuple[ToolCall, ...]) -> None:
+                super().__init__(
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    )
+                )
+                self._calls = calls
 
-        self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
-        self.assertEqual(adapter.call_count, 1)
-        assert adapter.last_request is not None
-        self.assertIs(
-            adapter.last_request.usage_reporting,
-            UsageReportingMode.NONE,
-        )
+            async def generate(self, request):
+                self.call_count += 1
+                self._last_request = request
+                return ModelResponse(tool_calls=self._calls)
+
+        for label, calls in (
+            (
+                "duplicate",
+                (
+                    ToolCall(call_id="same", tool_name="lookup", arguments="{}"),
+                    ToolCall(call_id="same", tool_name="lookup", arguments="{}"),
+                ),
+            ),
+            (
+                "empty",
+                (ToolCall(call_id="", tool_name="lookup", arguments="{}"),),
+            ),
+        ):
+            with self.subTest(label=label):
+                effects = 0
+
+                def handler(request):
+                    nonlocal effects
+                    effects += 1
+                    return ToolOutcome.success(
+                        request.call_id, request.tool_name, "unused"
+                    )
+
+                adapter = InvalidToolCalls(calls)
+                registry = DefinitionRegistry()
+                registry.register(
+                    AgentDefinition.for_adapter(
+                        definition_id=f"invalid-tool-call-{label}",
+                        version="1",
+                        instructions="Never invoke malformed tool calls.",
+                        model_adapter=adapter,
+                        tools=(
+                            DeterministicTool(
+                                name="lookup",
+                                effect=ToolEffect.IDEMPOTENT,
+                                handler=handler,
+                            ),
+                        ),
+                    )
+                )
+                runner = Runner(
+                    registry=registry,
+                    store=InMemoryRunStore(
+                        payload_codec=PlaintextPayloadCodec()
+                    ),
+                )
+                created = await runner.create_run(
+                    f"invalid-tool-call-{label}", "1", "hello"
+                )
+                terminal = await runner.start_run(created.run_id)
+
+                self.assertIs(terminal.status, RunStatus.FAILED)
+                self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+                self.assertEqual(adapter.call_count, 1)
+                self.assertEqual(effects, 0)
 
     async def test_unsupported_tool_definition_has_capability_error_code(
         self,
@@ -1541,6 +1626,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             Runner,
             RunStatus,
             UsageFieldGuarantee,
+            UsageProvenance,
             UsageReportingMode,
         )
 
@@ -1565,7 +1651,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 response = await super().generate(request)
                 return ModelResponse(
                     content=response.content,
-                    usage=ModelUsage(input_tokens=7),
+                    usage=ModelUsage(
+                        input_tokens=7,
+                        provenance=UsageProvenance.RUNTIME_SIZED,
+                    ),
                 )
 
         adapter = UnprovenancedUsageAdapter(
@@ -2063,6 +2152,181 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(original.call_count, 0)
         self.assertEqual(changed.call_count, 0)
+
+    async def test_explicit_deterministic_contract_binds_behavior_configuration(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelContract,
+            ModelLimits,
+            RevisionStability,
+            Runner,
+        )
+
+        explicit_contract = ModelContract(
+            contract_id="explicit-deterministic",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:explicit",
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+        original = DeterministicModelAdapter(
+            ("old",), model_contract=explicit_contract
+        )
+        initial_registry = DefinitionRegistry()
+        initial_registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="explicit-deterministic-drift",
+                version="1",
+                instructions="Reply.",
+                model_adapter=original,
+            )
+        )
+        store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        created = await Runner(initial_registry, store).create_run(
+            "explicit-deterministic-drift", "1", "hi"
+        )
+
+        changed = DeterministicModelAdapter(
+            ("new",), model_contract=explicit_contract
+        )
+        changed_registry = DefinitionRegistry()
+        changed_registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="explicit-deterministic-drift",
+                version="1",
+                instructions="Reply.",
+                model_adapter=changed,
+            )
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "snapshot Model Contract Binding set"
+        ):
+            await Runner(changed_registry, store).start_run(created.run_id)
+        self.assertEqual(changed.call_count, 0)
+
+    async def test_start_rejects_secondary_binding_set_drift(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelBinding,
+            ModelBindingSet,
+            ModelContract,
+            ModelLimits,
+            ModelPurpose,
+            RevisionStability,
+            Runner,
+        )
+
+        def contract(name: str) -> ModelContract:
+            return ModelContract(
+                contract_id=name,
+                version="1",
+                revision_stability=RevisionStability.PINNED,
+                model_identity=f"deterministic:{name}",
+                limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+                input_sizer_id="deterministic-v1",
+                serialization_id="deterministic-text-v1",
+            )
+
+        primary_contract = contract("binding-primary")
+
+        def definition(
+            primary: DeterministicModelAdapter,
+            secondary: DeterministicModelAdapter,
+        ) -> AgentDefinition:
+            primary_binding = ModelBinding(
+                purpose=ModelPurpose.PRIMARY,
+                contract=primary.model_contract,
+            )
+            return AgentDefinition.for_adapter(
+                definition_id="binding-set-drift",
+                version="1",
+                instructions="Reply.",
+                model_bindings=ModelBindingSet(
+                    bindings=(
+                        primary_binding,
+                        ModelBinding(
+                            purpose=ModelPurpose.CONTEXT_COMPRESSION,
+                            contract=secondary.model_contract,
+                        ),
+                        primary_binding.model_copy(
+                            update={
+                                "purpose": ModelPurpose.OUTPUT_REPAIR,
+                                "source_purpose": ModelPurpose.PRIMARY,
+                            }
+                        ),
+                    )
+                ),
+                model_adapter=primary,
+                model_adapters={
+                    ModelPurpose.CONTEXT_COMPRESSION: secondary,
+                },
+            )
+
+        async def assert_rejected(store) -> None:
+            original_primary = DeterministicModelAdapter(
+                ("primary",), model_contract=primary_contract
+            )
+            original_secondary = DeterministicModelAdapter(
+                ("secondary",), model_contract=contract("secondary-original")
+            )
+            initial_registry = DefinitionRegistry()
+            initial_registry.register(
+                definition(original_primary, original_secondary)
+            )
+            created = await Runner(initial_registry, store).create_run(
+                "binding-set-drift", "1", "hi"
+            )
+
+            changed_primary = DeterministicModelAdapter(
+                ("primary",), model_contract=primary_contract
+            )
+            changed_secondary = DeterministicModelAdapter(
+                ("changed",), model_contract=contract("secondary-changed")
+            )
+            changed_registry = DefinitionRegistry()
+            changed_registry.register(
+                definition(changed_primary, changed_secondary)
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError, "snapshot Model Contract Binding set"
+            ):
+                await Runner(changed_registry, store).start_run(created.run_id)
+            self.assertEqual(changed_primary.call_count, 0)
+            self.assertEqual(changed_secondary.call_count, 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stores = (
+                InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+                SQLiteRunStore(
+                    os.path.join(tmp, "binding-set-drift.db"),
+                    payload_codec=PlaintextPayloadCodec(),
+                ),
+            )
+            try:
+                for store in stores:
+                    with self.subTest(store=type(store).__name__):
+                        await assert_rejected(store)
+            finally:
+                stores[1].close()
 
     async def test_model_contract_is_rechecked_after_reservation(self) -> None:
         from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec

@@ -166,7 +166,12 @@ class AgentDefinition(BaseModel, frozen=True):
             )
         effective_primary = primary.model_copy(
             update={
-                "requirements": primary.requirements.merged_with(requirements)
+                "adapter_configuration_fingerprint": (
+                    self.model_adapter.definition_contract_fingerprint() or None
+                ),
+                "requirements": primary.requirements.merged_with(
+                    requirements
+                ).effective_for(primary.contract)
             }
         )
         return ModelBindingSet(
@@ -180,7 +185,19 @@ class AgentDefinition(BaseModel, frozen=True):
                     }
                 )
                 if binding.source_purpose is ModelPurpose.PRIMARY
-                else binding
+                else binding.model_copy(
+                    update={
+                        "adapter_configuration_fingerprint": (
+                            self.model_adapter_for(
+                                binding.purpose
+                            ).definition_contract_fingerprint()
+                            or None
+                        ),
+                        "requirements": binding.requirements.effective_for(
+                            binding.contract
+                        )
+                    }
+                )
                 for binding in bindings.bindings
             )
         )
@@ -245,6 +262,7 @@ class DefinitionRegistry:
         except ModelCapabilityError:
             raise
         contract_fingerprints = dict(self._contract_fingerprints)
+        declared_bindings = definition.model_bindings.resolved()
         adapter_contracts: dict[int, ModelContract] = {}
         for binding in bindings.bindings:
             adapter = definition.model_adapter_for(binding.purpose)
@@ -274,7 +292,8 @@ class DefinitionRegistry:
                             "fingerprint"
                         )
                 adapter_contracts[adapter_key] = adapter_contract
-            if adapter_contract != binding.contract:
+            declared_binding = declared_bindings.for_purpose(binding.purpose)
+            if adapter_contract != declared_binding.contract:
                 raise ModelCapabilityError(
                     f"Model Binding {binding.purpose.value} Adapter owner "
                     "does not match its Model Contract"

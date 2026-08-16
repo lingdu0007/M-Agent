@@ -154,7 +154,9 @@ class ResponsesModelAdapter(ProviderModelAdapter):
         try:
             output = data.get("output")
             if not isinstance(output, list):
-                raise invalid_response(url, "missing field 'output'")
+                raise ModelContractViolationError(
+                    "provider response is missing required protocol structure"
+                )
             content, tool_calls = parse_responses_output(output)
             return ModelResponse(
                 content=content or None,

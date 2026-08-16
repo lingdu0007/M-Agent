@@ -1185,31 +1185,31 @@ class Runner:
                 f"run {run.run_id} has no frozen Model Binding snapshot; "
                 "refusing to adopt current definition semantics"
             )
-        expected = snapshot.model_bindings.for_purpose(
-            ModelPurpose.PRIMARY
-        ).contract
-        if (
-            expected
-            != definition.model_adapter_for(ModelPurpose.PRIMARY).model_contract
-        ):
+        expected_bindings = snapshot.model_bindings
+        if expected_bindings != definition.effective_model_bindings():
             raise RuntimeError(
-                f"run {run.run_id} snapshot Model Contract does not "
+                f"run {run.run_id} snapshot Model Contract Binding set does not "
                 "match the resolved definition; refusing to silently change "
                 "recovery behavior"
             )
-        adapter = definition.model_adapter_for(ModelPurpose.PRIMARY)
-        configuration_fingerprint = adapter.definition_contract_fingerprint()
-        if not adapter.deterministic:
-            if not configuration_fingerprint:
+        for binding in expected_bindings.bindings:
+            adapter = definition.model_adapter_for(binding.purpose)
+            configuration_fingerprint = adapter.definition_contract_fingerprint()
+            if binding.adapter_configuration_fingerprint is not None:
+                if (
+                    not configuration_fingerprint
+                    or configuration_fingerprint
+                    != binding.adapter_configuration_fingerprint
+                ):
+                    raise RuntimeError(
+                        f"run {run.run_id} snapshot Model Contract does not "
+                        "match the resolved adapter configuration; refusing to "
+                        "silently change recovery behavior"
+                    )
+            elif not adapter.deterministic:
                 raise RuntimeError(
                     f"run {run.run_id} resolved live adapter has no verifiable "
                     "current configuration fingerprint"
-                )
-            if configuration_fingerprint != expected.configuration_fingerprint:
-                raise RuntimeError(
-                    f"run {run.run_id} snapshot Model Contract does not "
-                    "match the resolved adapter configuration; refusing to "
-                    "silently change recovery behavior"
                 )
 
     async def _resume_running(
