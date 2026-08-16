@@ -155,13 +155,32 @@ class AgentDefinition(BaseModel, frozen=True):
         )
 
     @staticmethod
-    def _adapter_configuration_fingerprint(adapter: ModelAdapter) -> str:
+    def _adapter_configuration_fingerprint(
+        adapter: ModelAdapter, contract: ModelContract
+    ) -> str:
+        if adapter.model_contract != contract:
+            raise ModelCapabilityError(
+                "Model Binding Adapter owner does not match its Model Contract"
+            )
+        if not adapter.deterministic and not contract.configuration_fingerprint:
+            raise ValueError(
+                f"live adapter {type(adapter).__name__} must declare a non-empty "
+                "definition contract configuration fingerprint"
+            )
         fingerprint = adapter.definition_contract_fingerprint()
         if not isinstance(fingerprint, str) or not fingerprint.strip():
             adapter_kind = "deterministic" if adapter.deterministic else "live"
             raise ValueError(
                 f"{adapter_kind} adapter {type(adapter).__name__} must provide "
                 "a non-empty current configuration fingerprint"
+            )
+        if (
+            not adapter.deterministic
+            and fingerprint != contract.configuration_fingerprint
+        ):
+            raise ValueError(
+                f"adapter {type(adapter).__name__} configuration fingerprint does "
+                "not match its ModelContract fingerprint"
             )
         return fingerprint
 
@@ -178,7 +197,9 @@ class AgentDefinition(BaseModel, frozen=True):
         effective_primary = primary.model_copy(
             update={
                 "adapter_configuration_fingerprint": (
-                    self._adapter_configuration_fingerprint(self.model_adapter)
+                    self._adapter_configuration_fingerprint(
+                        self.model_adapter, primary.contract
+                    )
                 ),
                 "requirements": primary.requirements.merged_with(
                     requirements
@@ -200,7 +221,8 @@ class AgentDefinition(BaseModel, frozen=True):
                     update={
                         "adapter_configuration_fingerprint": (
                             self._adapter_configuration_fingerprint(
-                                self.model_adapter_for(binding.purpose)
+                                self.model_adapter_for(binding.purpose),
+                                binding.contract,
                             )
                         ),
                         "requirements": binding.requirements.effective_for(
@@ -289,22 +311,9 @@ class DefinitionRegistry:
                         "ceiling is incompatible with its Model Contract: "
                         f"reason_code={ceiling_match.reason.value}"
                     )
-                configuration_fingerprint = adapter_contract.configuration_fingerprint
-                if not adapter.deterministic and not configuration_fingerprint:
-                    raise ValueError(
-                        f"live adapter {type(adapter).__name__} must declare a "
-                        "non-empty definition contract configuration fingerprint"
-                    )
-                current_configuration_fingerprint = (
-                    definition._adapter_configuration_fingerprint(adapter)
+                definition._adapter_configuration_fingerprint(
+                    adapter, adapter_contract
                 )
-                if not adapter.deterministic:
-                    if current_configuration_fingerprint != configuration_fingerprint:
-                        raise ValueError(
-                            f"adapter {type(adapter).__name__} configuration "
-                            "fingerprint does not match its ModelContract "
-                            "fingerprint"
-                        )
                 adapter_contracts[adapter_key] = adapter_contract
             declared_binding = declared_bindings.for_purpose(binding.purpose)
             if adapter_contract != declared_binding.contract:

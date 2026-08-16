@@ -2662,6 +2662,90 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(terminal.status, RunStatus.FAILED)
         self.assertEqual(adapter.dispatched_contracts, [])
 
+    async def test_live_configuration_drift_is_rejected_before_run_creation(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelAdapter,
+            ModelContract,
+            ModelLimits,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+        )
+
+        contract = ModelContract(
+            contract_id="mutable-live-configuration",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="live:mutable-configuration",
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="live-sizer-v1",
+            serialization_id="live-wire-v1",
+            configuration_fingerprint="configuration-a",
+        )
+
+        class MutableConfigurationAdapter(ModelAdapter):
+            capabilities = contract.capabilities
+
+            def __init__(self) -> None:
+                self.configuration = "configuration-a"
+                self.dispatches = 0
+
+            @property
+            def model_contract(self) -> ModelContract:
+                return contract
+
+            def definition_contract_fingerprint(self) -> str:
+                return self.configuration
+
+            async def generate(self, request) -> ModelResponse:
+                self.dispatches += 1
+                return ModelResponse(content="must not dispatch")
+
+        async def assert_rejected(store) -> None:
+            adapter = MutableConfigurationAdapter()
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="mutable-live-configuration",
+                    version="1",
+                    instructions="Reject configuration drift before creating a run.",
+                    model_adapter=adapter,
+                )
+            )
+            adapter.configuration = "configuration-b"
+
+            with self.assertRaisesRegex(
+                ValueError, "configuration fingerprint does not match"
+            ):
+                await Runner(registry, store).create_run(
+                    "mutable-live-configuration", "1", "hello"
+                )
+            self.assertEqual(adapter.dispatches, 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stores = (
+                InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+                SQLiteRunStore(
+                    os.path.join(tmp, "mutable-live-configuration.db"),
+                    payload_codec=PlaintextPayloadCodec(),
+                ),
+            )
+            try:
+                for store in stores:
+                    with self.subTest(store=type(store).__name__):
+                        await assert_rejected(store)
+            finally:
+                stores[1].close()
+
     async def test_final_lease_check_precedes_adapter_dispatch(self) -> None:
         """A mutable adapter hook cannot invalidate the lease after its guard."""
         from m_agent import DEFAULT_LEASE_TTL, FakeClock
