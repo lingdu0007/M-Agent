@@ -151,18 +151,23 @@ class ResponsesModelAdapter(ProviderModelAdapter):
     async def generate(self, request: ModelRequest) -> ModelResponse:
         url = self.endpoint_url
         _, data = await self._post_json(url, self._build_payload(request))
-        output = data.get("output")
-        if not isinstance(output, list):
-            raise invalid_response(url, "missing field 'output'")
-        content, tool_calls = parse_responses_output(output)
-        return ModelResponse(
-            content=content or None,
-            tool_calls=tool_calls,
-            usage=extract_usage(data),
-            actual_revision=(
-                data["model"] if isinstance(data.get("model"), str) else None
-            ),
-        )
+        try:
+            output = data.get("output")
+            if not isinstance(output, list):
+                raise invalid_response(url, "missing field 'output'")
+            content, tool_calls = parse_responses_output(output)
+            return ModelResponse(
+                content=content or None,
+                tool_calls=tool_calls,
+                usage=extract_usage(data),
+                actual_revision=(
+                    data["model"] if isinstance(data.get("model"), str) else None
+                ),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ModelContractViolationError(
+                "provider response cannot be normalized"
+            ) from exc
 
     async def stream(
         self, request: ModelRequest,
@@ -227,6 +232,10 @@ class ResponsesModelAdapter(ProviderModelAdapter):
                 )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
             raise transport_error(exc, operation=url) from exc
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ModelContractViolationError(
+                "provider response cannot be normalized"
+            ) from exc
 
     async def aclose(self) -> None:
         await super().aclose()

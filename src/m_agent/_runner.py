@@ -1922,7 +1922,6 @@ class Runner:
                         ),
                         None,
                     )
-                await self._assert_step_dispatch(run, lease)
                 if self._cancel_requested(run.run_id):
                     await self._record_failed_attempt(
                         run,
@@ -1946,6 +1945,9 @@ class Runner:
                 assert_model_request_compatible(
                     model_contract, request, streaming=streaming
                 )
+                # Adapter hooks are synchronous but may mutate external state;
+                # the lease guard must be the final action before dispatch.
+                await self._assert_step_dispatch(run, lease)
                 if streaming:
                     response = await self._stream_model(
                         adapter,

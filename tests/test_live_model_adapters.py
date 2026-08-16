@@ -1721,6 +1721,112 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 response = asyncio.run(invoke(adapter_cls, payload))
                 self.assertEqual(response.actual_revision, payload["model"])
 
+    def test_chat_streaming_does_not_request_undeclared_usage(self) -> None:
+        """A frozen streaming-only request does not expand its wire protocol."""
+
+        async def invoke() -> tuple[RunStatus, list[dict]]:
+            payloads: list[dict] = []
+
+            def handler(request):
+                payloads.append(json.loads(request.content))
+                return httpx.Response(
+                    200,
+                    content=(
+                        'data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'
+                    ),
+                    headers={"content-type": "text/event-stream"},
+                )
+
+            adapter = ChatCompletionsModelAdapter(
+                base_url="https://live-contract.invalid/v1",
+            )
+            adapter._transport = httpx.MockTransport(handler)
+            try:
+                _, _, status, _ = await run_to_terminal(
+                    self,
+                    adapter,
+                    instructions="Reply with pong.",
+                    required=ModelCapabilities(
+                        streaming=StreamingMode.DELTA
+                    ),
+                )
+            finally:
+                await adapter.aclose()
+            return status, payloads
+
+        with credential_environment():
+            status, payloads = asyncio.run(invoke())
+
+        self.assertIs(status, RunStatus.SUCCEEDED)
+        self.assertEqual(len(payloads), 1)
+        self.assertNotIn("stream_options", payloads[0])
+
+    def test_malformed_provider_payload_is_contract_violation_through_runner(
+        self,
+    ) -> None:
+        """Provider normalization faults retain the stable Contract error code."""
+
+        async def invoke(adapter_cls, response_payload):
+            calls = 0
+
+            def handler(request):
+                nonlocal calls
+                calls += 1
+                return httpx.Response(200, json=response_payload)
+
+            adapter = adapter_cls(base_url="https://live-contract.invalid/v1")
+            adapter._transport = httpx.MockTransport(handler)
+            configure_mock_contract(adapter)
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id=f"malformed-{adapter_cls.__name__}",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                )
+            )
+            runner = Runner(
+                registry=registry,
+                store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+            )
+            created = await runner.create_run(
+                f"malformed-{adapter_cls.__name__}", "1", "hi"
+            )
+            try:
+                terminal = await runner.start_run(created.run_id)
+                inspection = await runner.inspect_run(created.run_id)
+            finally:
+                await adapter.aclose()
+            return terminal, inspection, calls
+
+        cases = (
+            (
+                ChatCompletionsModelAdapter,
+                {"choices": [{"message": {"tool_calls": {"bad": True}}}]},
+            ),
+            (
+                ResponsesModelAdapter,
+                {"output": ["malformed output item"]},
+            ),
+        )
+        with credential_environment():
+            for adapter_cls, response_payload in cases:
+                with self.subTest(adapter=adapter_cls.__name__):
+                    terminal, inspection, calls = asyncio.run(
+                        invoke(adapter_cls, response_payload)
+                    )
+
+                    self.assertIs(terminal.status, RunStatus.FAILED)
+                    self.assertEqual(
+                        terminal.error_code, "MODEL_CONTRACT_VIOLATION"
+                    )
+                    self.assertEqual(
+                        inspection.attempts[-1].error_code,
+                        "MODEL_CONTRACT_VIOLATION",
+                    )
+                    self.assertEqual(calls, 1)
+
     def test_structured_output_diagnostic_never_echoes_provider_content(
         self,
     ) -> None:

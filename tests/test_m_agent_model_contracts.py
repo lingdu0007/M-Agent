@@ -181,12 +181,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             input_sizer_id="deterministic-v1",
             serialization_id="deterministic-text-v1",
         )
-        changed_limits = contract.model_copy(
-            update={
-                "limits": ModelLimits(
-                    context_window_tokens=256, max_output_tokens=32
-                )
-            }
+        changed_configuration = contract.model_copy(
+            update={"configuration_fingerprint": "deployment-b"}
         )
         registry = DefinitionRegistry()
 
@@ -203,7 +199,9 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         registry.register(definition("first-contract-user", contract))
         registry.register(definition("second-contract-user", contract))
         with self.assertRaisesRegex(DefinitionConflictError, "shared-contract@1"):
-            registry.register(definition("conflicting-contract-user", changed_limits))
+            registry.register(
+                definition("conflicting-contract-user", changed_configuration)
+            )
 
         self.assertFalse(registry.is_registered("conflicting-contract-user", "1"))
 
@@ -1152,55 +1150,47 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             UsageReportingMode.NONE,
         )
 
-    async def test_unsupported_predispatch_request_has_capability_error_code(
+    async def test_unsupported_tool_definition_has_capability_error_code(
         self,
     ) -> None:
         from m_agent.adapters import (
             DeterministicModelAdapter,
             DeterministicTool,
-            InMemoryRunStore,
-            PlaintextPayloadCodec,
         )
         from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
-            Runner,
-            RunStatus,
+            ModelCapabilityError,
             ToolEffect,
             ToolOutcome,
         )
 
         adapter = DeterministicModelAdapter(("must not dispatch",))
         registry = DefinitionRegistry()
-        registry.register(
-            AgentDefinition.for_adapter(
-                definition_id="predispatch-capability",
-                version="1",
-                instructions="Use the supplied tool.",
-                model_adapter=adapter,
-                tools=(
-                    DeterministicTool(
-                        name="lookup",
-                        effect=ToolEffect.READ_ONLY,
-                        handler=lambda request: ToolOutcome.success(
-                            request.call_id,
-                            request.tool_name,
-                            "unused",
+        with self.assertRaisesRegex(
+            ModelCapabilityError, "TOOL_CALLING_UNSUPPORTED"
+        ):
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="predispatch-capability",
+                    version="1",
+                    instructions="Use the supplied tool.",
+                    model_adapter=adapter,
+                    tools=(
+                        DeterministicTool(
+                            name="lookup",
+                            effect=ToolEffect.READ_ONLY,
+                            handler=lambda request: ToolOutcome.success(
+                                request.call_id,
+                                request.tool_name,
+                                "unused",
+                            ),
                         ),
                     ),
-                ),
+                )
             )
-        )
-        runner = Runner(
-            registry=registry,
-            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
-        )
 
-        created = await runner.create_run("predispatch-capability", "1", "hi")
-        terminal = await runner.start_run(created.run_id)
-
-        self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "MODEL_CAPABILITY_UNSUPPORTED")
+        self.assertFalse(registry.is_registered("predispatch-capability", "1"))
         self.assertEqual(adapter.call_count, 0)
 
     async def test_malformed_model_response_is_contract_violation(self) -> None:
@@ -1656,15 +1646,13 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(adapter.call_count, 0)
 
-    async def test_unsupported_stream_tool_combination_fails_before_dispatch(
+    async def test_unsupported_stream_tool_combination_is_rejected_at_registration(
         self,
     ) -> None:
         """Declared modes do not imply their undeclared combined protocol."""
         from m_agent.adapters import (
             DeterministicModelAdapter,
             DeterministicTool,
-            InMemoryRunStore,
-            PlaintextPayloadCodec,
         )
         from m_agent.runtime import (
             AgentDefinition,
@@ -1672,11 +1660,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ModelCapabilities,
             ModelCapabilityCombination,
             ModelContract,
+            ModelCapabilityError,
             ModelLimits,
             ModelRequirements,
             RevisionStability,
-            Runner,
-            RunStatus,
             StreamingMode,
             ToolCallingMode,
             ToolEffect,
@@ -1710,29 +1697,25 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         registry = DefinitionRegistry()
-        registry.register(
-            AgentDefinition.for_adapter(
-                definition_id="split-protocols",
-                version="1",
-                instructions="Never dispatch an undeclared combination.",
-                model_requirements=ModelRequirements(
-                    capabilities=ModelCapabilities(
-                        streaming=StreamingMode.DELTA
-                    )
-                ),
-                model_adapter=adapter,
-                tools=(tool,),
+        with self.assertRaisesRegex(
+            ModelCapabilityError, "CAPABILITY_COMBINATION_UNSUPPORTED"
+        ):
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="split-protocols",
+                    version="1",
+                    instructions="Never dispatch an undeclared combination.",
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            streaming=StreamingMode.DELTA
+                        )
+                    ),
+                    model_adapter=adapter,
+                    tools=(tool,),
+                )
             )
-        )
-        runner = Runner(
-            registry=registry,
-            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
-        )
-        created = await runner.create_run("split-protocols", "1", "lookup")
-        terminal = await runner.start_run(created.run_id)
 
-        self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "MODEL_CAPABILITY_UNSUPPORTED")
+        self.assertFalse(registry.is_registered("split-protocols", "1"))
         self.assertEqual(adapter.call_count, 0)
 
 
@@ -1879,6 +1862,66 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(terminal.status, RunStatus.FAILED)
         self.assertEqual(adapter.dispatched_contracts, [])
 
+    async def test_final_lease_check_precedes_adapter_dispatch(self) -> None:
+        """A mutable adapter hook cannot invalidate the lease after its guard."""
+        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            LeaseNotHeldError,
+            Runner,
+        )
+
+        clock = FakeClock()
+
+        class LeaseExpiringAdapter(DeterministicModelAdapter):
+            def __init__(self) -> None:
+                super().__init__(("must not dispatch",))
+                self._expire_after_reservation = False
+
+            @property
+            def model_contract(self):
+                if self._expire_after_reservation:
+                    self._expire_after_reservation = False
+                    clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+                return super().model_contract
+
+        class ReservationClockAdvancingStore(InMemoryRunStore):
+            def __init__(self, adapter: LeaseExpiringAdapter) -> None:
+                super().__init__(
+                    payload_codec=PlaintextPayloadCodec(), clock=clock
+                )
+                self._adapter = adapter
+
+            async def reserve_model_attempt(self, *args, **kwargs) -> bool:
+                reserved = await super().reserve_model_attempt(*args, **kwargs)
+                if reserved:
+                    self._adapter._expire_after_reservation = True
+                return reserved
+
+        adapter = LeaseExpiringAdapter()
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="lease-adjacent-dispatch",
+                version="1",
+                instructions="Never dispatch after lease expiry.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(registry, ReservationClockAdvancingStore(adapter))
+        created = await runner.create_run("lease-adjacent-dispatch", "1", "hi")
+
+        with self.assertRaises(LeaseNotHeldError):
+            await runner.start_run(created.run_id)
+
+        self.assertEqual(adapter.call_count, 0)
+
     def test_live_adapter_requires_verifiable_current_configuration(self) -> None:
         from m_agent.runtime import (
             AgentDefinition,
@@ -1930,20 +1973,17 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-    async def test_tool_bearing_request_fails_before_dispatch_when_unsupported(
+    async def test_tool_bearing_definition_is_rejected_at_registration(
         self,
     ) -> None:
         from m_agent.adapters import (
             DeterministicModelAdapter,
             DeterministicTool,
-            InMemoryRunStore,
-            PlaintextPayloadCodec,
         )
         from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
-            Runner,
-            RunStatus,
+            ModelCapabilityError,
             ToolEffect,
             ToolOutcome,
         )
@@ -1957,25 +1997,20 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         registry = DefinitionRegistry()
-        registry.register(
-            AgentDefinition.for_adapter(
-                definition_id="undeclared-tools",
-                version="1",
-                instructions="Never dispatch unsupported tools.",
-                model_adapter=adapter,
-                tools=(tool,),
+        with self.assertRaisesRegex(
+            ModelCapabilityError, "TOOL_CALLING_UNSUPPORTED"
+        ):
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="undeclared-tools",
+                    version="1",
+                    instructions="Never dispatch unsupported tools.",
+                    model_adapter=adapter,
+                    tools=(tool,),
+                )
             )
-        )
-        runner = Runner(
-            registry=registry,
-            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
-        )
 
-        created = await runner.create_run("undeclared-tools", "1", "lookup")
-        terminal = await runner.start_run(created.run_id)
-
-        self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "MODEL_CAPABILITY_UNSUPPORTED")
+        self.assertFalse(registry.is_registered("undeclared-tools", "1"))
         self.assertEqual(adapter.call_count, 0)
 
     async def test_run_budget_stops_a_second_primary_dispatch(self) -> None:

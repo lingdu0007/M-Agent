@@ -278,8 +278,8 @@ class ModelContract(_FrozenModelValue):
     usage_guarantees: ModelUsageGuarantees = Field(
         default_factory=ModelUsageGuarantees
     )
-    #: Canonical digest of this Contract's semantic fields. It excludes the
-    #: deployment configuration digest so it identifies declared semantics.
+    #: Canonical digest of this Contract's semantic fields, including its
+    #: deployment configuration identity.
     fingerprint: str | None = None
     #: Non-secret provider/deployment configuration identity. Live adapters
     #: compare it before dispatch; deterministic adapters have no such state.
@@ -317,7 +317,7 @@ class ModelContract(_FrozenModelValue):
         encoded = json.dumps(
             self.model_dump(
                 mode="json",
-                exclude={"fingerprint", "configuration_fingerprint"},
+                exclude={"fingerprint"},
             ),
             ensure_ascii=False,
             separators=(",", ":"),
@@ -342,6 +342,7 @@ class ModelContract(_FrozenModelValue):
             "input_sizer_id",
             "serialization_id",
             "usage_guarantees",
+            "configuration_fingerprint",
         }
         if update and (semantic_fields.intersection(update) or "fingerprint" in update):
             values = self.model_dump()

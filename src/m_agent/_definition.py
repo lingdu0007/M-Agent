@@ -23,10 +23,12 @@ from ._errors import (
 from ._model import (
     ModelAdapter,
     ModelBindingSet,
+    ModelCapabilities,
     ModelContract,
     ModelExecutionBudget,
     ModelPurpose,
     ModelRequirements,
+    ToolCallingMode,
 )
 from ._tools import Tool, ToolDeclaration, ToolEffect
 
@@ -134,8 +136,16 @@ class AgentDefinition(BaseModel, frozen=True):
         return cls(**values)
 
     def effective_model_requirements(self) -> ModelRequirements:
-        """Return the explicit typed requirements frozen for this Run."""
-        return self.model_requirements
+        """Return the complete typed requirements frozen for this Run."""
+        if not self.tools:
+            return self.model_requirements
+        return self.model_requirements.merged_with(
+            ModelRequirements(
+                capabilities=ModelCapabilities(
+                    tool_calling=ToolCallingMode.NATIVE
+                )
+            )
+        )
 
     def effective_model_bindings(self) -> ModelBindingSet:
         requirements = self.effective_model_requirements()

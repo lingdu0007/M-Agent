@@ -183,22 +183,27 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
     async def generate(self, request: ModelRequest) -> ModelResponse:
         url = self.endpoint_url
         _, data = await self._post_json(url, self._build_payload(request))
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise _missing_field(url, "choices")
-        message = choices[0].get("message")
-        if not isinstance(message, dict):
-            raise _missing_field(url, "choices[0].message")
-        content = message.get("content")
-        tool_calls = parse_chat_tool_calls(message)
-        return ModelResponse(
-            content=content or None,
-            tool_calls=tool_calls,
-            usage=extract_usage(data),
-            actual_revision=(
-                data["model"] if isinstance(data.get("model"), str) else None
-            ),
-        )
+        try:
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise _missing_field(url, "choices")
+            message = choices[0].get("message")
+            if not isinstance(message, dict):
+                raise _missing_field(url, "choices[0].message")
+            content = message.get("content")
+            tool_calls = parse_chat_tool_calls(message)
+            return ModelResponse(
+                content=content or None,
+                tool_calls=tool_calls,
+                usage=extract_usage(data),
+                actual_revision=(
+                    data["model"] if isinstance(data.get("model"), str) else None
+                ),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ModelContractViolationError(
+                "provider response cannot be normalized"
+            ) from exc
 
     async def stream(
         self, request: ModelRequest,
@@ -206,7 +211,8 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
         url = self.endpoint_url
         payload = self._build_payload(request)
         payload["stream"] = True
-        payload["stream_options"] = {"include_usage": True}
+        if request.usage_reporting is UsageReportingMode.PROVIDER_REPORTED:
+            payload["stream_options"] = {"include_usage": True}
         self.requests.append(url)
         api_key = self._require_api_key()
         try:
@@ -267,6 +273,10 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
                 )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
             raise transport_error(exc, operation=url) from exc
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ModelContractViolationError(
+                "provider response cannot be normalized"
+            ) from exc
 
     async def aclose(self) -> None:
         await super().aclose()
