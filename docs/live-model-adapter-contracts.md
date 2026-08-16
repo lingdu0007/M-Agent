@@ -13,28 +13,31 @@ Chat Completions 与 Responses 风格 API 提供清晰的 live Model Adapter
 
 | Adapter | 端点 | streaming | tool calling | native structured output | usage reporting |
 | --- | --- | --- | --- | --- | --- |
-| `ChatCompletionsModelAdapter` | `{base_url}/chat/completions` | ✅ | ✅ | ✅（`response_format` json_schema / json_object） | ✅（`prompt_tokens`/`completion_tokens`） |
-| `ResponsesModelAdapter` | `{base_url}{responses_path}`（默认 `/responses`） | ✅ | ✅ | ✅（`text.format` json_schema） | ✅（`input_tokens`/`output_tokens`） |
+| `ChatCompletionsModelAdapter` | `{base_url}/chat/completions` | ✅ | ✅ | ✅（`JSON_SCHEMA_STRICT`；显式配置可为 `JSON_OBJECT`） | ✅（`prompt_tokens`/`completion_tokens`） |
+| `ResponsesModelAdapter` | `{base_url}{responses_path}`（默认 `/responses`） | ✅ | ✅ | ✅（`JSON_SCHEMA_STRICT`，`text.format` json_schema） | ✅（`input_tokens`/`output_tokens`） |
 
 普通 text、streaming、tool calling 请求不携带 structured-output 参数。只有
-冻结 Binding 的 Requirements 显式选择 `structured_output=NATIVE`，并且构造
-Adapter 时提供 JSON Schema，才会发送原生 structured output；缺 Schema 的
-原生结构化请求会在 dispatch 中以 `MODEL_CONTRACT_VIOLATION` 失败。Chat
+冻结 Binding 的 Requirements 显式选择 `structured_output=JSON_SCHEMA_STRICT`
+或 `JSON_OBJECT`，才会发送原生 structured output；严格 schema 请求缺 Schema
+会在 dispatch 中以 `MODEL_CONTRACT_VIOLATION` 失败。Chat
 Completions 默认使用严格的 `json_schema`；仅支持原生 JSON object 的兼容端点必须显式配置
 `M_AGENT_OPENAI_CHAT_STRUCTURED_OUTPUT_MODE=json_object`（或构造器的同名
-`structured_output_mode`），这不是静默降级。
+`structured_output_mode`），它只满足 `JSON_OBJECT` Requirement，不能满足
+`JSON_SCHEMA_STRICT`，这不是静默降级。
 
 运行时集成者必须在构造 live Adapter 时显式传入实例级
 `model_contract=ModelContract(...)`，其中声明真实的 model/deployment
 identity、limits、Sizer、serialization、usage guarantee 和非敏感
-fingerprint；Adapter 类的 capability 常量只是协议上限，不能推导这些
-实例事实。未传 Contract 的 Adapter 可以无凭证地构造以配置 HTTP，但
-`DefinitionRegistry.register` 会在任何网络或工具调用前拒绝它。Contract
-能力必须是 Adapter 类协议上限的真实交集，可以比类的能力更窄；Adapter 的
-model、净化后的 endpoint、timeout、structured-output schema 与 Chat mode
-形成的非敏感 configuration fingerprint 必须等于实例 Contract 的
-`fingerprint`。不匹配或之后变化都会在 dispatch 前失败，不能静默改变既有
-Run 的模型语义。
+`configuration_fingerprint`；Adapter 类的 capability 常量只是协议上限，
+不能推导这些实例事实。`fingerprint` 是由 Contract identity/version、修订
+稳定性、能力组合、Limits、Sizer、serialization 与 usage guarantee 规范化
+计算的语义摘要，提供不相等的手写值会被拒绝。未传 Contract 的 Adapter
+可以无凭证地构造以配置 HTTP，但 `DefinitionRegistry.register` 会在任何网络
+或工具调用前拒绝它。Contract 能力必须是 Adapter 类协议上限的真实交集，可以
+比类的能力更窄；Adapter 的 model、净化后的 endpoint、timeout、structured-
+output schema 与 Chat mode 形成的非敏感 configuration fingerprint 必须等于
+实例 Contract 的 `configuration_fingerprint`。不匹配或之后变化都会在 dispatch
+前失败，不能静默改变既有 Run 的模型语义。
 
 能力声明（`capabilities`）是**如实声明**（ADR 0030）：声明为支持的能力
 才有契约案例；未声明的能力（本版本两者均无）绝不做静默降级。Runner

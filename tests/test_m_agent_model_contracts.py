@@ -75,7 +75,6 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 usage_guarantees=ModelUsageGuarantees(
                     input_tokens=UsageFieldGuarantee.REQUIRED
                 ),
-                fingerprint="coherent-contract",
             )
 
         class UndeclaredLiveAdapter(ModelAdapter):
@@ -93,6 +92,69 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     model_adapter=UndeclaredLiveAdapter(),
                 )
             )
+
+    def test_contract_fingerprint_and_structured_guarantees_are_semantic(self) -> None:
+        """Contracts cannot share a fingerprint across different guarantees."""
+        from pydantic import ValidationError
+
+        from m_agent.runtime import (
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelRequirementReason,
+            ModelRequirements,
+            RevisionStability,
+            StructuredOutputMode,
+        )
+
+        fields = dict(
+            contract_id="structured-contract",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="provider:structured",
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="provider-sizer-v1",
+            serialization_id="provider-wire-v1",
+        )
+        strict = ModelContract(
+            **fields,
+            capabilities=ModelCapabilities(
+                structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
+            ),
+        )
+        json_object = ModelContract(
+            **fields,
+            capabilities=ModelCapabilities(
+                structured_output=StructuredOutputMode.JSON_OBJECT
+            ),
+        )
+
+        self.assertNotEqual(strict.fingerprint, json_object.fingerprint)
+        with self.assertRaises(ValidationError):
+            ModelContract(
+                **fields,
+                capabilities=ModelCapabilities(
+                    structured_output=StructuredOutputMode.JSON_OBJECT
+                ),
+                fingerprint=strict.fingerprint,
+            )
+        strict_required = ModelRequirements(
+            capabilities=ModelCapabilities(
+                structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
+            )
+        )
+        self.assertFalse(strict_required.match(json_object).compatible)
+        self.assertIs(
+            strict_required.match(json_object).reason,
+            ModelRequirementReason.STRUCTURED_OUTPUT_UNSUPPORTED,
+        )
+        self.assertTrue(
+            ModelRequirements(
+                capabilities=ModelCapabilities(
+                    structured_output=StructuredOutputMode.JSON_OBJECT
+                )
+            ).match(strict).compatible
+        )
 
     def test_binding_reuse_and_capability_combinations_are_explicit(self) -> None:
         """Binding reuse and multi-mode protocols need durable declarations."""
@@ -139,7 +201,6 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
             input_sizer_id="deterministic-v1",
             serialization_id="deterministic-text-v1",
-            fingerprint="explicit-reuse-v1",
         )
         primary = ModelBinding(
             purpose=ModelPurpose.PRIMARY,
@@ -227,18 +288,17 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             model_identity="deterministic:structured",
             capabilities=ModelCapabilities(
                 streaming=StreamingMode.DELTA,
-                structured_output=StructuredOutputMode.NATIVE,
+                structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
                 supported_combinations=(
                     ModelCapabilityCombination(streaming=StreamingMode.DELTA),
                     ModelCapabilityCombination(
-                        structured_output=StructuredOutputMode.NATIVE
+                        structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
                     ),
                 ),
             ),
             limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
             input_sizer_id="deterministic-v1",
             serialization_id="deterministic-text-v1",
-            fingerprint="separate-structured-protocol-v1",
         )
         adapter = DeterministicModelAdapter(
             ("structured response",), model_contract=contract
@@ -251,7 +311,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 instructions="Return the declared native structure.",
                 model_requirements=ModelRequirements(
                     capabilities=ModelCapabilities(
-                        structured_output=StructuredOutputMode.NATIVE
+                        structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
                     )
                 ),
                 model_adapter=adapter,
@@ -270,7 +330,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         assert adapter.last_request is not None
         self.assertIs(
             adapter.last_request.structured_output,
-            StructuredOutputMode.NATIVE,
+            StructuredOutputMode.JSON_SCHEMA_STRICT,
         )
 
     async def test_malformed_model_response_is_contract_violation(self) -> None:
@@ -351,7 +411,6 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             usage_guarantees=ModelUsageGuarantees(
                 input_tokens=UsageFieldGuarantee.REQUIRED
             ),
-            fingerprint="usage-provenance-v1",
         )
 
         class UnprovenancedUsageAdapter(DeterministicModelAdapter):
@@ -463,7 +522,6 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
             input_sizer_id="deterministic-v1",
             serialization_id="deterministic-text-v1",
-            fingerprint="deterministic-text-v1",
         )
         registry = DefinitionRegistry()
         registry.register(
@@ -662,7 +720,6 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
             input_sizer_id="deterministic-v1",
             serialization_id="deterministic-text-v1",
-            fingerprint="split-protocols-v1",
         )
         adapter = DeterministicModelAdapter(("unreachable",), model_contract=contract)
         tool = DeterministicTool(
@@ -714,18 +771,17 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             Runner,
         )
 
-        def contract(fingerprint: str) -> ModelContract:
+        def contract(revision: str) -> ModelContract:
             return ModelContract(
                 contract_id="frozen-at-create",
                 version="1",
                 revision_stability=RevisionStability.PINNED,
-                model_identity="deterministic:frozen",
+                model_identity=f"deterministic:frozen:{revision}",
                 limits=ModelLimits(
                     context_window_tokens=128, max_output_tokens=32
                 ),
                 input_sizer_id="deterministic-v1",
                 serialization_id="deterministic-text-v1",
-                fingerprint=fingerprint,
             )
 
         original = DeterministicModelAdapter(
@@ -984,7 +1040,6 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 input_sizer_id="deterministic-v1",
                 serialization_id="deterministic-text-v1",
                 usage_guarantees=guarantees,
-                fingerprint=f"usage-{guarantees.input_tokens.value}",
             )
 
         async def run(
@@ -1106,18 +1161,17 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             Runner,
         )
 
-        def contract(fingerprint: str) -> ModelContract:
+        def contract(revision: str) -> ModelContract:
             return ModelContract(
                 contract_id="pinned-model",
                 version="1",
                 revision_stability=RevisionStability.PINNED,
-                model_identity="deterministic:pinned",
+                model_identity=f"deterministic:pinned:{revision}",
                 limits=ModelLimits(
                     context_window_tokens=128, max_output_tokens=32
                 ),
                 input_sizer_id="deterministic-v1",
                 serialization_id="deterministic-text-v1",
-                fingerprint=fingerprint,
             )
 
         first_adapter = DeterministicModelAdapter(
@@ -1169,6 +1223,213 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 created.run_id
             )
         self.assertEqual(changed_adapter.call_count, 0)
+
+    async def test_public_runner_contract_matrix_for_inmemory_and_sqlite(
+        self,
+    ) -> None:
+        """Both public Store paths preserve the typed Contract boundaries."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelCapabilityError,
+            ModelContract,
+            ModelExecutionBudget,
+            ModelLimits,
+            ModelRequirements,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            ToolCall,
+            ToolCallingMode,
+            ToolEffect,
+            ToolOutcome,
+        )
+
+        class ToolThenAnswer(DeterministicModelAdapter):
+            def __init__(self) -> None:
+                super().__init__(
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    )
+                )
+
+            async def generate(self, request):
+                self.call_count += 1
+                self._last_request = request
+                if not request.tool_outcomes:
+                    return ModelResponse(
+                        tool_calls=(
+                            ToolCall(
+                                call_id="tool-1",
+                                tool_name="lookup",
+                                arguments="{}",
+                            ),
+                        )
+                    )
+                return ModelResponse(content="must not dispatch twice")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stores = (
+                (
+                    "memory",
+                    InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+                ),
+                (
+                    "sqlite",
+                    SQLiteRunStore(
+                        os.path.join(tmp, "runs.db"),
+                        payload_codec=PlaintextPayloadCodec(),
+                    ),
+                ),
+            )
+            for name, store in stores:
+                with self.subTest(store=name):
+                    try:
+                        success_adapter = DeterministicModelAdapter(("accepted",))
+                        success_registry = DefinitionRegistry()
+                        success_registry.register(
+                            AgentDefinition.for_adapter(
+                                definition_id="matrix-success",
+                                version="1",
+                                instructions="Reply.",
+                                model_adapter=success_adapter,
+                            )
+                        )
+                        success_runner = Runner(success_registry, store)
+                        created = await success_runner.create_run(
+                            "matrix-success", "1", "hello"
+                        )
+                        terminal = await success_runner.start_run(created.run_id)
+                        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+                        self.assertEqual(success_adapter.call_count, 1)
+
+                        mismatch_adapter = DeterministicModelAdapter(("unused",))
+                        with self.assertRaises(ModelCapabilityError):
+                            DefinitionRegistry().register(
+                                AgentDefinition.for_adapter(
+                                    definition_id="matrix-mismatch",
+                                    version="1",
+                                    instructions="Never dispatch.",
+                                    model_requirements=ModelRequirements(
+                                        capabilities=ModelCapabilities(
+                                            tool_calling=ToolCallingMode.NATIVE
+                                        )
+                                    ),
+                                    model_adapter=mismatch_adapter,
+                                )
+                            )
+                        self.assertEqual(mismatch_adapter.call_count, 0)
+
+                        def contract(revision: str) -> ModelContract:
+                            return ModelContract(
+                                contract_id="matrix-contract",
+                                version="1",
+                                revision_stability=RevisionStability.PINNED,
+                                model_identity=(
+                                    f"deterministic:matrix:{revision}"
+                                ),
+                                limits=ModelLimits(
+                                    context_window_tokens=128,
+                                    max_output_tokens=32,
+                                ),
+                                input_sizer_id="deterministic-v1",
+                                serialization_id="deterministic-text-v1",
+                            )
+
+                        original = DeterministicModelAdapter(
+                            ("first",), model_contract=contract("original")
+                        )
+                        original_registry = DefinitionRegistry()
+                        original_registry.register(
+                            AgentDefinition.for_adapter(
+                                definition_id="matrix-drift",
+                                version="1",
+                                instructions="Reply.",
+                                model_adapter=original,
+                            )
+                        )
+                        drift_runner = Runner(original_registry, store)
+                        drift_created = await drift_runner.create_run(
+                            "matrix-drift", "1", "hello"
+                        )
+                        changed = DeterministicModelAdapter(
+                            ("must not dispatch",),
+                            model_contract=contract("changed"),
+                        )
+                        changed_registry = DefinitionRegistry()
+                        changed_registry.register(
+                            AgentDefinition.for_adapter(
+                                definition_id="matrix-drift",
+                                version="1",
+                                instructions="Reply.",
+                                model_adapter=changed,
+                            )
+                        )
+                        with self.assertRaisesRegex(
+                            RuntimeError, "snapshot Model Contract"
+                        ):
+                            await Runner(changed_registry, store).start_run(
+                                drift_created.run_id
+                            )
+                        self.assertEqual(changed.call_count, 0)
+
+                        budget_adapter = ToolThenAnswer()
+                        tool = DeterministicTool(
+                            name="lookup",
+                            effect=ToolEffect.READ_ONLY,
+                            handler=lambda request: ToolOutcome.success(
+                                request.call_id,
+                                request.tool_name,
+                                "found",
+                            ),
+                        )
+                        budget_registry = DefinitionRegistry()
+                        budget_registry.register(
+                            AgentDefinition.for_adapter(
+                                definition_id="matrix-budget",
+                                version="1",
+                                instructions="Use the tool once.",
+                                model_requirements=ModelRequirements(
+                                    capabilities=ModelCapabilities(
+                                        tool_calling=ToolCallingMode.NATIVE
+                                    )
+                                ),
+                                model_execution_budget=ModelExecutionBudget(
+                                    run_max_attempts=1,
+                                    primary_max_attempts=1,
+                                    context_compression_max_attempts=0,
+                                    output_repair_max_attempts=0,
+                                ),
+                                model_adapter=budget_adapter,
+                                tools=(tool,),
+                            )
+                        )
+                        budget_runner = Runner(budget_registry, store)
+                        budget_created = await budget_runner.create_run(
+                            "matrix-budget", "1", "lookup"
+                        )
+                        budget_terminal = await budget_runner.start_run(
+                            budget_created.run_id
+                        )
+                        self.assertIs(budget_terminal.status, RunStatus.FAILED)
+                        self.assertEqual(
+                            budget_terminal.error_code,
+                            "MODEL_EXECUTION_BUDGET_EXCEEDED",
+                        )
+                        self.assertEqual(budget_adapter.call_count, 1)
+                    finally:
+                        close = getattr(store, "close", None)
+                        if close is not None:
+                            close()
 
     async def test_sqlite_recovery_consumes_crashed_pre_dispatch_reservation(
         self,

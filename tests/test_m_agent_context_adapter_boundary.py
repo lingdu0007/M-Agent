@@ -59,7 +59,7 @@ def configure_mock_contract(adapter):
         limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
         input_sizer_id="mock-provider-sizer-v1",
         serialization_id="mock-provider-wire-v1",
-        fingerprint=adapter.definition_contract_fingerprint(),
+        configuration_fingerprint=adapter.definition_contract_fingerprint(),
     )
     return adapter
 

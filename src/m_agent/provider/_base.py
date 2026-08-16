@@ -443,11 +443,23 @@ class ProviderModelAdapter(ModelAdapter):
             raise ValueError(
                 "provider instance ModelContract exceeds class capability ceiling"
             )
+        declared_structured_output = (
+            self._model_contract.capabilities.structured_output
+        )
+        if (
+            declared_structured_output is not StructuredOutputMode.NONE
+            and declared_structured_output
+            is not self.capabilities.structured_output
+        ):
+            raise ValueError(
+                "provider instance structured-output mode does not match "
+                "its ModelContract"
+            )
         current = self.definition_contract_fingerprint()
-        if self._model_contract.fingerprint != current:
+        if self._model_contract.configuration_fingerprint != current:
             raise ValueError(
                 "provider instance configuration fingerprint does not match "
-                "its ModelContract fingerprint"
+                "its ModelContract configuration fingerprint"
             )
         if self._contract_configuration_fingerprint is None:
             self._contract_configuration_fingerprint = current

@@ -58,13 +58,13 @@ from m_agent._tools import ToolCall
 CHAT_COMPLETIONS_CAPABILITIES = ModelCapabilities(
     streaming=StreamingMode.DELTA,
     tool_calling=ToolCallingMode.NATIVE,
-    structured_output=StructuredOutputMode.NATIVE,
+    structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
     usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
     supported_combinations=(
         ModelCapabilityCombination(
             streaming=StreamingMode.DELTA,
             tool_calling=ToolCallingMode.NATIVE,
-            structured_output=StructuredOutputMode.NATIVE,
+            structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
             usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
         ),
     ),
@@ -121,6 +121,21 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
         self.structured_output_mode: str = resolve_chat_structured_output_mode(
             structured_output_mode
         )
+        if self.structured_output_mode == "json_object":
+            self.capabilities = ModelCapabilities(
+                streaming=StreamingMode.DELTA,
+                tool_calling=ToolCallingMode.NATIVE,
+                structured_output=StructuredOutputMode.JSON_OBJECT,
+                usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+                supported_combinations=(
+                    ModelCapabilityCombination(
+                        streaming=StreamingMode.DELTA,
+                        tool_calling=ToolCallingMode.NATIVE,
+                        structured_output=StructuredOutputMode.JSON_OBJECT,
+                        usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+                    ),
+                ),
+            )
 
     @property
     def endpoint_url(self) -> str:
@@ -143,19 +158,21 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
                 tool_spec_to_chat_schema(spec) for spec in request.tools
             ]
             payload["tool_choice"] = "auto"
-        structured = (
-            self._structured_output_payload
-            if request.structured_output is StructuredOutputMode.NATIVE
-            else None
-        )
-        if request.structured_output is StructuredOutputMode.NATIVE and structured is None:
-            raise ModelContractViolationError(
-                "native structured output requires an adapter schema"
-            )
-        if structured is not None:
-            if self.structured_output_mode == "json_object":
-                structured = {"type": "json_object"}
-            payload["response_format"] = structured
+        if request.structured_output is not StructuredOutputMode.NONE:
+            if request.structured_output is not self.capabilities.structured_output:
+                raise ModelContractViolationError(
+                    "requested structured-output guarantee does not match "
+                    "the configured provider mode"
+                )
+            if request.structured_output is StructuredOutputMode.JSON_OBJECT:
+                payload["response_format"] = {"type": "json_object"}
+            else:
+                structured = self._structured_output_payload
+                if structured is None:
+                    raise ModelContractViolationError(
+                        "strict JSON Schema output requires an adapter schema"
+                    )
+                payload["response_format"] = structured
         return payload
 
     async def generate(self, request: ModelRequest) -> ModelResponse:

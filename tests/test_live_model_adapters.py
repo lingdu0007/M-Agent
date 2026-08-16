@@ -74,6 +74,8 @@ from m_agent import (
     ToolEffect,
     ToolCallingMode,
     ToolOutcome,
+    UsageFieldGuarantee,
+    ModelUsageGuarantees,
     deserialize_model_response,
     UsageReportingMode,
 )
@@ -167,7 +169,7 @@ def configure_mock_contract(adapter):
             limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
             input_sizer_id="mock-provider-sizer-v1",
             serialization_id="mock-provider-wire-v1",
-            fingerprint=adapter.definition_contract_fingerprint(),
+            configuration_fingerprint=adapter.definition_contract_fingerprint(),
         )
     return adapter
 
@@ -398,6 +400,94 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         adapter = ResponsesModelAdapter()
         self.assertEqual(adapter.capabilities, RESPONSES_CAPABILITIES)
 
+    def test_provider_contract_fingerprint_binds_semantics_not_configuration(
+        self,
+    ) -> None:
+        """Identical endpoints cannot collapse different Contract semantics."""
+
+        def contract(
+            adapter: ChatCompletionsModelAdapter,
+            *,
+            max_output_tokens: int,
+            input_tokens: UsageFieldGuarantee,
+        ) -> ModelContract:
+            return ModelContract(
+                contract_id="same-deployment",
+                version="1",
+                revision_stability=RevisionStability.PINNED,
+                model_identity="provider:model",
+                capabilities=adapter.capabilities,
+                limits=ModelLimits(
+                    context_window_tokens=128,
+                    max_output_tokens=max_output_tokens,
+                ),
+                input_sizer_id="provider-sizer-v1",
+                serialization_id="provider-wire-v1",
+                usage_guarantees=ModelUsageGuarantees(
+                    input_tokens=input_tokens
+                ),
+                configuration_fingerprint=(
+                    adapter.definition_contract_fingerprint()
+                ),
+            )
+
+        first_probe = ChatCompletionsModelAdapter(
+            model="model", base_url="https://contract.invalid/v1"
+        )
+        second_probe = ChatCompletionsModelAdapter(
+            model="model", base_url="https://contract.invalid/v1"
+        )
+        first_contract = contract(
+            first_probe,
+            max_output_tokens=32,
+            input_tokens=UsageFieldGuarantee.OPTIONAL,
+        )
+        second_contract = contract(
+            second_probe,
+            max_output_tokens=64,
+            input_tokens=UsageFieldGuarantee.REQUIRED,
+        )
+        first = ChatCompletionsModelAdapter(
+            model="model",
+            base_url="https://contract.invalid/v1",
+            model_contract=first_contract,
+        )
+        second = ChatCompletionsModelAdapter(
+            model="model",
+            base_url="https://contract.invalid/v1",
+            model_contract=second_contract,
+        )
+        registry = DefinitionRegistry()
+        try:
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="contract-one",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=first,
+                )
+            )
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="contract-two",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=second,
+                )
+            )
+            self.assertEqual(
+                first_contract.configuration_fingerprint,
+                second_contract.configuration_fingerprint,
+            )
+            self.assertNotEqual(first_contract.fingerprint, second_contract.fingerprint)
+            self.assertEqual(first.requests, [])
+            self.assertEqual(second.requests, [])
+        finally:
+            asyncio.run(first_probe.aclose())
+            asyncio.run(second_probe.aclose())
+            asyncio.run(first.aclose())
+            asyncio.run(second.aclose())
+
     def test_live_adapters_visibly_distinct_from_fake(self) -> None:
         # AC：确定性 fake 的成功不可能被误认为 live 兼容性验证。
         fake = DeterministicModelAdapter(responses=("x",))
@@ -431,7 +521,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         self.assertNotIn("text", responses)
 
         structured_request = request.model_copy(
-            update={"structured_output": StructuredOutputMode.NATIVE}
+            update={"structured_output": StructuredOutputMode.JSON_SCHEMA_STRICT}
         )
         structured_chat = ChatCompletionsModelAdapter(
             structured_output_schema=STRUCTURED_SCHEMA
@@ -444,16 +534,50 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
 
     def test_chat_json_object_mode_uses_native_json_output(self) -> None:
         """A Chat-compatible provider can explicitly select JSON-object mode."""
-        payload = ChatCompletionsModelAdapter(
+        adapter = ChatCompletionsModelAdapter(
             structured_output_schema=STRUCTURED_SCHEMA,
             structured_output_mode="json_object",
-        )._build_payload(
+        )
+        payload = adapter._build_payload(
             _request().model_copy(
-                update={"structured_output": StructuredOutputMode.NATIVE}
+                update={"structured_output": StructuredOutputMode.JSON_OBJECT}
             )
         )
 
         self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertIs(
+            adapter.capabilities.structured_output,
+            StructuredOutputMode.JSON_OBJECT,
+        )
+
+    def test_json_object_contract_rejects_strict_schema_requirement(self) -> None:
+        """A weaker native mode never passes a strict schema Requirement."""
+        adapter = configure_mock_contract(
+            ChatCompletionsModelAdapter(
+                structured_output_schema=STRUCTURED_SCHEMA,
+                structured_output_mode="json_object",
+            )
+        )
+        try:
+            with self.assertRaises(ModelCapabilityError):
+                DefinitionRegistry().register(
+                    AgentDefinition.for_adapter(
+                        definition_id="strict-schema-only",
+                        version="1",
+                        instructions="Never dispatch.",
+                        model_requirements=ModelRequirements(
+                            capabilities=ModelCapabilities(
+                                structured_output=(
+                                    StructuredOutputMode.JSON_SCHEMA_STRICT
+                                )
+                            )
+                        ),
+                        model_adapter=adapter,
+                    )
+                )
+            self.assertEqual(adapter.requests, [])
+        finally:
+            asyncio.run(adapter.aclose())
 
     def test_resume_rejects_adapter_configuration_drift_without_network(
         self,
@@ -911,7 +1035,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
             input_sizer_id="mock-provider-sizer-v1",
             serialization_id="mock-provider-wire-v1",
-            fingerprint=adapter.definition_contract_fingerprint(),
+            configuration_fingerprint=adapter.definition_contract_fingerprint(),
         )
         registry = DefinitionRegistry()
         registry.register(
@@ -1757,7 +1881,7 @@ class _LiveAdapterContractMixin:
                     "'confidence' number between 0 and 1."
                 ),
                 required=ModelCapabilities(
-                    structured_output=StructuredOutputMode.NATIVE
+                    structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
                 ),
             )
         finally:

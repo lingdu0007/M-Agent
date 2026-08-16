@@ -194,12 +194,12 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
             capabilities=ModelCapabilities(
                 streaming=StreamingMode.DELTA,
                 tool_calling=ToolCallingMode.NATIVE,
-                structured_output=StructuredOutputMode.NATIVE,
+                structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
                 supported_combinations=(
                     ModelCapabilityCombination(
                         streaming=StreamingMode.DELTA,
                         tool_calling=ToolCallingMode.NATIVE,
-                        structured_output=StructuredOutputMode.NATIVE,
+                        structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
                     ),
                 ),
             ),

@@ -13,10 +13,11 @@ Live 与 deterministic（fake）Adapter 是明显不同的类型：
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 import enum
 import hashlib
 import json
+from typing import Any, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -40,12 +41,27 @@ class ToolCallingMode(_CapabilityMode):
 
 class StructuredOutputMode(_CapabilityMode):
     NONE = "NONE"
-    NATIVE = "NATIVE"
+    JSON_OBJECT = "JSON_OBJECT"
+    JSON_SCHEMA_STRICT = "JSON_SCHEMA_STRICT"
 
 
 class UsageReportingMode(_CapabilityMode):
     NONE = "NONE"
     PROVIDER_REPORTED = "PROVIDER_REPORTED"
+
+
+def _capability_mode_supports(
+    field: str, available: _CapabilityMode, required: _CapabilityMode
+) -> bool:
+    """Return whether one typed capability mode satisfies another."""
+    if required.value == "NONE":
+        return True
+    if field == "structured_output":
+        return available is required or (
+            available is StructuredOutputMode.JSON_SCHEMA_STRICT
+            and required is StructuredOutputMode.JSON_OBJECT
+        )
+    return available is required
 
 
 class RevisionStability(str, enum.Enum):
@@ -82,8 +98,9 @@ class ModelCapabilityCombination(BaseModel, frozen=True):
     def supports(self, required: "ModelCapabilities") -> bool:
         """Whether this combination contains every requested non-NONE mode."""
         return all(
-            getattr(required, field).value == "NONE"
-            or getattr(self, field) == getattr(required, field)
+            _capability_mode_supports(
+                field, getattr(self, field), getattr(required, field)
+            )
             for field in (
                 "streaming",
                 "tool_calling",
@@ -145,7 +162,7 @@ class ModelCapabilities(BaseModel, frozen=True):
             for field in fields:
                 mode = getattr(combination, field)
                 available = getattr(self, field)
-                if mode.value != "NONE" and mode != available:
+                if not _capability_mode_supports(field, available, mode):
                     raise ValueError(
                         "supported combination declares a mode absent from "
                         f"capabilities: {field}={mode.value}"
@@ -181,8 +198,9 @@ class ModelCapabilities(BaseModel, frozen=True):
     def supports(self, required: "ModelCapabilities") -> bool:
         """Return whether every requested non-NONE mode is available."""
         modes_match = all(
-            getattr(required, field).value == "NONE"
-            or getattr(self, field) == getattr(required, field)
+            _capability_mode_supports(
+                field, getattr(self, field), getattr(required, field)
+            )
             for field in (
                 "streaming",
                 "tool_calling",
@@ -204,9 +222,16 @@ class ModelCapabilities(BaseModel, frozen=True):
         for field in fields:
             left = getattr(self, field)
             right = getattr(other, field)
-            if left.value != "NONE" and right.value != "NONE" and left != right:
+            if left.value == "NONE":
+                values[field] = right
+            elif right.value == "NONE":
+                values[field] = left
+            elif _capability_mode_supports(field, left, right):
+                values[field] = left
+            elif _capability_mode_supports(field, right, left):
+                values[field] = right
+            else:
                 raise ValueError(f"conflicting requirements for {field}")
-            values[field] = left if left.value != "NONE" else right
         active = sum(value.value != "NONE" for value in values.values())
         combinations = (
             (ModelCapabilityCombination(**values),) if active > 1 else ()
@@ -247,7 +272,12 @@ class ModelContract(BaseModel, frozen=True):
     usage_guarantees: ModelUsageGuarantees = Field(
         default_factory=ModelUsageGuarantees
     )
-    fingerprint: str = Field(min_length=1)
+    #: Canonical digest of this Contract's semantic fields. It excludes the
+    #: deployment configuration digest so it identifies declared semantics.
+    fingerprint: str | None = None
+    #: Non-secret provider/deployment configuration identity. Live adapters
+    #: compare it before dispatch; deterministic adapters have no such state.
+    configuration_fingerprint: str | None = None
 
     @model_validator(mode="after")
     def _validate_usage_reporting(self) -> "ModelContract":
@@ -267,7 +297,52 @@ class ModelContract(BaseModel, frozen=True):
             raise ValueError(
                 "usage_reporting=NONE cannot require usage fields"
             )
+        expected_fingerprint = self.semantic_fingerprint()
+        if self.fingerprint is None:
+            object.__setattr__(self, "fingerprint", expected_fingerprint)
+        elif self.fingerprint != expected_fingerprint:
+            raise ValueError(
+                "fingerprint must match the canonical ModelContract semantics"
+            )
         return self
+
+    def semantic_fingerprint(self) -> str:
+        """Return the stable digest for this Contract's declared semantics."""
+        encoded = json.dumps(
+            self.model_dump(
+                mode="json",
+                exclude={"fingerprint", "configuration_fingerprint"},
+            ),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        """Recompute the digest when a frozen Contract is deliberately revised."""
+        semantic_fields = {
+            "contract_id",
+            "version",
+            "revision_stability",
+            "model_identity",
+            "capabilities",
+            "limits",
+            "input_sizer_id",
+            "serialization_id",
+            "usage_guarantees",
+        }
+        if update and semantic_fields.intersection(update):
+            values = self.model_dump()
+            values.update(update)
+            values["fingerprint"] = None
+            return type(self).model_validate(values)
+        return super().model_copy(update=update, deep=deep)
 
 
 class ModelRequirementMatch(BaseModel, frozen=True):
@@ -321,7 +396,9 @@ class ModelRequirements(BaseModel, frozen=True):
         ):
             if (
                 getattr(required, field).value != "NONE"
-                and getattr(required, field) != getattr(available, field)
+                and not _capability_mode_supports(
+                    field, getattr(available, field), getattr(required, field)
+                )
             ):
                 return ModelRequirementMatch(compatible=False, reason=reason)
         if not available.supports(required):
@@ -653,7 +730,7 @@ class ModelAdapter(ABC):
         )
 
     def definition_contract_fingerprint(self) -> str:
-        """Return stable, non-secret configuration identity for a Run Snapshot.
+        """Return the current non-secret provider configuration identity.
 
         Adapters whose behavior depends on configuration beyond capabilities
         must override this method. The default deliberately has no fingerprint:
@@ -732,13 +809,6 @@ class DeterministicModelAdapter(ModelAdapter):
     def model_contract(self) -> ModelContract:
         if self._model_contract is not None:
             return self._model_contract
-        encoded = json.dumps(
-            {
-                "capabilities": self.capabilities.model_dump(mode="json"),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
         return ModelContract(
             contract_id="deterministic",
             version="1",
@@ -751,7 +821,6 @@ class DeterministicModelAdapter(ModelAdapter):
             ),
             input_sizer_id="deterministic-v1",
             serialization_id="deterministic-text-v1",
-            fingerprint=hashlib.sha256(encoded).hexdigest(),
         )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:

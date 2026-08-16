@@ -1192,7 +1192,7 @@ class Runner:
         )
         if (
             configuration_fingerprint
-            and configuration_fingerprint != expected.fingerprint
+            and configuration_fingerprint != expected.configuration_fingerprint
         ):
             raise RuntimeError(
                 f"run {run.run_id} snapshot Model Contract does not "
@@ -1807,9 +1807,9 @@ class Runner:
                 tools=tuple(tool.spec() for tool in definition.tools),
                 tool_outcomes=tuple(tool_outcomes),
                 structured_output=(
-                    StructuredOutputMode.NATIVE
+                    binding.contract.capabilities.structured_output
                     if binding.requirements.capabilities.structured_output
-                    is StructuredOutputMode.NATIVE
+                    is not StructuredOutputMode.NONE
                     else StructuredOutputMode.NONE
                 ),
             )

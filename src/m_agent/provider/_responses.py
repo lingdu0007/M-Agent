@@ -54,13 +54,13 @@ from m_agent._errors import ModelContractViolationError
 RESPONSES_CAPABILITIES = ModelCapabilities(
     streaming=StreamingMode.DELTA,
     tool_calling=ToolCallingMode.NATIVE,
-    structured_output=StructuredOutputMode.NATIVE,
+    structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
     usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
     supported_combinations=(
         ModelCapabilityCombination(
             streaming=StreamingMode.DELTA,
             tool_calling=ToolCallingMode.NATIVE,
-            structured_output=StructuredOutputMode.NATIVE,
+            structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
             usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
         ),
     ),
@@ -131,16 +131,17 @@ class ResponsesModelAdapter(ProviderModelAdapter):
             payload["tools"] = [
                 tool_spec_to_responses_schema(spec) for spec in request.tools
             ]
-        structured = (
-            self._structured_output_responses_payload
-            if request.structured_output is StructuredOutputMode.NATIVE
-            else None
-        )
-        if request.structured_output is StructuredOutputMode.NATIVE and structured is None:
-            raise ModelContractViolationError(
-                "native structured output requires an adapter schema"
-            )
-        if structured is not None:
+        if request.structured_output is not StructuredOutputMode.NONE:
+            if request.structured_output is not StructuredOutputMode.JSON_SCHEMA_STRICT:
+                raise ModelContractViolationError(
+                    "Responses adapter does not provide the requested "
+                    "structured-output guarantee"
+                )
+            structured = self._structured_output_responses_payload
+            if structured is None:
+                raise ModelContractViolationError(
+                    "strict JSON Schema output requires an adapter schema"
+                )
             payload["text"] = {"format": structured}
         return payload
 

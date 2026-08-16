@@ -209,16 +209,18 @@ class DefinitionRegistry:
             )
         adapter = definition.model_adapter
         contract = adapter.model_contract
-        fingerprint = contract.fingerprint
-        if not adapter.deterministic and not fingerprint:
+        configuration_fingerprint = contract.configuration_fingerprint
+        if not adapter.deterministic and not configuration_fingerprint:
             raise ValueError(
                 f"live adapter {type(adapter).__name__} must declare a "
-                "non-empty definition contract fingerprint"
+                "non-empty definition contract configuration fingerprint"
             )
-        configuration_fingerprint = adapter.definition_contract_fingerprint()
+        current_configuration_fingerprint = (
+            adapter.definition_contract_fingerprint()
+        )
         if (
-            configuration_fingerprint
-            and configuration_fingerprint != fingerprint
+            current_configuration_fingerprint
+            and current_configuration_fingerprint != configuration_fingerprint
         ):
             raise ValueError(
                 f"adapter {type(adapter).__name__} configuration fingerprint "
