@@ -160,6 +160,84 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ).match(strict).compatible
         )
 
+    async def test_adapter_class_capability_ceiling_rejects_instance_contract(
+        self,
+    ) -> None:
+        from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionNotFoundError,
+            DefinitionRegistry,
+            ModelAdapter,
+            ModelCapabilities,
+            ModelCapabilityError,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+            StreamingMode,
+        )
+
+        contract = ModelContract(
+            contract_id="ceiling-mismatch",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="custom:ceiling-mismatch",
+            capabilities=ModelCapabilities(streaming=StreamingMode.DELTA),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="custom-sizer-v1",
+            serialization_id="custom-wire-v1",
+            configuration_fingerprint="custom-ceiling-mismatch-v1",
+        )
+
+        class CeilingMismatchAdapter(ModelAdapter):
+            capabilities = ModelCapabilities()
+
+            def __init__(self) -> None:
+                self.dispatches = 0
+
+            @property
+            def model_contract(self) -> ModelContract:
+                return contract
+
+            def definition_contract_fingerprint(self) -> str:
+                return "custom-ceiling-mismatch-v1"
+
+            async def generate(self, request) -> ModelResponse:
+                self.dispatches += 1
+                return ModelResponse(content="must not dispatch")
+
+        adapter = CeilingMismatchAdapter()
+        registry = DefinitionRegistry()
+        with self.assertRaisesRegex(
+            ModelCapabilityError, "STREAMING_UNSUPPORTED"
+        ):
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="ceiling-mismatch",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            streaming=StreamingMode.DELTA
+                        )
+                    ),
+                    model_adapter=adapter,
+                )
+            )
+        self.assertFalse(registry.is_registered("ceiling-mismatch", "1"))
+        self.assertEqual(adapter.dispatches, 0)
+
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+        with self.assertRaisesRegex(DefinitionNotFoundError, "ceiling-mismatch"):
+            await runner.create_run("ceiling-mismatch", "1", "hello")
+        self.assertEqual(adapter.dispatches, 0)
+
     def test_contract_identity_version_rejects_semantic_collision(self) -> None:
         """One contract id/version resolves to one frozen semantic Contract."""
         from m_agent.adapters import DeterministicModelAdapter

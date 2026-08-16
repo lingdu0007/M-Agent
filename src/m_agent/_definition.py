@@ -270,6 +270,15 @@ class DefinitionRegistry:
             adapter_contract = adapter_contracts.get(adapter_key)
             if adapter_contract is None:
                 adapter_contract = adapter.model_contract
+                ceiling_match = adapter.capabilities.capability_ceiling_match(
+                    adapter_contract.capabilities
+                )
+                if not ceiling_match.compatible:
+                    raise ModelCapabilityError(
+                        f"adapter {type(adapter).__name__} class capability "
+                        "ceiling is incompatible with its Model Contract: "
+                        f"reason_code={ceiling_match.reason.value}"
+                    )
                 configuration_fingerprint = adapter_contract.configuration_fingerprint
                 if not adapter.deterministic and not configuration_fingerprint:
                     raise ValueError(

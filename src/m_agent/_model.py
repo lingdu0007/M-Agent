@@ -223,6 +223,53 @@ class ModelCapabilities(_FrozenModelValue):
         )
         return modes_match and self._supports_combination(required)
 
+    def capability_ceiling_match(
+        self, declared: "ModelCapabilities"
+    ) -> "ModelRequirementMatch":
+        """Check every protocol the instance Contract declares against this ceiling."""
+        combinations = declared.supported_combinations or (
+            ModelCapabilityCombination(
+                streaming=declared.streaming,
+                tool_calling=declared.tool_calling,
+                structured_output=declared.structured_output,
+                usage_reporting=declared.usage_reporting,
+            ),
+        )
+        for combination in combinations:
+            values = combination.model_dump()
+            active = sum(value.value != "NONE" for value in values.values())
+            required = ModelCapabilities(
+                **values,
+                supported_combinations=(combination,) if active > 1 else (),
+            )
+            for field, reason in (
+                ("streaming", ModelRequirementReason.STREAMING_UNSUPPORTED),
+                ("tool_calling", ModelRequirementReason.TOOL_CALLING_UNSUPPORTED),
+                (
+                    "structured_output",
+                    ModelRequirementReason.STRUCTURED_OUTPUT_UNSUPPORTED,
+                ),
+                (
+                    "usage_reporting",
+                    ModelRequirementReason.USAGE_REPORTING_UNSUPPORTED,
+                ),
+            ):
+                if (
+                    getattr(required, field).value != "NONE"
+                    and not _capability_mode_supports(
+                        field, getattr(self, field), getattr(required, field)
+                    )
+                ):
+                    return ModelRequirementMatch(compatible=False, reason=reason)
+            if not self.supports(required):
+                return ModelRequirementMatch(
+                    compatible=False,
+                    reason=ModelRequirementReason.CAPABILITY_COMBINATION_UNSUPPORTED,
+                )
+        return ModelRequirementMatch(
+            compatible=True, reason=ModelRequirementReason.SATISFIED
+        )
+
     def merged_requirements(self, other: "ModelCapabilities") -> "ModelCapabilities":
         """Combine two minimum-capability declarations without weakening either."""
         values: dict[str, _CapabilityMode] = {}
