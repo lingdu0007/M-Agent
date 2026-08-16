@@ -904,8 +904,16 @@ class DeterministicModelAdapter(ModelAdapter):
     def model_contract(self) -> ModelContract:
         if self._model_contract is not None:
             return self._model_contract
+        capability_identity = hashlib.sha256(
+            json.dumps(
+                self.capabilities.model_dump(mode="json"),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()[:16]
         return ModelContract(
-            contract_id="deterministic",
+            contract_id=f"deterministic-{capability_identity}",
             version="1",
             revision_stability=RevisionStability.PINNED,
             model_identity="deterministic",
