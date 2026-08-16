@@ -154,6 +154,17 @@ class AgentDefinition(BaseModel, frozen=True):
             )
         )
 
+    @staticmethod
+    def _adapter_configuration_fingerprint(adapter: ModelAdapter) -> str:
+        fingerprint = adapter.definition_contract_fingerprint()
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            adapter_kind = "deterministic" if adapter.deterministic else "live"
+            raise ValueError(
+                f"{adapter_kind} adapter {type(adapter).__name__} must provide "
+                "a non-empty current configuration fingerprint"
+            )
+        return fingerprint
+
     def effective_model_bindings(self) -> ModelBindingSet:
         requirements = self.effective_model_requirements()
         contract = self.model_adapter.model_contract
@@ -167,7 +178,7 @@ class AgentDefinition(BaseModel, frozen=True):
         effective_primary = primary.model_copy(
             update={
                 "adapter_configuration_fingerprint": (
-                    self.model_adapter.definition_contract_fingerprint() or None
+                    self._adapter_configuration_fingerprint(self.model_adapter)
                 ),
                 "requirements": primary.requirements.merged_with(
                     requirements
@@ -188,10 +199,9 @@ class AgentDefinition(BaseModel, frozen=True):
                 else binding.model_copy(
                     update={
                         "adapter_configuration_fingerprint": (
-                            self.model_adapter_for(
-                                binding.purpose
-                            ).definition_contract_fingerprint()
-                            or None
+                            self._adapter_configuration_fingerprint(
+                                self.model_adapter_for(binding.purpose)
+                            )
                         ),
                         "requirements": binding.requirements.effective_for(
                             binding.contract
@@ -286,14 +296,9 @@ class DefinitionRegistry:
                         "non-empty definition contract configuration fingerprint"
                     )
                 current_configuration_fingerprint = (
-                    adapter.definition_contract_fingerprint()
+                    definition._adapter_configuration_fingerprint(adapter)
                 )
                 if not adapter.deterministic:
-                    if not current_configuration_fingerprint:
-                        raise ValueError(
-                            f"live adapter {type(adapter).__name__} must provide a "
-                            "non-empty current configuration fingerprint"
-                        )
                     if current_configuration_fingerprint != configuration_fingerprint:
                         raise ValueError(
                             f"adapter {type(adapter).__name__} configuration "

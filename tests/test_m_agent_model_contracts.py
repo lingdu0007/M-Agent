@@ -1174,7 +1174,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 1)
 
-    async def test_json_object_response_rejects_non_json_output(self) -> None:
+    async def test_json_object_response_rejects_invalid_json_output(self) -> None:
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -1205,32 +1205,108 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             input_sizer_id="deterministic-v1",
             serialization_id="deterministic-text-v1",
         )
-        adapter = DeterministicModelAdapter(("not-json",), model_contract=contract)
-        registry = DefinitionRegistry()
-        registry.register(
-            AgentDefinition.for_adapter(
-                definition_id="json-object-output",
-                version="1",
-                instructions="Return a JSON object.",
-                model_requirements=ModelRequirements(
-                    capabilities=ModelCapabilities(
-                        structured_output=StructuredOutputMode.JSON_OBJECT
+        for content in ("not-json", '{"value":NaN}'):
+            with self.subTest(content=content):
+                adapter = DeterministicModelAdapter(
+                    (content,), model_contract=contract
+                )
+                registry = DefinitionRegistry()
+                registry.register(
+                    AgentDefinition.for_adapter(
+                        definition_id="json-object-output",
+                        version="1",
+                        instructions="Return a JSON object.",
+                        model_requirements=ModelRequirements(
+                            capabilities=ModelCapabilities(
+                                structured_output=StructuredOutputMode.JSON_OBJECT
+                            )
+                        ),
+                        model_adapter=adapter,
                     )
-                ),
-                model_adapter=adapter,
-            )
+                )
+                runner = Runner(
+                    registry=registry,
+                    store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+                )
+
+                created = await runner.create_run(
+                    "json-object-output", "1", "hello"
+                )
+                terminal = await runner.start_run(created.run_id)
+
+                self.assertIs(terminal.status, RunStatus.FAILED)
+                self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+                self.assertEqual(adapter.call_count, 1)
+
+    async def test_custom_deterministic_adapter_requires_binding_fingerprint(
+        self,
+    ) -> None:
+        """A raw deterministic adapter cannot opt out of frozen behavior."""
+        from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionNotFoundError,
+            DefinitionRegistry,
+            ModelAdapter,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelResponse,
+            RevisionStability,
+            Runner,
         )
+
+        contract = ModelContract(
+            contract_id="unfingerprinted-deterministic",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:custom",
+            capabilities=ModelCapabilities(),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+
+        class MutableDeterministicAdapter(ModelAdapter):
+            deterministic = True
+            capabilities = contract.capabilities
+
+            def __init__(self) -> None:
+                self.answer = "frozen"
+                self.call_count = 0
+
+            @property
+            def model_contract(self) -> ModelContract:
+                return contract
+
+            async def generate(self, request) -> ModelResponse:
+                self.call_count += 1
+                return ModelResponse(content=self.answer)
+
+        adapter = MutableDeterministicAdapter()
+        registry = DefinitionRegistry()
+        with self.assertRaisesRegex(
+            ValueError, "deterministic adapter.*current configuration fingerprint"
+        ):
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="unfingerprinted-deterministic",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_adapter=adapter,
+                )
+            )
+        adapter.answer = "drifted"
+        self.assertFalse(registry.is_registered("unfingerprinted-deterministic", "1"))
         runner = Runner(
             registry=registry,
             store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
         )
-
-        created = await runner.create_run("json-object-output", "1", "hello")
-        terminal = await runner.start_run(created.run_id)
-
-        self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
-        self.assertEqual(adapter.call_count, 1)
+        with self.assertRaisesRegex(
+            DefinitionNotFoundError, "unfingerprinted-deterministic"
+        ):
+            await runner.create_run("unfingerprinted-deterministic", "1", "hello")
+        self.assertEqual(adapter.call_count, 0)
 
     async def test_streaming_response_tool_call_requires_declared_combination(
         self,

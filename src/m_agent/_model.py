@@ -761,6 +761,10 @@ class ModelResponse(_FrozenModelValue):
     actual_revision: str | None = None
 
 
+def _reject_non_standard_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 def normalize_model_response(
     contract: ModelContract,
     response: ModelResponse,
@@ -863,8 +867,11 @@ def normalize_model_response(
         )
     ):
         try:
-            structured = json.loads(response.content or "")
-        except json.JSONDecodeError as exc:
+            structured = json.loads(
+                response.content or "",
+                parse_constant=_reject_non_standard_json_constant,
+            )
+        except (TypeError, ValueError) as exc:
             raise ModelContractViolationError(
                 "structured response is not valid JSON"
             ) from exc
@@ -975,9 +982,10 @@ class ModelAdapter(ABC):
     def definition_contract_fingerprint(self) -> str:
         """Return the current non-secret provider configuration identity.
 
-        Live adapters must override this method with a stable, non-empty
-        fingerprint. The empty default is reserved for deterministic test
-        doubles, whose behavior is not a provider deployment contract.
+        Adapters must override this method with a stable, non-empty fingerprint
+        before they can be frozen into a Definition. The empty default produces
+        a registration error; :class:`DeterministicModelAdapter` supplies an
+        implementation for built-in deterministic test doubles.
         """
         return ""
 
