@@ -160,6 +160,53 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ).match(strict).compatible
         )
 
+    def test_contract_identity_version_rejects_semantic_collision(self) -> None:
+        """One contract id/version resolves to one frozen semantic Contract."""
+        from m_agent.adapters import DeterministicModelAdapter
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionConflictError,
+            DefinitionRegistry,
+            ModelContract,
+            ModelLimits,
+            RevisionStability,
+        )
+
+        contract = ModelContract(
+            contract_id="shared-contract",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:shared-contract",
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+        changed_limits = contract.model_copy(
+            update={
+                "limits": ModelLimits(
+                    context_window_tokens=256, max_output_tokens=32
+                )
+            }
+        )
+        registry = DefinitionRegistry()
+
+        def definition(definition_id: str, bound_contract: ModelContract):
+            return AgentDefinition.for_adapter(
+                definition_id=definition_id,
+                version="1",
+                instructions="Reply.",
+                model_adapter=DeterministicModelAdapter(
+                    ("answer",), model_contract=bound_contract
+                ),
+            )
+
+        registry.register(definition("first-contract-user", contract))
+        registry.register(definition("second-contract-user", contract))
+        with self.assertRaisesRegex(DefinitionConflictError, "shared-contract@1"):
+            registry.register(definition("conflicting-contract-user", changed_limits))
+
+        self.assertFalse(registry.is_registered("conflicting-contract-user", "1"))
+
     def test_usage_value_cannot_claim_unavailable_provenance(self) -> None:
         from pydantic import ValidationError
 
@@ -1009,7 +1056,9 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 1)
 
-    async def test_streaming_uses_requirement_selected_usage_mode(self) -> None:
+    async def test_streaming_provider_usage_requires_declared_combination(
+        self,
+    ) -> None:
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -1094,7 +1143,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         created = await runner.create_run("stream-usage-split", "1", "hello")
         terminal = await runner.start_run(created.run_id)
 
-        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 1)
         assert adapter.last_request is not None
         self.assertIs(

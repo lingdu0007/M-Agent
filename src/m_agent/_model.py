@@ -672,6 +672,19 @@ def normalize_model_response(
         raise ModelContractViolationError(
             "Model Contract does not declare native tool calling"
         )
+    usage = response.usage
+    fields = (
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens",
+    )
+    provider_reported = usage is not None and any(
+        getattr(usage, field) is not None
+        and getattr(usage, f"{field}_provenance")
+        is UsageProvenance.PROVIDER_REPORTED
+        for field in fields
+    )
     values = {
         "streaming": StreamingMode.DELTA if streaming else StreamingMode.NONE,
         "tool_calling": (
@@ -680,7 +693,11 @@ def normalize_model_response(
             else ToolCallingMode.NONE
         ),
         "structured_output": request.structured_output,
-        "usage_reporting": request.usage_reporting,
+        "usage_reporting": (
+            UsageReportingMode.PROVIDER_REPORTED
+            if provider_reported
+            else request.usage_reporting
+        ),
     }
     active = sum(mode.value != "NONE" for mode in values.values())
     response_modes = ModelCapabilities(
@@ -711,14 +728,7 @@ def normalize_model_response(
             raise ModelContractViolationError(
                 "structured response must be a JSON object"
             )
-    usage = response.usage
     guarantees = contract.usage_guarantees
-    fields = (
-        "input_tokens",
-        "output_tokens",
-        "cached_input_tokens",
-        "reasoning_tokens",
-    )
     if usage is None:
         missing = [
             field
@@ -732,12 +742,6 @@ def normalize_model_response(
         return response.model_copy(
             update={"usage": ModelUsage(provenance=UsageProvenance.UNAVAILABLE)}
         )
-    provider_reported = any(
-        getattr(usage, field) is not None
-        and getattr(usage, f"{field}_provenance")
-        is UsageProvenance.PROVIDER_REPORTED
-        for field in fields
-    )
     if (
         contract.capabilities.usage_reporting is UsageReportingMode.NONE
         and provider_reported

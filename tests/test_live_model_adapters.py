@@ -414,12 +414,13 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         def contract(
             adapter: ChatCompletionsModelAdapter,
             *,
+            version: str,
             max_output_tokens: int,
             input_tokens: UsageFieldGuarantee,
         ) -> ModelContract:
             return ModelContract(
                 contract_id="same-deployment",
-                version="1",
+                version=version,
                 revision_stability=RevisionStability.PINNED,
                 model_identity=adapter.model,
                 capabilities=adapter.capabilities,
@@ -449,11 +450,13 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         )
         first_contract = contract(
             first_probe,
+            version="1",
             max_output_tokens=32,
             input_tokens=UsageFieldGuarantee.OPTIONAL,
         )
         second_contract = contract(
             second_probe,
+            version="2",
             max_output_tokens=64,
             input_tokens=UsageFieldGuarantee.REQUIRED,
         )

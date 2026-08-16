@@ -193,6 +193,7 @@ class DefinitionRegistry:
 
     def __init__(self) -> None:
         self._definitions: dict[tuple[str, str], AgentDefinition] = {}
+        self._contract_fingerprints: dict[tuple[str, str], str] = {}
 
     def register(self, definition: AgentDefinition) -> None:
         """注册一个不可变 Definition，并在注册时校验能力兼容性。
@@ -233,6 +234,7 @@ class DefinitionRegistry:
             bindings = definition.effective_model_bindings()
         except ModelCapabilityError:
             raise
+        contract_fingerprints = dict(self._contract_fingerprints)
         for binding in bindings.bindings:
             match = binding.requirements.match(binding.contract)
             if not match.compatible:
@@ -242,7 +244,22 @@ class DefinitionRegistry:
                     f"is incompatible with {binding.purpose.value} Model Contract: "
                     f"reason_code={missing}"
                 )
+            contract_key = (
+                binding.contract.contract_id,
+                binding.contract.version,
+            )
+            fingerprint = binding.contract.fingerprint
+            assert fingerprint is not None
+            existing = contract_fingerprints.get(contract_key)
+            if existing is not None and existing != fingerprint:
+                raise DefinitionConflictError(
+                    "Model Contract "
+                    f"{binding.contract.contract_id}@{binding.contract.version} "
+                    "is already registered with different immutable semantics"
+                )
+            contract_fingerprints[contract_key] = fingerprint
         self._definitions[key] = definition
+        self._contract_fingerprints = contract_fingerprints
 
     def resolve(self, definition_id: str, version: str) -> AgentDefinition:
         """按精确 id + version 解析；不匹配抛 DefinitionNotFoundError。"""
