@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ._context import ContextProvider
 from ._errors import (
@@ -64,7 +64,12 @@ class DefinitionSnapshot(BaseModel, frozen=True):
     instructions: str
     #: 完整、已解析的用途绑定；PRIMARY reuse 也以明确的 source_purpose
     #: 持久化，恢复无需重新选择模型。
-    model_bindings: ModelBindingSet
+    model_bindings: ModelBindingSet | None = None
+    #: Temporary 0.2 snapshot fields. A snapshot without bindings remains a
+    #: legacy snapshot and is verified using exactly its persisted evidence.
+    required_capabilities: ModelCapabilities | None = None
+    adapter_capabilities: ModelCapabilities | None = None
+    adapter_contract_fingerprint: str = ""
     #: Run 级与用途级模型 dispatch 尝试硬上限。
     model_execution_budget: ModelExecutionBudget = Field(
         default_factory=ModelExecutionBudget
@@ -81,6 +86,17 @@ class DefinitionSnapshot(BaseModel, frozen=True):
     #: （ADR 0022/0023）。None 表示该 Run 不自动重试。
     retry_policy: RetryPolicy | None = None
 
+    @model_validator(mode="after")
+    def _validate_model_snapshot_shape(self) -> "DefinitionSnapshot":
+        if self.model_bindings is None and (
+            self.required_capabilities is None
+            or self.adapter_capabilities is None
+        ):
+            raise ValueError(
+                "legacy DefinitionSnapshot requires persisted Model Capabilities"
+            )
+        return self
+
 
 class AgentDefinition(BaseModel, frozen=True):
     """不可变、带版本的 Agent 行为与能力声明。
@@ -95,8 +111,14 @@ class AgentDefinition(BaseModel, frozen=True):
     version: str
     instructions: str
     model_requirements: ModelRequirements = Field(default_factory=ModelRequirements)
-    #: Each purpose must be selected at definition construction.  Callers that
-    #: intentionally reuse PRIMARY can use :meth:`for_adapter` explicitly.
+    #: Temporary 0.2 alias. Ticket 11 removes this at the explicit 0.3
+    #: contract transition; typed requirements remain the internal source.
+    required_capabilities: ModelCapabilities = Field(
+        default_factory=ModelCapabilities
+    )
+    #: Each purpose is persisted explicitly. During the 0.2 expand window an
+    #: omitted value is normalized to PRIMARY reuse; new callers can make that
+    #: choice visible with :meth:`for_adapter`.
     model_bindings: ModelBindingSet
     model_execution_budget: ModelExecutionBudget = Field(
         default_factory=ModelExecutionBudget
@@ -122,13 +144,38 @@ class AgentDefinition(BaseModel, frozen=True):
     #: 随 Snapshot 一起冻结、持久化（不 exclude），恢复决策只读快照。
     retry_policy: RetryPolicy | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_model_definition(cls, value: object) -> object:
+        """Accept 0.2 construction while retaining typed internal bindings."""
+        if not isinstance(value, Mapping):
+            return value
+        values = dict(value)
+        required_capabilities = ModelCapabilities.model_validate(
+            values.get("required_capabilities", ModelCapabilities())
+        )
+        requirements = ModelRequirements.model_validate(
+            values.get("model_requirements", ModelRequirements())
+        ).merged_with(
+            ModelRequirements(capabilities=required_capabilities)
+        )
+        values["required_capabilities"] = required_capabilities
+        values["model_requirements"] = requirements
+        if values.get("model_bindings") is None:
+            adapter = values.get("model_adapter")
+            if isinstance(adapter, ModelAdapter):
+                values["model_bindings"] = ModelBindingSet.reuse_primary(
+                    adapter.model_contract, requirements
+                )
+        return values
+
     @classmethod
     def for_adapter(cls, **values: Any) -> "AgentDefinition":
         """Build a Definition with an explicit complete PRIMARY-reuse set.
 
-        This compact construction helper makes the otherwise implicit choice
-        visible at the call site while preserving a complete frozen snapshot.
-        Explicit ``model_bindings`` always take precedence.
+        This compact construction helper makes PRIMARY reuse visible at the
+        call site while preserving a complete frozen snapshot. Explicit
+        ``model_bindings`` always take precedence.
         """
         if values.get("model_bindings") is None:
             adapter = values.get("model_adapter")
@@ -256,6 +303,11 @@ class AgentDefinition(BaseModel, frozen=True):
             version=self.version,
             instructions=self.instructions,
             model_bindings=self.effective_model_bindings(),
+            required_capabilities=self.required_capabilities,
+            adapter_capabilities=self.model_adapter.capabilities,
+            adapter_contract_fingerprint=(
+                self.model_adapter.definition_contract_fingerprint()
+            ),
             model_execution_budget=self.model_execution_budget,
             has_context_provider=self.context_provider is not None,
             tool_declarations=tuple(

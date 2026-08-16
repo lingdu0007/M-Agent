@@ -37,6 +37,10 @@ from ._tools import ToolCall, ToolOutcome, ToolSpec
 class _CapabilityMode(str, enum.Enum):
     """Base type for explicit model capability modes."""
 
+    def __bool__(self) -> bool:
+        """Retain 0.2 truthiness while the package remains in its expand window."""
+        return self.value != "NONE"
+
 
 class StreamingMode(_CapabilityMode):
     NONE = "NONE"
@@ -140,8 +144,8 @@ class ModelCapabilities(_FrozenModelValue):
     """Typed Model Contract capability modes.
 
     Stored contracts and Runner decisions always contain the explicit modes
-    below. Boolean capability declarations are intentionally not accepted:
-    the 0.3 contract is a one-time public API replacement.
+    below. During the 0.2 expand window, legacy boolean inputs are normalized
+    at this boundary; the persisted value is always the typed representation.
     """
 
     streaming: StreamingMode = StreamingMode.NONE
@@ -154,6 +158,40 @@ class ModelCapabilities(_FrozenModelValue):
     supported_combinations: tuple[ModelCapabilityCombination, ...] = Field(
         default_factory=tuple
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_boolean_modes(cls, value: object) -> object:
+        """Translate the temporary 0.2 boolean surface into typed modes."""
+        if not isinstance(value, Mapping):
+            return value
+        normalized = dict(value)
+        legacy_modes: tuple[tuple[str, _CapabilityMode], ...] = (
+            ("streaming", StreamingMode.DELTA),
+            ("tool_calling", ToolCallingMode.NATIVE),
+            ("structured_output", StructuredOutputMode.JSON_OBJECT),
+            ("usage_reporting", UsageReportingMode.PROVIDER_REPORTED),
+        )
+        legacy_input = False
+        for field, enabled_mode in legacy_modes:
+            if type(normalized.get(field)) is bool:
+                normalized[field] = (
+                    enabled_mode if normalized[field] else type(enabled_mode).NONE
+                )
+                legacy_input = True
+        if legacy_input and "supported_combinations" not in normalized:
+            combination = ModelCapabilityCombination.model_validate(
+                {
+                    field: normalized.get(field, type(mode).NONE)
+                    for field, mode in legacy_modes
+                }
+            )
+            if sum(
+                getattr(combination, field).value != "NONE"
+                for field, _ in legacy_modes
+            ) > 1:
+                normalized["supported_combinations"] = (combination,)
+        return normalized
 
     @model_validator(mode="after")
     def _validate_supported_combinations(self) -> "ModelCapabilities":

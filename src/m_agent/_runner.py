@@ -1186,6 +1186,27 @@ class Runner:
                 "refusing to adopt current definition semantics"
             )
         expected_bindings = snapshot.model_bindings
+        if expected_bindings is None:
+            # 0.2 snapshots predate purpose bindings. Retain their original
+            # configuration check rather than inferring a new frozen binding.
+            if not snapshot.adapter_contract_fingerprint:
+                return
+            if snapshot.adapter_capabilities != definition.model_adapter.capabilities:
+                raise RuntimeError(
+                    f"run {run.run_id} legacy snapshot Model Capabilities do not "
+                    "match the resolved adapter; refusing to silently change "
+                    "recovery behavior"
+                )
+            if (
+                definition.model_adapter.definition_contract_fingerprint()
+                != snapshot.adapter_contract_fingerprint
+            ):
+                raise RuntimeError(
+                    f"run {run.run_id} legacy snapshot Model Contract does not "
+                    "match the resolved adapter configuration; refusing to "
+                    "silently change recovery behavior"
+                )
+            return
         if expected_bindings != definition.effective_model_bindings():
             raise RuntimeError(
                 f"run {run.run_id} snapshot Model Contract Binding set does not "
@@ -1320,6 +1341,7 @@ class Runner:
                     StepType.MODEL,
                     attempt_id=inflight_model_attempt.attempt_id,
                     model_purpose=inflight_model_attempt.model_purpose,
+                    usage=inflight_model_attempt.usage,
                 )
             await self._record_failed_step(
                 run, lease, inflight_model_step.step_id, StepType.MODEL
@@ -1818,7 +1840,8 @@ class Runner:
         policy = run.snapshot.retry_policy
         purpose = ModelPurpose.PRIMARY
         adapter = definition.model_adapter_for(purpose)
-        binding = run.snapshot.model_bindings.for_purpose(purpose)
+        bindings = run.snapshot.model_bindings or definition.effective_model_bindings()
+        binding = bindings.for_purpose(purpose)
         model_contract = binding.contract
         streaming = (
             binding.requirements.capabilities.streaming is StreamingMode.DELTA
@@ -1901,6 +1924,7 @@ class Runner:
             )
             terminal_error_code: str | None = None
             reserved = False
+            succeeded_attempt: StepAttempt | None = None
             try:
                 # STEP_STARTED telemetry 是应用回调；它返回后再次校验，
                 # 使 guard 紧贴真正的 Model dispatch。
@@ -2008,6 +2032,11 @@ class Runner:
                         StepType.MODEL,
                         attempt_id=attempt_id,
                         model_purpose=purpose,
+                        usage=(
+                            succeeded_attempt.usage
+                            if succeeded_attempt is not None
+                            else None
+                        ),
                     )
                 # 已 dispatch 的 Model 调用已经如实形成失败 Attempt；
                 # 取消请求到达时不启动 retry，也不以 FAILED 覆盖取消。
@@ -2064,6 +2093,7 @@ class Runner:
                 expected_version=run.version,
                 lease_owner=lease.owner,
             )
+            succeeded_attempt = attempt
             await self._store.record_checkpoint(
                 StepCheckpoint(
                     run_id=run.run_id,
@@ -2434,6 +2464,7 @@ class Runner:
         step_type: StepType,
         attempt_id: str | None = None,
         model_purpose: ModelPurpose | None = None,
+        usage: ModelUsage | None = None,
     ) -> None:
         """记录一次失败 Step Attempt，保留分类 / 错误标识 / 时间证据。
 
@@ -2458,6 +2489,7 @@ class Runner:
                 classification=classification,
                 error_code=code,
                 model_purpose=model_purpose,
+                usage=usage,
             ),
             expected_version=run.version,
             lease_owner=lease.owner,

@@ -18,24 +18,151 @@ _CRASH_EXIT_CODE = 17
 
 
 class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
-    def test_legacy_boolean_capabilities_and_definition_field_are_rejected(
+    async def test_legacy_boolean_capabilities_and_definition_field_remain_supported(
         self,
     ) -> None:
-        from pydantic import ValidationError
+        from m_agent import (
+            AgentDefinition,
+            DeterministicModelAdapter,
+            DefinitionRegistry,
+            InMemoryRunStore,
+            ModelCapabilities,
+            PlaintextPayloadCodec,
+            Runner,
+            RunStatus,
+        )
+        from m_agent.runtime import ModelPurpose, ToolCallingMode
 
-        from m_agent.adapters import DeterministicModelAdapter
-        from m_agent.runtime import AgentDefinition, ModelCapabilities
+        capabilities = ModelCapabilities(tool_calling=True)
+        self.assertIs(capabilities.tool_calling, ToolCallingMode.NATIVE)
+        self.assertFalse(bool(ModelCapabilities().tool_calling))
+        self.assertEqual(
+            len(
+                ModelCapabilities(
+                    streaming=True, tool_calling=True
+                ).supported_combinations
+            ),
+            1,
+        )
+        adapter = DeterministicModelAdapter(
+            ("answer",), capabilities=capabilities
+        )
+        definition = AgentDefinition(
+            definition_id="legacy-capabilities",
+            version="1",
+            instructions="Reply.",
+            required_capabilities=capabilities,
+            model_adapter=adapter,
+        )
+        registry = DefinitionRegistry()
+        registry.register(definition)
+        runner = Runner(
+            registry, InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        )
 
-        with self.assertRaises(ValidationError):
-            ModelCapabilities(tool_calling=True)
-        with self.assertRaises(ValidationError):
-            AgentDefinition.for_adapter(
-                definition_id="legacy-capabilities",
-                version="1",
-                instructions="Reply.",
-                required_capabilities=ModelCapabilities(),
-                model_adapter=DeterministicModelAdapter(),
+        created = await runner.create_run("legacy-capabilities", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        assert created.snapshot is not None
+        self.assertIs(
+            created.snapshot.model_bindings.for_purpose(
+                ModelPurpose.PRIMARY
+            ).requirements.capabilities.tool_calling,
+            ToolCallingMode.NATIVE,
+        )
+
+    async def test_legacy_sqlite_snapshot_is_migrated_and_runs(self) -> None:
+        import json
+        import sqlite3
+
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            Runner,
+            RunStatus,
+        )
+
+        capabilities = ModelCapabilities(tool_calling=True)
+        adapter = DeterministicModelAdapter(
+            ("answer",), capabilities=capabilities
+        )
+        definition = AgentDefinition(
+            definition_id="legacy-sqlite-snapshot",
+            version="1",
+            instructions="Reply.",
+            required_capabilities=capabilities,
+            model_adapter=adapter,
+        )
+        registry = DefinitionRegistry()
+        registry.register(definition)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "legacy-snapshot.db")
+            store = SQLiteRunStore(db_path, payload_codec=PlaintextPayloadCodec())
+            try:
+                created = await Runner(registry, store).create_run(
+                    "legacy-sqlite-snapshot", "1", "hello"
+                )
+            finally:
+                store.close()
+
+            legacy_snapshot = {
+                "definition_id": definition.definition_id,
+                "version": definition.version,
+                "instructions": definition.instructions,
+                "required_capabilities": {
+                    "streaming": False,
+                    "tool_calling": True,
+                    "structured_output": False,
+                    "usage_reporting": False,
+                },
+                "adapter_capabilities": {
+                    "streaming": False,
+                    "tool_calling": True,
+                    "structured_output": False,
+                    "usage_reporting": False,
+                },
+                "adapter_contract_fingerprint": (
+                    adapter.definition_contract_fingerprint()
+                ),
+                "has_context_provider": False,
+                "tool_declarations": [],
+                "retry_policy": None,
+            }
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.execute(
+                    "UPDATE runs SET snapshot_json=? WHERE run_id=?",
+                    (json.dumps(legacy_snapshot), created.run_id),
+                )
+                connection.execute(
+                    "DELETE FROM run_payloads WHERE run_id=? AND field=?",
+                    (created.run_id, "run:snapshot"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = SQLiteRunStore(
+                db_path, payload_codec=PlaintextPayloadCodec()
             )
+            try:
+                migrated = await reopened.get_run(created.run_id)
+                assert migrated is not None
+                assert migrated.snapshot is not None
+                self.assertIsNone(migrated.snapshot.model_bindings)
+                terminal = await Runner(registry, reopened).start_run(created.run_id)
+            finally:
+                reopened.close()
+
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
 
     def test_live_contract_metadata_is_explicit_and_coherent(self) -> None:
         from pydantic import ValidationError
@@ -615,13 +742,18 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValidationError):
             ModelBindingSet(bindings=(primary,))
-        with self.assertRaises(ValidationError):
-            AgentDefinition(
-                definition_id="implicit-primary-reuse",
-                version="1",
-                instructions="Never select a binding implicitly.",
-                model_adapter=DeterministicModelAdapter(),
-            )
+        legacy_definition = AgentDefinition(
+            definition_id="implicit-primary-reuse",
+            version="1",
+            instructions="Use the temporary 0.2 primary reuse path.",
+            model_adapter=DeterministicModelAdapter(),
+        )
+        self.assertIs(
+            legacy_definition.model_bindings.for_purpose(
+                ModelPurpose.CONTEXT_COMPRESSION
+            ).source_purpose,
+            ModelPurpose.PRIMARY,
+        )
         bindings = ModelBindingSet(
             bindings=(
                 primary,
@@ -3737,10 +3869,13 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
+            ModelResponse,
+            ModelUsage,
             Runner,
             RunStatus,
             StepStatus,
             StepType,
+            UsageProvenance,
         )
 
         class FailingCheckpointStore:
@@ -3761,8 +3896,22 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         class FailingSQLiteStore(FailingCheckpointStore, SQLiteRunStore):
             pass
 
+        usage = ModelUsage(
+            input_tokens=11,
+            output_tokens=7,
+            provenance=UsageProvenance.RUNTIME_SIZED,
+            raw_unit="tokens",
+            normalization_source="runtime-sizer-v1",
+        )
+
+        class UsageAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                self.call_count += 1
+                self._last_request = request
+                return ModelResponse(content="answer", usage=usage)
+
         def registry_and_adapter():
-            adapter = DeterministicModelAdapter(("answer",))
+            adapter = UsageAdapter(("unused",))
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition.for_adapter(
@@ -3784,6 +3933,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "checkpoint persistence"):
             await Runner(registry, memory_store).start_run(created.run_id)
+        before_recovery = await Runner(registry, memory_store).inspect_run(
+            created.run_id
+        )
+        self.assertEqual(before_recovery.attempts[0].usage, usage)
         clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
         terminal = await Runner(registry, memory_store).resume_run(created.run_id)
         inspection = await Runner(registry, memory_store).inspect_run(
@@ -3797,6 +3950,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             [attempt.status for attempt in inspection.attempts],
             [StepStatus.FAILED],
         )
+        self.assertEqual(inspection.attempts[0].usage, usage)
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "run.db")
@@ -3815,6 +3969,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     RuntimeError, "checkpoint persistence"
                 ):
                     await Runner(registry, first_store).start_run(created.run_id)
+                before_recovery = await Runner(
+                    registry, first_store
+                ).inspect_run(created.run_id)
+                self.assertEqual(before_recovery.attempts[0].usage, usage)
                 crashed = await first_store.get_run(created.run_id)
                 assert crashed is not None
                 assert crashed.lease_expires_at is not None
@@ -3849,6 +4007,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 [attempt.status for attempt in inspection.attempts],
                 [StepStatus.FAILED],
             )
+            self.assertEqual(inspection.attempts[0].usage, usage)
 
     async def test_recovery_never_replays_checkpoint_unconfirmed_attempt(
         self,
