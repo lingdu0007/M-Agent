@@ -160,6 +160,7 @@ _EXPAND_RUNTIME_EXPORTS = (
     "ModelAdapter",
     "ModelBinding",
     "ModelBindingSet",
+    "ModelCapabilityCombination",
     "ModelCapabilities",
     "ModelCapabilityError",
     "ModelContract",
