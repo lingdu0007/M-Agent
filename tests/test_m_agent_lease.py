@@ -97,7 +97,7 @@ def make_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
@@ -170,7 +170,7 @@ def make_tool_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Use the declared tool.",
@@ -469,7 +469,7 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             model = DeterministicModelAdapter(responses=(_ANSWER,))
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="assistant",
                     version="1.0",
                     instructions="Answer deterministically.",

@@ -114,7 +114,7 @@ class IdentityObservingProvider(DeterministicContextProvider):
 def make_context_definition(
     provider: ContextProvider | None,
 ) -> AgentDefinition:
-    return AgentDefinition(
+    return AgentDefinition.for_adapter(
         definition_id="assistant",
         version="1.0",
         instructions="Answer deterministically.",
@@ -326,7 +326,7 @@ class ProviderFailureTests(unittest.IsolatedAsyncioTestCase):
         registry = DefinitionRegistry()
         adapter = DeterministicModelAdapter(responses=("never used",))
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="x",
@@ -371,7 +371,7 @@ class ProviderFailureTests(unittest.IsolatedAsyncioTestCase):
         registry = DefinitionRegistry()
         adapter = DeterministicModelAdapter(responses=("never used",))
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="x",
@@ -421,7 +421,7 @@ class ContextPayloadSecurityTests(unittest.IsolatedAsyncioTestCase):
             db_path = os.path.join(tmp, "context.db")
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="assistant",
                     version="1.0",
                     instructions="Answer only from data.",

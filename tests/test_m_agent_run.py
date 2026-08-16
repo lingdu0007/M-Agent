@@ -40,7 +40,7 @@ from m_agent import (
 def make_registry() -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
@@ -116,7 +116,7 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
     def test_register_and_resolve_by_exact_id_and_version(self) -> None:
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="v1 instructions",
@@ -124,7 +124,7 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="2.0",
                 instructions="v2 instructions",
@@ -148,7 +148,7 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         registry = DefinitionRegistry()
-        definition = AgentDefinition(
+        definition = AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="v1",
@@ -164,7 +164,7 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
         adapter = DeterministicModelAdapter(
             responses=("a",), capabilities=ModelCapabilities()
         )
-        definition = AgentDefinition(
+        definition = AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="v1",
@@ -204,7 +204,7 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
-        definition = AgentDefinition(
+        definition = AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="v1",
@@ -344,7 +344,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="x",

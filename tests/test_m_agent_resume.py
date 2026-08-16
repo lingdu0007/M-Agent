@@ -67,7 +67,7 @@ def build_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version=version,
             instructions=f"Answer deterministically ({version}).",
@@ -278,7 +278,7 @@ class DefinitionUnavailableTests(unittest.IsolatedAsyncioTestCase):
                 # 应用恢复精确旧版本后，普通公开 resume 才重新进入
                 # recovery 路径；无需也不得通过 resolution 伪造 Tool 处置。
                 registry.register(
-                    AgentDefinition(
+                    AgentDefinition.for_adapter(
                         definition_id="assistant",
                         version="1.0",
                         instructions="Answer deterministically (1.0).",
@@ -374,7 +374,7 @@ class ResumeContractTests(unittest.IsolatedAsyncioTestCase):
     ) -> tuple[Runner, DefinitionRegistry, InMemoryRunStore]:
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="Answer deterministically.",

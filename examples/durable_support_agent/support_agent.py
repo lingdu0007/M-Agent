@@ -408,7 +408,7 @@ def build_registry(
     os.makedirs(logs_dir, exist_ok=True)
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id=DEFINITION_ID,
             version=DEFINITION_VERSION,
             instructions=(

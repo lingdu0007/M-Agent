@@ -93,6 +93,7 @@ from ._model import (
     ModelRequest,
     ModelResponse,
     StreamingMode,
+    StructuredOutputMode,
     assert_model_request_compatible,
     deserialize_model_response,
     normalize_model_response,
@@ -1006,7 +1007,7 @@ class Runner:
                 elif isinstance(event, ModelResponse):
                     return event
                 else:
-                    raise TypeError(
+                    raise ModelContractViolationError(
                         f"stream adapter {type(adapter).__name__} yielded "
                         f"{type(event).__name__}, expected ModelDelta or "
                         "ModelResponse"
@@ -1018,7 +1019,7 @@ class Runner:
                 await generator.aclose()
             except (RuntimeError, StopAsyncIteration):
                 pass
-        raise RuntimeError(
+        raise ModelContractViolationError(
             f"stream adapter {type(adapter).__name__} ended without "
             "yielding a complete ModelResponse"
         )
@@ -1185,6 +1186,18 @@ class Runner:
                 f"run {run.run_id} snapshot Model Contract does not "
                 "match the resolved definition; refusing to silently change "
                 "recovery behavior"
+            )
+        configuration_fingerprint = (
+            definition.model_adapter.definition_contract_fingerprint()
+        )
+        if (
+            configuration_fingerprint
+            and configuration_fingerprint != expected.fingerprint
+        ):
+            raise RuntimeError(
+                f"run {run.run_id} snapshot Model Contract does not "
+                "match the resolved adapter configuration; refusing to "
+                "silently change recovery behavior"
             )
 
     async def _resume_running(
@@ -1752,7 +1765,7 @@ class Runner:
         binding = run.snapshot.model_bindings.for_purpose(purpose)
         model_contract = binding.contract
         streaming = (
-            model_contract.capabilities.streaming is StreamingMode.DELTA
+            binding.requirements.capabilities.streaming is StreamingMode.DELTA
         )
         step_id = step_id if step_id is not None else new_id()
         persisted_attempts = [
@@ -1793,6 +1806,12 @@ class Runner:
                 context_items=tuple(context_items),
                 tools=tuple(tool.spec() for tool in definition.tools),
                 tool_outcomes=tuple(tool_outcomes),
+                structured_output=(
+                    StructuredOutputMode.NATIVE
+                    if binding.requirements.capabilities.structured_output
+                    is StructuredOutputMode.NATIVE
+                    else StructuredOutputMode.NONE
+                ),
             )
             try:
                 assert_model_request_compatible(

@@ -401,6 +401,36 @@ class ModelBindingSet(BaseModel, frozen=True):
         """Return the already-complete, explicitly selected binding set."""
         return self
 
+    @classmethod
+    def reuse_primary(
+        cls,
+        contract: ModelContract,
+        requirements: ModelRequirements | None = None,
+    ) -> "ModelBindingSet":
+        """Explicitly select PRIMARY's Contract for every supported purpose."""
+        primary = ModelBinding(
+            purpose=ModelPurpose.PRIMARY,
+            contract=contract,
+            requirements=requirements or ModelRequirements(),
+        )
+        return cls(
+            bindings=(
+                primary,
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.CONTEXT_COMPRESSION,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.OUTPUT_REPAIR,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+            )
+        )
+
 
 class ModelExecutionBudget(BaseModel, frozen=True):
     """Persisted upper bounds for all model dispatch attempts in one Run."""
@@ -474,6 +504,9 @@ class ModelRequest(BaseModel, frozen=True):
     context_items: tuple[ContextItem, ...] = Field(default_factory=tuple)
     tools: tuple[ToolSpec, ...] = Field(default_factory=tuple)
     tool_outcomes: tuple[ToolOutcome, ...] = Field(default_factory=tuple)
+    #: Native structured-output mode selected by the frozen Model Binding.
+    #: A configured provider schema is only sent when this request requires it.
+    structured_output: StructuredOutputMode = StructuredOutputMode.NONE
 
 
 class ModelDelta(BaseModel, frozen=True):
@@ -502,12 +535,19 @@ class ModelResponse(BaseModel, frozen=True):
     content: str | None = None
     tool_calls: tuple[ToolCall, ...] = Field(default_factory=tuple)
     usage: ModelUsage | None = None
+    #: Provider-reported model/revision observed for this specific dispatch.
+    #: It is a Run fact, particularly relevant for PROVIDER_ALIAS Contracts.
+    actual_revision: str | None = None
 
 
 def normalize_model_response(
     contract: ModelContract, response: ModelResponse
 ) -> ModelResponse:
     """Apply field guarantees without inventing missing provider usage."""
+    if not isinstance(response, ModelResponse):
+        raise ModelContractViolationError(
+            "Model Adapter returned an unnormalizable response"
+        )
     if (
         response.tool_calls
         and contract.capabilities.tool_calling is ToolCallingMode.NONE
@@ -536,6 +576,21 @@ def normalize_model_response(
         return response.model_copy(
             update={"usage": ModelUsage(provenance=UsageProvenance.UNAVAILABLE)}
         )
+    provider_reported = any(
+        getattr(usage, field) is not None
+        and getattr(usage, f"{field}_provenance")
+        is UsageProvenance.PROVIDER_REPORTED
+        for field in fields
+    )
+    if (
+        contract.capabilities.usage_reporting
+        is UsageReportingMode.PROVIDER_REPORTED
+        and provider_reported
+        and (not usage.raw_unit or not usage.normalization_source)
+    ):
+        raise ModelContractViolationError(
+            "provider-reported usage requires raw_unit and normalization_source"
+        )
     for field in fields:
         guarantee = getattr(guarantees, field)
         value = getattr(usage, field)
@@ -561,18 +616,16 @@ def assert_model_request_compatible(
         if request.tools or request.tool_outcomes
         else ToolCallingMode.NONE
     )
+    values = {
+        "streaming": streaming_mode,
+        "tool_calling": tool_mode,
+        "structured_output": request.structured_output,
+    }
+    active = sum(mode.value != "NONE" for mode in values.values())
     required = ModelCapabilities(
-        streaming=streaming_mode,
-        tool_calling=tool_mode,
+        **values,
         supported_combinations=(
-            (
-                ModelCapabilityCombination(
-                    streaming=streaming_mode,
-                    tool_calling=tool_mode,
-                ),
-            )
-            if streaming and tool_mode is ToolCallingMode.NATIVE
-            else ()
+            (ModelCapabilityCombination(**values),) if active > 1 else ()
         ),
     )
     if not contract.capabilities.supports(required):

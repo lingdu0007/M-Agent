@@ -352,7 +352,7 @@ def make_runner(
 ) -> tuple[Runner, DefinitionRegistry, InMemoryRunStore]:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions=instructions,

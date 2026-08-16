@@ -52,7 +52,12 @@ class _UsageReportingModel(DeterministicModelAdapter):
         response = await super().generate(request)
         return ModelResponse(
             content=response.content,
-            usage=ModelUsage(input_tokens=11, output_tokens=7),
+            usage=ModelUsage(
+                input_tokens=11,
+                output_tokens=7,
+                raw_unit="tokens",
+                normalization_source="deterministic-usage-v1",
+            ),
         )
 
 
@@ -101,14 +106,22 @@ class UsageModel(DeterministicModelAdapter):
 
     async def generate(self, request):
         response = await super().generate(request)
-        return ModelResponse(content=response.content, usage=ModelUsage(input_tokens=11, output_tokens=7))
+        return ModelResponse(
+            content=response.content,
+            usage=ModelUsage(
+                input_tokens=11,
+                output_tokens=7,
+                raw_unit="tokens",
+                normalization_source="deterministic-usage-v1",
+            ),
+        )
 
 
 async def main():
     path = Path(sys.argv[1])
     sink = JsonlTelemetrySink(path)
     registry = DefinitionRegistry()
-    registry.register(AgentDefinition(
+    registry.register(AgentDefinition.for_adapter(
         definition_id="telemetry-child",
         version="1.0",
         instructions="child",
@@ -417,7 +430,7 @@ def _run_concurrent_telemetry(
         registry = DefinitionRegistry()
         definition_id = f"telemetry-concurrent-{index}"
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id=definition_id,
                 version="1.0",
                 instructions="concurrent",
@@ -449,7 +462,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         raise ValueError("core-lifecycle fixture does not match Manifest identity")
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="core-lifecycle",
             version="1.0",
             instructions=(
@@ -483,7 +496,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         failure_sink = JsonlTelemetrySink(failure_path)
         failure_registry = DefinitionRegistry()
         failure_registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="telemetry-failure",
                 version="1.0",
                 instructions=_TELEMETRY_CANARIES[1],

@@ -10,6 +10,7 @@ ADR 0030：注册时校验 required Model Capabilities 被 Adapter 声明。
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,7 +22,6 @@ from ._errors import (
 )
 from ._model import (
     ModelAdapter,
-    ModelBinding,
     ModelBindingSet,
     ModelContract,
     ModelExecutionBudget,
@@ -92,7 +92,9 @@ class AgentDefinition(BaseModel, frozen=True):
     version: str
     instructions: str
     model_requirements: ModelRequirements = Field(default_factory=ModelRequirements)
-    model_bindings: ModelBindingSet | None = None
+    #: Each purpose must be selected at definition construction.  Callers that
+    #: intentionally reuse PRIMARY can use :meth:`for_adapter` explicitly.
+    model_bindings: ModelBindingSet
     model_execution_budget: ModelExecutionBudget = Field(
         default_factory=ModelExecutionBudget
     )
@@ -111,6 +113,26 @@ class AgentDefinition(BaseModel, frozen=True):
     #: 随 Snapshot 一起冻结、持久化（不 exclude），恢复决策只读快照。
     retry_policy: RetryPolicy | None = None
 
+    @classmethod
+    def for_adapter(cls, **values: Any) -> "AgentDefinition":
+        """Build a Definition with an explicit complete PRIMARY-reuse set.
+
+        This compact construction helper makes the otherwise implicit choice
+        visible at the call site while preserving a complete frozen snapshot.
+        Explicit ``model_bindings`` always take precedence.
+        """
+        if values.get("model_bindings") is None:
+            adapter = values.get("model_adapter")
+            if not isinstance(adapter, ModelAdapter):
+                raise ValueError("for_adapter requires a ModelAdapter")
+            requirements = ModelRequirements.model_validate(
+                values.get("model_requirements", ModelRequirements())
+            )
+            values["model_bindings"] = ModelBindingSet.reuse_primary(
+                adapter.model_contract, requirements
+            )
+        return cls(**values)
+
     def effective_model_requirements(self) -> ModelRequirements:
         """Return the explicit typed requirements frozen for this Run."""
         return self.model_requirements
@@ -118,29 +140,6 @@ class AgentDefinition(BaseModel, frozen=True):
     def effective_model_bindings(self) -> ModelBindingSet:
         requirements = self.effective_model_requirements()
         contract = self.model_adapter.model_contract
-        if self.model_bindings is None:
-            primary = ModelBinding(
-                purpose=ModelPurpose.PRIMARY,
-                contract=contract,
-                requirements=requirements,
-            )
-            return ModelBindingSet(
-                bindings=(
-                    primary,
-                    primary.model_copy(
-                        update={
-                            "purpose": ModelPurpose.CONTEXT_COMPRESSION,
-                            "source_purpose": ModelPurpose.PRIMARY,
-                        }
-                    ),
-                    primary.model_copy(
-                        update={
-                            "purpose": ModelPurpose.OUTPUT_REPAIR,
-                            "source_purpose": ModelPurpose.PRIMARY,
-                        }
-                    ),
-                )
-            )
         bindings = self.model_bindings.resolved()
         primary = bindings.for_purpose(ModelPurpose.PRIMARY)
         if primary.contract != contract:
@@ -215,6 +214,15 @@ class DefinitionRegistry:
             raise ValueError(
                 f"live adapter {type(adapter).__name__} must declare a "
                 "non-empty definition contract fingerprint"
+            )
+        configuration_fingerprint = adapter.definition_contract_fingerprint()
+        if (
+            configuration_fingerprint
+            and configuration_fingerprint != fingerprint
+        ):
+            raise ValueError(
+                f"adapter {type(adapter).__name__} configuration fingerprint "
+                "does not match its ModelContract fingerprint"
             )
         try:
             bindings = definition.effective_model_bindings()

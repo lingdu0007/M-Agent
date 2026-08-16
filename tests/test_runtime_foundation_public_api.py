@@ -89,7 +89,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         ) -> tuple[object, object]:
             registry = registry_type()
             registry.register(
-                definition_type(
+                definition_type.for_adapter(
                     definition_id="core-lifecycle",
                     version="1.0",
                     instructions="Use the deterministic fixture.",

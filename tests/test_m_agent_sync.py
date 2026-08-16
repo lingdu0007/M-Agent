@@ -65,7 +65,7 @@ class ToolRequestingModel(DeterministicModelAdapter):
 def make_sync(model, tools=()) -> SyncRunner:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="be deterministic",

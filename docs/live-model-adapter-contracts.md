@@ -17,9 +17,10 @@ Chat Completions 与 Responses 风格 API 提供清晰的 live Model Adapter
 | `ResponsesModelAdapter` | `{base_url}{responses_path}`（默认 `/responses`） | ✅ | ✅ | ✅（`text.format` json_schema） | ✅（`input_tokens`/`output_tokens`） |
 
 普通 text、streaming、tool calling 请求不携带 structured-output 参数。只有
-构造 Adapter 时显式提供 JSON Schema 才请求原生 structured output。Chat
-Completions 默认使用严格的 `json_schema`；仅支持原生 JSON object 的兼容
-端点必须显式配置
+冻结 Binding 的 Requirements 显式选择 `structured_output=NATIVE`，并且构造
+Adapter 时提供 JSON Schema，才会发送原生 structured output；缺 Schema 的
+原生结构化请求会在 dispatch 中以 `MODEL_CONTRACT_VIOLATION` 失败。Chat
+Completions 默认使用严格的 `json_schema`；仅支持原生 JSON object 的兼容端点必须显式配置
 `M_AGENT_OPENAI_CHAT_STRUCTURED_OUTPUT_MODE=json_object`（或构造器的同名
 `structured_output_mode`），这不是静默降级。
 
@@ -29,10 +30,11 @@ identity、limits、Sizer、serialization、usage guarantee 和非敏感
 fingerprint；Adapter 类的 capability 常量只是协议上限，不能推导这些
 实例事实。未传 Contract 的 Adapter 可以无凭证地构造以配置 HTTP，但
 `DefinitionRegistry.register` 会在任何网络或工具调用前拒绝它。Contract
-能力必须与 Adapter 当前能力相同；Adapter 的 model、净化后的 endpoint、
-timeout、structured-output schema 与 Chat mode 在首次注册时形成不可逆的
-非敏感 configuration fingerprint，之后变化会在 dispatch 前失败，不能
-静默改变既有 Run 的模型语义。
+能力必须是 Adapter 类协议上限的真实交集，可以比类的能力更窄；Adapter 的
+model、净化后的 endpoint、timeout、structured-output schema 与 Chat mode
+形成的非敏感 configuration fingerprint 必须等于实例 Contract 的
+`fingerprint`。不匹配或之后变化都会在 dispatch 前失败，不能静默改变既有
+Run 的模型语义。
 
 能力声明（`capabilities`）是**如实声明**（ADR 0030）：声明为支持的能力
 才有契约案例；未声明的能力（本版本两者均无）绝不做静默降级。Runner
@@ -49,6 +51,13 @@ Definition Snapshot 总是持久化完整的 `PRIMARY`、`CONTEXT_COMPRESSION` �
 Requirements；缺少 purpose 不是隐式 reuse。Definition 顶层的 minimum
 requirements 会与 PRIMARY binding 的 requirements 取更严格的并集，显式
 binding 因此不能绕过 Agent 声明的能力或 Limits。
+
+直接构造 `AgentDefinition` 必须传入完整 `model_bindings`。只想复用同一
+Adapter 时，调用方必须在代码中明确选择
+`AgentDefinition.for_adapter(...)` 或 `ModelBindingSet.reuse_primary(...)`；
+两者都会冻结完整、可检查的 Binding Set。`streaming` 与 native structured
+output 都由该冻结 Requirements 决定，Contract 支持某一模式本身不会让
+Runner 隐式选择它。
 
 ## 与确定性 fake 的区分（禁止混淆）
 
@@ -140,7 +149,11 @@ compatibility 已验证。
   （Adapter 缺失时显式为 `None`；Runner 将每个缺失 optional 字段持久化为
   `UNAVAILABLE`，绝不伪造）。provider 映射还保留 `raw_unit` 与版本化
   `normalization_source`（包括实际使用的 provider-field alias），使历史
-  用量可说明其标准化来源；
+  用量可说明其标准化来源；Provider-reported 值缺少任一项会是
+  `MODEL_CONTRACT_VIOLATION`；
+- **actual revision**：每次成功响应中 provider 返回的 `model`/revision
+  会作为 `ModelResponse.actual_revision` 持久化为可检查的 Run 事实，尤其
+  用于标记为 `PROVIDER_ALIAS` 的 Contract；
 - **凭证隔离**：离线 `MockTransport` 的成功与 provider-failure case 使用
   sentinel 检查 SQLite 原始 bytes、Snapshot、Attempt、Checkpoint、Run
   Update 与 Telemetry 均不含凭证；真实 live 测试只检查环境是否已配置，

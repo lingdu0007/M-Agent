@@ -43,7 +43,7 @@ from m_agent import (
 )
 
 registry = DefinitionRegistry()
-registry.register(AgentDefinition(
+registry.register(AgentDefinition.for_adapter(
     definition_id="hello",
     version="1.0",
     instructions="Answer deterministically.",

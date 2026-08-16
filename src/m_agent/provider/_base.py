@@ -439,11 +439,16 @@ class ProviderModelAdapter(ModelAdapter):
     def model_contract(self) -> ModelContract:
         if self._model_contract is None:
             return super().model_contract
-        if self._model_contract.capabilities != self.capabilities:
+        if not self.capabilities.supports(self._model_contract.capabilities):
             raise ValueError(
-                "provider instance capabilities do not match its ModelContract"
+                "provider instance ModelContract exceeds class capability ceiling"
             )
         current = self.definition_contract_fingerprint()
+        if self._model_contract.fingerprint != current:
+            raise ValueError(
+                "provider instance configuration fingerprint does not match "
+                "its ModelContract fingerprint"
+            )
         if self._contract_configuration_fingerprint is None:
             self._contract_configuration_fingerprint = current
         elif self._contract_configuration_fingerprint != current:

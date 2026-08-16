@@ -59,7 +59,7 @@ class ExplodingKeyedAdapter(KeyedAdapter):
 def build_registry(adapter: DeterministicModelAdapter) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",

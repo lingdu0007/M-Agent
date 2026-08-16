@@ -351,7 +351,7 @@ async def execute_benchmark(
     tool = CountingEffectTool()
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id=DEFINITION_ID,
             version=DEFINITION_VERSION,
             instructions="Execute the deterministic benchmark tool once.",

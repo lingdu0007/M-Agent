@@ -20,12 +20,15 @@ from m_agent import (
     DefinitionRegistry,
     DeterministicContextProvider,
     InMemoryRunStore,
+    ModelCapabilities,
     ModelContract,
     ModelLimits,
+    ModelRequirements,
     PlaintextPayloadCodec,
     Runner,
     RunStatus,
     RevisionStability,
+    StreamingMode,
 )
 from m_agent.provider import ChatCompletionsModelAdapter, ResponsesModelAdapter
 
@@ -91,10 +94,15 @@ class ContextAdapterBoundaryTests(unittest.IsolatedAsyncioTestCase):
         configure_mock_contract(adapter)
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="adapter-boundary",
                 version="1.0",
                 instructions=instructions,
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        streaming=StreamingMode.DELTA
+                    )
+                ),
                 model_adapter=adapter,
                 context_provider=DeterministicContextProvider((_ITEM,)),
             )

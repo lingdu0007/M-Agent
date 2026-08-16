@@ -29,7 +29,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValidationError):
             ModelCapabilities(tool_calling=True)
         with self.assertRaises(ValidationError):
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="legacy-capabilities",
                 version="1",
                 instructions="Reply.",
@@ -48,6 +48,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ModelCapabilities,
             ModelContract,
             ModelLimits,
+            ModelRequirements,
             ModelUsageGuarantees,
             RevisionStability,
             UsageFieldGuarantee,
@@ -85,7 +86,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, "instance ModelContract"):
             DefinitionRegistry().register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="unknown-live-contract",
                     version="1",
                     instructions="Never dispatch.",
@@ -97,7 +98,9 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         """Binding reuse and multi-mode protocols need durable declarations."""
         from pydantic import ValidationError
 
+        from m_agent.adapters import DeterministicModelAdapter
         from m_agent.runtime import (
+            AgentDefinition,
             ModelBinding,
             ModelBindingSet,
             ModelCapabilities,
@@ -144,6 +147,13 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValidationError):
             ModelBindingSet(bindings=(primary,))
+        with self.assertRaises(ValidationError):
+            AgentDefinition(
+                definition_id="implicit-primary-reuse",
+                version="1",
+                instructions="Never select a binding implicitly.",
+                model_adapter=DeterministicModelAdapter(),
+            )
         bindings = ModelBindingSet(
             bindings=(
                 primary,
@@ -186,6 +196,242 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ModelRequirementReason.CAPABILITY_COMBINATION_UNSUPPORTED,
         )
 
+    async def test_structured_requirement_is_requested_without_streaming(
+        self,
+    ) -> None:
+        """The frozen requirement selects the structured-only protocol."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelCapabilityCombination,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StreamingMode,
+            StructuredOutputMode,
+        )
+
+        contract = ModelContract(
+            contract_id="separate-structured-protocol",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:structured",
+            capabilities=ModelCapabilities(
+                streaming=StreamingMode.DELTA,
+                structured_output=StructuredOutputMode.NATIVE,
+                supported_combinations=(
+                    ModelCapabilityCombination(streaming=StreamingMode.DELTA),
+                    ModelCapabilityCombination(
+                        structured_output=StructuredOutputMode.NATIVE
+                    ),
+                ),
+            ),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+            fingerprint="separate-structured-protocol-v1",
+        )
+        adapter = DeterministicModelAdapter(
+            ("structured response",), model_contract=contract
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="structured-only",
+                version="1",
+                instructions="Return the declared native structure.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        structured_output=StructuredOutputMode.NATIVE
+                    )
+                ),
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("structured-only", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(adapter.call_count, 1)
+        assert adapter.last_request is not None
+        self.assertIs(
+            adapter.last_request.structured_output,
+            StructuredOutputMode.NATIVE,
+        )
+
+    async def test_malformed_model_response_is_contract_violation(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+        )
+
+        class MalformedAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                self.call_count += 1
+                return {"content": "not a ModelResponse"}
+
+        adapter = MalformedAdapter(("unreachable",))
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="malformed-response",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("malformed-response", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 1)
+
+    async def test_provider_usage_requires_unit_and_normalization_provenance(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelUsage,
+            ModelUsageGuarantees,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            UsageFieldGuarantee,
+            UsageReportingMode,
+        )
+
+        contract = ModelContract(
+            contract_id="usage-provenance",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:usage",
+            capabilities=ModelCapabilities(
+                usage_reporting=UsageReportingMode.PROVIDER_REPORTED
+            ),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+            usage_guarantees=ModelUsageGuarantees(
+                input_tokens=UsageFieldGuarantee.REQUIRED
+            ),
+            fingerprint="usage-provenance-v1",
+        )
+
+        class UnprovenancedUsageAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                response = await super().generate(request)
+                return ModelResponse(
+                    content=response.content,
+                    usage=ModelUsage(input_tokens=7),
+                )
+
+        adapter = UnprovenancedUsageAdapter(
+            ("unreachable",), model_contract=contract
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="usage-provenance",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("usage-provenance", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 1)
+
+    async def test_actual_provider_revision_is_persisted_with_response(self) -> None:
+        from m_agent import deserialize_model_response
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelResponse,
+            Runner,
+            RunStatus,
+        )
+
+        class RevisionAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                response = await super().generate(request)
+                return ModelResponse(
+                    content=response.content,
+                    actual_revision="provider-revision-123",
+                )
+
+        adapter = RevisionAdapter(("accepted",))
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="provider-revision",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("provider-revision", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+        inspection = await runner.inspect_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        response = deserialize_model_response(inspection.attempts[0].output)
+        self.assertEqual(response.actual_revision, "provider-revision-123")
+
     async def test_create_run_freezes_explicit_primary_binding(self) -> None:
         """A CREATED Run preserves the caller's checked primary binding."""
         from m_agent.adapters import (
@@ -221,7 +467,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="typed-contract",
                 version="1",
                 instructions="Reply deterministically.",
@@ -307,7 +553,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         registry = DefinitionRegistry()
         with self.assertRaisesRegex(ModelCapabilityError, "TOOL_CALLING_UNSUPPORTED"):
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="requires-tools",
                     version="1",
                     instructions="Never dispatch.",
@@ -341,7 +587,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(ModelCapabilityError, "TOOL_CALLING_UNSUPPORTED"):
             DefinitionRegistry().register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="explicit-binding-requirements",
                     version="1",
                     instructions="Never dispatch.",
@@ -389,6 +635,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ModelCapabilityCombination,
             ModelContract,
             ModelLimits,
+            ModelRequirements,
             RevisionStability,
             Runner,
             RunStatus,
@@ -427,10 +674,15 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="split-protocols",
                 version="1",
                 instructions="Never dispatch an undeclared combination.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        streaming=StreamingMode.DELTA
+                    )
+                ),
                 model_adapter=adapter,
                 tools=(tool,),
             )
@@ -481,7 +733,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         initial_registry = DefinitionRegistry()
         initial_registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="create-freeze",
                 version="1",
                 instructions="Reply.",
@@ -498,7 +750,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         changed_registry = DefinitionRegistry()
         changed_registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="create-freeze",
                 version="1",
                 instructions="Reply.",
@@ -537,7 +789,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="undeclared-tools",
                 version="1",
                 instructions="Never dispatch unsupported tools.",
@@ -612,7 +864,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="bounded-tool-loop",
                 version="1",
                 instructions="Use the tool once.",
@@ -687,6 +939,18 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                         input_tokens=11,
                         output_tokens=7,
                         provenance=self._provenance,
+                        raw_unit=(
+                            "tokens"
+                            if self._provenance
+                            is UsageProvenance.PROVIDER_REPORTED
+                            else None
+                        ),
+                        normalization_source=(
+                            "deterministic-usage-v1"
+                            if self._provenance
+                            is UsageProvenance.PROVIDER_REPORTED
+                            else None
+                        ),
                     ),
                 )
 
@@ -700,6 +964,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     usage=ModelUsage(
                         input_tokens=5,
                         provenance=UsageProvenance.PROVIDER_REPORTED,
+                        raw_unit="tokens",
+                        normalization_source="deterministic-usage-v1",
                     ),
                 )
 
@@ -727,7 +993,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         ):
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="usage",
                     version=guarantees.input_tokens.value,
                     instructions="Reply.",
@@ -859,7 +1125,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         first_registry = DefinitionRegistry()
         first_registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="frozen-binding",
                 version="1",
                 instructions="Reply.",
@@ -890,7 +1156,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         changed_registry = DefinitionRegistry()
         changed_registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="frozen-binding",
                 version="1",
                 instructions="Reply.",
@@ -967,7 +1233,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             adapter = LoggingModelAdapter(model_log, ("must not dispatch",))
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="assistant",
                     version="1.0",
                     instructions="Answer deterministically.",
@@ -1037,7 +1303,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             db_path = os.path.join(tmp, "run.db")
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="atomic-budget",
                     version="1",
                     instructions="Reply.",

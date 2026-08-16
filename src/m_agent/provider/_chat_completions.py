@@ -51,6 +51,7 @@ from m_agent._model import (
     ToolCallingMode,
     UsageReportingMode,
 )
+from m_agent._errors import ModelContractViolationError
 from m_agent._tools import ToolCall
 
 #: Chat Completions 兼容端点能力声明：四类语义全部如实支持。
@@ -142,7 +143,15 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
                 tool_spec_to_chat_schema(spec) for spec in request.tools
             ]
             payload["tool_choice"] = "auto"
-        structured = self._structured_output_payload
+        structured = (
+            self._structured_output_payload
+            if request.structured_output is StructuredOutputMode.NATIVE
+            else None
+        )
+        if request.structured_output is StructuredOutputMode.NATIVE and structured is None:
+            raise ModelContractViolationError(
+                "native structured output requires an adapter schema"
+            )
         if structured is not None:
             if self.structured_output_mode == "json_object":
                 structured = {"type": "json_object"}
@@ -164,6 +173,9 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
             content=content or None,
             tool_calls=tool_calls,
             usage=extract_usage(data),
+            actual_revision=(
+                data["model"] if isinstance(data.get("model"), str) else None
+            ),
         )
 
     async def stream(
@@ -194,7 +206,10 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
                 content_parts: list[str] = []
                 tool_calls: dict[int, dict[str, Any]] = {}
                 usage: ModelUsage | None = None
+                actual_revision: str | None = None
                 async for event in consume_sse_events(response):
+                    if isinstance(event.get("model"), str):
+                        actual_revision = event["model"]
                     for choice in event.get("choices") or []:
                         delta = choice.get("delta") or {}
                         text = delta.get("content")
@@ -226,6 +241,7 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
                     content="".join(content_parts) or None,
                     tool_calls=calls,
                     usage=usage,
+                    actual_revision=actual_revision,
                 )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
             raise transport_error(exc, operation=url) from exc

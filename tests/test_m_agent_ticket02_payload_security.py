@@ -101,7 +101,7 @@ class Ticket02PayloadSecurityTests(unittest.IsolatedAsyncioTestCase):
             db_path = os.path.join(tmp, "run.db")
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="failing-assistant",
                     version="1.0",
                     instructions=_INSTRUCTIONS,

@@ -206,7 +206,7 @@ def build_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="telemetry_agent",
             version="1.0",
             instructions="Answer deterministically.",

@@ -62,7 +62,7 @@ class LoggingModelAdapter(DeterministicModelAdapter):
 def _registry(log_path: str, instructions: str, response: str) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="sentinel-assistant",
             version="1.0",
             instructions=instructions,

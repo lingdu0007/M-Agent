@@ -89,7 +89,7 @@ def main() -> None:
 
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="telemetry_demo",
             version="1.0",
             instructions="Answer deterministically.",

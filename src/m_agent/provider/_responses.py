@@ -48,6 +48,7 @@ from m_agent._model import (
     ToolCallingMode,
     UsageReportingMode,
 )
+from m_agent._errors import ModelContractViolationError
 
 #: Responses 兼容端点能力声明：四类语义全部如实支持。
 RESPONSES_CAPABILITIES = ModelCapabilities(
@@ -130,7 +131,15 @@ class ResponsesModelAdapter(ProviderModelAdapter):
             payload["tools"] = [
                 tool_spec_to_responses_schema(spec) for spec in request.tools
             ]
-        structured = self._structured_output_responses_payload
+        structured = (
+            self._structured_output_responses_payload
+            if request.structured_output is StructuredOutputMode.NATIVE
+            else None
+        )
+        if request.structured_output is StructuredOutputMode.NATIVE and structured is None:
+            raise ModelContractViolationError(
+                "native structured output requires an adapter schema"
+            )
         if structured is not None:
             payload["text"] = {"format": structured}
         return payload
@@ -146,6 +155,9 @@ class ResponsesModelAdapter(ProviderModelAdapter):
             content=content or None,
             tool_calls=tool_calls,
             usage=extract_usage(data),
+            actual_revision=(
+                data["model"] if isinstance(data.get("model"), str) else None
+            ),
         )
 
     async def stream(
@@ -194,6 +206,11 @@ class ResponsesModelAdapter(ProviderModelAdapter):
                             content=content or None,
                             tool_calls=tool_calls,
                             usage=extract_usage(complete),
+                            actual_revision=(
+                                complete["model"]
+                                if isinstance(complete.get("model"), str)
+                                else None
+                            ),
                         )
                         return
                     elif event_type == "response.failed":

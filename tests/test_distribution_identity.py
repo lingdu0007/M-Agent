@@ -98,7 +98,7 @@ async def main():
     assert Path(m_agent.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="distribution-contract",
             version="1.0",
             instructions="Reply deterministically.",

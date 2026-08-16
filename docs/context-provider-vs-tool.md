@@ -65,7 +65,7 @@ Context Items 作为 checkpoint 持久化：
 
 ```python
 registry.register(
-    AgentDefinition(
+    AgentDefinition.for_adapter(
         definition_id="assistant",
         version="1.0",
         instructions="Answer using the provided context.",

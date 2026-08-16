@@ -135,7 +135,7 @@ def build_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="support_agent",
             version="1.0",
             instructions="Notify the customer deterministically.",

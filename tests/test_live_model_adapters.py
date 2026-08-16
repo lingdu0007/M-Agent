@@ -191,7 +191,7 @@ async def run_to_terminal(
     adapter = configure_mock_contract(adapter)
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="live-contract",
             version="1.0",
             instructions=instructions,
@@ -430,12 +430,15 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         self.assertNotIn("response_format", chat)
         self.assertNotIn("text", responses)
 
+        structured_request = request.model_copy(
+            update={"structured_output": StructuredOutputMode.NATIVE}
+        )
         structured_chat = ChatCompletionsModelAdapter(
             structured_output_schema=STRUCTURED_SCHEMA
-        )._build_payload(request)
+        )._build_payload(structured_request)
         structured_responses = ResponsesModelAdapter(
             structured_output_schema=STRUCTURED_SCHEMA
-        )._build_payload(request)
+        )._build_payload(structured_request)
         self.assertIn("response_format", structured_chat)
         self.assertIn("text", structured_responses)
 
@@ -444,7 +447,11 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         payload = ChatCompletionsModelAdapter(
             structured_output_schema=STRUCTURED_SCHEMA,
             structured_output_mode="json_object",
-        )._build_payload(_request())
+        )._build_payload(
+            _request().model_copy(
+                update={"structured_output": StructuredOutputMode.NATIVE}
+            )
+        )
 
         self.assertEqual(payload["response_format"], {"type": "json_object"})
 
@@ -462,7 +469,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_mode="json_object",
             )
             configure_mock_contract(original)
-            original_definition = AgentDefinition(
+            original_definition = AgentDefinition.for_adapter(
                 definition_id="frozen-adapter-contract",
                 version="1.0",
                 instructions="Return JSON.",
@@ -497,7 +504,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             configure_mock_contract(changed)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="frozen-adapter-contract",
                     version="1.0",
                     instructions="Return JSON.",
@@ -551,7 +558,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_mode="json_object",
             )
             configure_mock_contract(original)
-            snapshot = AgentDefinition(
+            snapshot = AgentDefinition.for_adapter(
                 definition_id="frozen-resolution-contract",
                 version="1.0",
                 instructions="Return JSON.",
@@ -586,7 +593,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             configure_mock_contract(changed)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="frozen-resolution-contract",
                     version="1.0",
                     instructions="Return JSON.",
@@ -635,7 +642,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         registry = DefinitionRegistry()
         with self.assertRaisesRegex(ValueError, "instance ModelContract"):
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="unfrozen-live-adapter",
                     version="1.0",
                     instructions="i",
@@ -695,7 +702,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
 
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="telemetry-mutated-adapter",
                     version="1.0",
                     instructions="Return JSON.",
@@ -765,7 +772,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="base-url-redaction",
                     version="1.0",
                     instructions="Reply with pong.",
@@ -849,7 +856,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         registry = DefinitionRegistry()
         with self.assertRaises(ModelCapabilityError):
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="needs-tool-calling",
                     version="1.0",
                     instructions="i",
@@ -877,7 +884,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="assistant",
                     version="1.0",
                     instructions="i",
@@ -889,6 +896,63 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             )
             self.assertTrue(registry.is_registered("assistant", "1.0"))
             self.assertEqual(adapter.requests, [])
+
+    def test_provider_instance_contract_can_narrow_class_capabilities(self) -> None:
+        """An instance Contract is an intersection, not the protocol ceiling."""
+        adapter = ChatCompletionsModelAdapter(
+            base_url="https://live-contract.invalid/v1",
+        )
+        adapter._model_contract = ModelContract(
+            contract_id="chat-text-only",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="chat:text-only",
+            capabilities=ModelCapabilities(),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="mock-provider-sizer-v1",
+            serialization_id="mock-provider-wire-v1",
+            fingerprint=adapter.definition_contract_fingerprint(),
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="chat-text-only",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+
+        self.assertTrue(registry.is_registered("chat-text-only", "1"))
+        self.assertEqual(adapter.requests, [])
+        asyncio.run(adapter.aclose())
+
+    def test_provider_contract_fingerprint_must_match_current_configuration(
+        self,
+    ) -> None:
+        """A fresh provider instance cannot reuse another target's Contract."""
+        original = ChatCompletionsModelAdapter(
+            model="model-original",
+            base_url="https://original.invalid/v1",
+        )
+        configure_mock_contract(original)
+        changed = ChatCompletionsModelAdapter(
+            model="model-changed",
+            base_url="https://changed.invalid/v1",
+            model_contract=original.model_contract,
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "configuration fingerprint"):
+                AgentDefinition.for_adapter(
+                    definition_id="stale-provider-contract",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_adapter=changed,
+                )
+            self.assertEqual(changed.requests, [])
+        finally:
+            asyncio.run(original.aclose())
+            asyncio.run(changed.aclose())
 
     def test_missing_credentials_fail_structured_without_key_value(
         self,
@@ -970,7 +1034,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="responses-failure",
                     version="1.0",
                     instructions="Reply with pong.",
@@ -1021,7 +1085,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="invalid-sse-content-type",
                     version="1.0",
                     instructions="Reply with pong.",
@@ -1145,6 +1209,50 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         self.assertIsNone(extract_usage({"usage": {}}))
         self.assertIsNone(extract_usage({"usage": {"foo": 1}}))
 
+    def test_provider_response_retains_actual_model_revision(self) -> None:
+        """Returned provider revisions survive normalization for inspection."""
+
+        async def invoke(adapter_cls, payload):
+            adapter = adapter_cls(
+                base_url="https://live-contract.invalid/v1",
+            )
+            adapter._transport = httpx.MockTransport(
+                lambda request: httpx.Response(200, json=payload)
+            )
+            try:
+                with credential_environment():
+                    return await adapter.generate(_request())
+            finally:
+                await adapter.aclose()
+
+        cases = (
+            (
+                ChatCompletionsModelAdapter,
+                {
+                    "model": "provider-revision-chat-123",
+                    "choices": [{"message": {"content": "pong"}}],
+                },
+            ),
+            (
+                ResponsesModelAdapter,
+                {
+                    "model": "provider-revision-responses-456",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "pong"}
+                            ],
+                        }
+                    ],
+                },
+            ),
+        )
+        for adapter_cls, payload in cases:
+            with self.subTest(adapter=adapter_cls.__name__):
+                response = asyncio.run(invoke(adapter_cls, payload))
+                self.assertEqual(response.actual_revision, payload["model"])
+
     def test_structured_output_diagnostic_never_echoes_provider_content(
         self,
     ) -> None:
@@ -1211,7 +1319,9 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     self,
                     adapter,
                     instructions="Reply with pong.",
-                    required=ModelCapabilities(),
+                    required=ModelCapabilities(
+                        streaming=StreamingMode.DELTA
+                    ),
                     telemetry_sink=sink,
                 )
             finally:
@@ -1316,7 +1426,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="provider-failure",
                     version="1.0",
                     instructions="Reply with pong.",
@@ -1408,10 +1518,15 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="credential-isolation",
                     version="1.0",
                     instructions="Reply with pong.",
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            streaming=StreamingMode.DELTA
+                        )
+                    ),
                     model_adapter=adapter,
                 )
             )
@@ -1543,7 +1658,7 @@ class _LiveAdapterContractMixin:
     async def test_streaming_deltas_through_runner(self) -> None:
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="live-contract",
                 version="1.0",
                 instructions="Say 'hello live streaming'.",

@@ -137,7 +137,12 @@ class UsageModel(DeterministicModelAdapter):
         response = await super().generate(request)
         return ModelResponse(
             content=response.content,
-            usage=ModelUsage(input_tokens=11, output_tokens=7),
+            usage=ModelUsage(
+                input_tokens=11,
+                output_tokens=7,
+                raw_unit="tokens",
+                normalization_source="deterministic-usage-v1",
+            ),
         )
 
 
@@ -265,7 +270,7 @@ def concurrent_telemetry(path):
 async def observe():
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="core-lifecycle",
             version="1.0",
             instructions="Use the deterministic fixture. " + _TELEMETRY_CANARIES[1],
@@ -293,7 +298,7 @@ async def observe():
         failure_path = Path(temporary_directory) / "failure.jsonl"
         failure_sink = JsonlTelemetrySink(failure_path)
         failure_registry = DefinitionRegistry()
-        failure_registry.register(AgentDefinition(
+        failure_registry.register(AgentDefinition.for_adapter(
             definition_id="telemetry-failure",
             version="1.0",
             instructions=_TELEMETRY_CANARIES[1],

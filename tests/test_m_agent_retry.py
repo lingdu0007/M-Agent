@@ -279,7 +279,7 @@ def make_runner(
 ) -> tuple[Runner, DefinitionRegistry, InMemoryRunStore | SQLiteRunStore]:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
@@ -429,7 +429,7 @@ class ModelRetryTests(unittest.IsolatedAsyncioTestCase):
 
         # "运行中修改 Agent Definition"：注册同 id 新版本，策略改为 1 次。
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="2.0",
                 instructions="changed",

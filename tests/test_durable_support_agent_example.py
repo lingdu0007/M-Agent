@@ -342,7 +342,7 @@ class DurableSupportAgentExampleTests(unittest.TestCase):
                 try:
                     registry = DefinitionRegistry()
                     registry.register(
-                        AgentDefinition(
+                        AgentDefinition.for_adapter(
                             definition_id="wrong-trajectory",
                             version="1.0",
                             instructions="Return a deterministic answer.",
