@@ -453,6 +453,34 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 ModelUsage(input_tokens=value)
 
+    def test_quantitative_model_contract_values_reject_booleans(self) -> None:
+        from pydantic import ValidationError
+
+        from m_agent.runtime import (
+            ModelExecutionBudget,
+            ModelLimits,
+            ModelRequirements,
+        )
+
+        invalid_constructors = (
+            lambda: ModelLimits(
+                context_window_tokens=True,
+                max_output_tokens=True,
+            ),
+            lambda: ModelRequirements(
+                min_context_window_tokens=True,
+                min_output_tokens=True,
+            ),
+            lambda: ModelExecutionBudget(
+                run_max_attempts=True,
+                primary_max_attempts=False,
+            ),
+        )
+        for constructor in invalid_constructors:
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(ValidationError):
+                    constructor()
+
     def test_typed_model_contract_values_reject_unknown_fields(self) -> None:
         """Future modes and typos cannot silently weaken a frozen binding."""
         from pydantic import ValidationError
@@ -2231,6 +2259,82 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original.call_count, 0)
         self.assertEqual(changed.call_count, 0)
 
+    async def test_deterministic_adapter_type_is_frozen_before_dispatch(
+        self,
+    ) -> None:
+        """Identical contracts cannot exchange distinct deterministic code."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelContract,
+            ModelLimits,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+        )
+
+        contract = ModelContract(
+            contract_id="frozen-deterministic-type",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:frozen-type",
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+            configuration_fingerprint="frozen-deterministic-type-v1",
+        )
+
+        class FirstAdapter(DeterministicModelAdapter):
+            async def generate(self, request) -> ModelResponse:
+                self.call_count += 1
+                return ModelResponse(content="first")
+
+        class SecondAdapter(DeterministicModelAdapter):
+            async def generate(self, request) -> ModelResponse:
+                self.call_count += 1
+                return ModelResponse(content="second")
+
+        first = FirstAdapter(model_contract=contract)
+        first_registry = DefinitionRegistry()
+        first_registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="frozen-deterministic-type",
+                version="1",
+                instructions="Reply.",
+                model_adapter=first,
+            )
+        )
+        store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        created = await Runner(first_registry, store).create_run(
+            "frozen-deterministic-type", "1", "hello"
+        )
+
+        second = SecondAdapter(model_contract=contract)
+        self.assertEqual(first.model_contract, second.model_contract)
+        self.assertNotEqual(
+            first.definition_contract_fingerprint(),
+            second.definition_contract_fingerprint(),
+        )
+        second_registry = DefinitionRegistry()
+        second_registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="frozen-deterministic-type",
+                version="1",
+                instructions="Reply.",
+                model_adapter=second,
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "snapshot Model Contract"):
+            await Runner(second_registry, store).start_run(created.run_id)
+        self.assertEqual(first.call_count, 0)
+        self.assertEqual(second.call_count, 0)
+
     async def test_explicit_deterministic_contract_binds_behavior_configuration(
         self,
     ) -> None:
@@ -3310,6 +3414,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(adapter.call_count, 0)
             self.assertFalse(os.path.exists(model_log))
             self.assertEqual(inspection.attempts[0].status, StepStatus.FAILED)
+            self.assertEqual(
+                inspection.attempts[0].error_code,
+                "model_checkpoint_unconfirmed",
+            )
             self.assertEqual(
                 len(
                     [

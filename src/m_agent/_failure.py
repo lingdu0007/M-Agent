@@ -39,6 +39,7 @@ SAFE_ERROR_CODES = frozenset(
         "lookup_broken",
         "lookup_rejected",
         "model_rejected",
+        "model_checkpoint_unconfirmed",
         "provider_credentials_missing",
         "provider_request_failed",
         "provider_response_invalid",

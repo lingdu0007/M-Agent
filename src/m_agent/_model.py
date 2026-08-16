@@ -16,7 +16,9 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping, Sequence
 import enum
 import hashlib
+import inspect
 import json
+from pathlib import Path
 from typing import Any, Self
 
 from pydantic import (
@@ -308,6 +310,13 @@ class ModelLimits(_FrozenModelValue):
     context_window_tokens: int = Field(ge=1)
     max_output_tokens: int = Field(ge=1)
 
+    @field_validator("context_window_tokens", "max_output_tokens", mode="before")
+    @classmethod
+    def _validate_limit_count(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("model limits must be positive integers")
+        return value
+
 
 class ModelUsageGuarantees(_FrozenModelValue):
     """Field-level Model Contract guarantees, never a single usage boolean."""
@@ -419,6 +428,13 @@ class ModelRequirements(_FrozenModelValue):
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     min_context_window_tokens: int = Field(default=1, ge=1)
     min_output_tokens: int = Field(default=1, ge=1)
+
+    @field_validator("min_context_window_tokens", "min_output_tokens", mode="before")
+    @classmethod
+    def _validate_requirement_count(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("model requirements must be positive integers")
+        return value
 
     @model_validator(mode="after")
     def _validate_capability_combination(self) -> "ModelRequirements":
@@ -603,6 +619,19 @@ class ModelExecutionBudget(_FrozenModelValue):
     primary_max_attempts: int = Field(default=8, ge=0)
     context_compression_max_attempts: int = Field(default=8, ge=0)
     output_repair_max_attempts: int = Field(default=8, ge=0)
+
+    @field_validator(
+        "run_max_attempts",
+        "primary_max_attempts",
+        "context_compression_max_attempts",
+        "output_repair_max_attempts",
+        mode="before",
+    )
+    @classmethod
+    def _validate_attempt_count(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("model execution budgets must be non-negative integers")
+        return value
 
     def maximum_for(self, purpose: ModelPurpose) -> int:
         return {
@@ -986,6 +1015,25 @@ class ModelAdapter(ABC):
         )
 
 
+def _deterministic_adapter_type_identity(adapter_type: type[object]) -> str:
+    """Identify deterministic code without a process-local ``__main__`` name."""
+    source = inspect.getsourcefile(adapter_type)
+    if source is None:
+        return f"{adapter_type.__module__}.{adapter_type.__qualname__}"
+    source_path = Path(source)
+    if not source_path.is_file():
+        return f"{adapter_type.__module__}.{adapter_type.__qualname__}"
+    module_parts = [source_path.stem]
+    parent = source_path.parent
+    while (parent / "__init__.py").is_file():
+        module_parts.append(parent.name)
+        parent = parent.parent
+    if len(module_parts) == 1:
+        module_parts.append(source_path.parent.name)
+    module_identity = ".".join(reversed(module_parts))
+    return f"{module_identity}.{adapter_type.__qualname__}"
+
+
 class DeterministicModelAdapter(ModelAdapter):
     """确定性 fake Model Adapter，用于测试、演示与离线示例。
 
@@ -1032,6 +1080,7 @@ class DeterministicModelAdapter(ModelAdapter):
 
     def definition_contract_fingerprint(self) -> str:
         payload = self._configuration_fingerprint_payload()
+        payload["adapter_type"] = _deterministic_adapter_type_identity(type(self))
         return hashlib.sha256(
             json.dumps(
                 payload,
