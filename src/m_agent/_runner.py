@@ -1294,7 +1294,7 @@ class Runner:
                 attempt
                 for attempt in reversed(persisted_attempts)
                 if attempt.step_id in model_steps
-                and attempt.status is StepStatus.RUNNING
+                and attempt.status in (StepStatus.RUNNING, StepStatus.SUCCEEDED)
                 and attempt.attempt_id not in checkpoint_attempt_ids
             ),
             None,

@@ -614,6 +614,32 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             responses["text"], {"format": {"type": "json_object"}}
         )
 
+    def test_strict_schema_allows_object_without_required_keyword(self) -> None:
+        from m_agent import ModelResponse
+
+        adapter = ChatCompletionsModelAdapter(
+            structured_output_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "additionalProperties": False,
+            }
+        )
+        try:
+            response = adapter.validate_response(
+                _request().model_copy(
+                    update={
+                        "structured_output": (
+                            StructuredOutputMode.JSON_SCHEMA_STRICT
+                        )
+                    }
+                ),
+                ModelResponse(content='{"name":"ok"}'),
+            )
+        finally:
+            asyncio.run(adapter.aclose())
+
+        self.assertEqual(response.content, '{"name":"ok"}')
+
     def test_strict_json_object_requirement_reaches_provider_transport(self) -> None:
         """Accepted JSON-object Requirements are executable through Runner."""
 
@@ -676,6 +702,130 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     self.assertEqual(len(payloads), 1)
                     self.assertEqual(
                         format_from(payloads[0]), {"type": "json_object"}
+                    )
+
+    def test_strict_tool_call_precedes_final_json_through_runner(self) -> None:
+        """A strict schema applies to the final response, not a tool request."""
+
+        async def invoke(adapter_cls, payloads):
+            requests: list[dict] = []
+
+            def handler(request):
+                requests.append(json.loads(request.content))
+                return httpx.Response(200, json=payloads[len(requests) - 1])
+
+            adapter = adapter_cls(
+                base_url="https://live-contract.invalid/v1",
+                structured_output_schema=STRUCTURED_SCHEMA,
+            )
+            adapter._transport = httpx.MockTransport(handler)
+            tool, calls = make_answer_tool()
+            try:
+                _, _, status, inspection = await run_to_terminal(
+                    self,
+                    adapter,
+                    instructions=(
+                        "Call get_answer before returning the required JSON."
+                    ),
+                    required=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE,
+                        structured_output=(
+                            StructuredOutputMode.JSON_SCHEMA_STRICT
+                        ),
+                        supported_combinations=(
+                            ModelCapabilityCombination(
+                                tool_calling=ToolCallingMode.NATIVE,
+                                structured_output=(
+                                    StructuredOutputMode.JSON_SCHEMA_STRICT
+                                ),
+                            ),
+                        ),
+                    ),
+                    tools=(tool,),
+                )
+            finally:
+                await adapter.aclose()
+            return status, inspection, requests, calls
+
+        cases = (
+            (
+                ChatCompletionsModelAdapter,
+                (
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "tool_calls": [
+                                        {
+                                            "id": "call-1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "get_answer",
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": (
+                                        '{"answer":"42","confidence":1}'
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                ),
+            ),
+            (
+                ResponsesModelAdapter,
+                (
+                    {
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "name": "get_answer",
+                                "arguments": "{}",
+                            }
+                        ]
+                    },
+                    {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": (
+                                            '{"answer":"42","confidence":1}'
+                                        ),
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                ),
+            ),
+        )
+        with credential_environment():
+            for adapter_cls, payloads in cases:
+                with self.subTest(adapter=adapter_cls.__name__):
+                    status, inspection, requests, calls = asyncio.run(
+                        invoke(adapter_cls, payloads)
+                    )
+
+                    self.assertIs(status, RunStatus.SUCCEEDED)
+                    self.assertEqual(len(requests), 2)
+                    self.assertEqual(calls, [1])
+                    self.assertEqual(
+                        [step.step_type for step in inspection.steps],
+                        [StepType.MODEL, StepType.TOOL, StepType.MODEL],
                     )
 
     def test_provider_contract_accepts_split_capability_ceiling(self) -> None:
@@ -1458,6 +1608,32 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             responses_usage.normalization_source,
             "openai-compatible-usage-v1:input_tokens->input_tokens,"
             "output_tokens->output_tokens",
+        )
+        extended_usage = extract_usage(
+            {
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "cached_input_tokens": 3,
+                    "reasoning_tokens": 2,
+                }
+            }
+        )
+        self.assertEqual(
+            extended_usage,
+            ModelUsage(
+                input_tokens=10,
+                output_tokens=4,
+                cached_input_tokens=3,
+                reasoning_tokens=2,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                    "output_tokens->output_tokens,"
+                    "cached_input_tokens->cached_input_tokens,"
+                    "reasoning_tokens->reasoning_tokens"
+                ),
+            ),
         )
         # 合法的 0 不是缺失；不得被 truthy/falsy 映射吞掉。
         self.assertEqual(

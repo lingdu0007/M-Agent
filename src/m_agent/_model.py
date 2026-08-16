@@ -19,7 +19,7 @@ import hashlib
 import json
 from typing import Any, Self
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ._context import ContextItem
 from ._errors import ModelCapabilityError, ModelContractViolationError
@@ -87,7 +87,13 @@ class UsageProvenance(str, enum.Enum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
-class ModelCapabilityCombination(BaseModel, frozen=True):
+class _FrozenModelValue(BaseModel, frozen=True):
+    """Ticket 08 values reject unknown fields rather than silently weakening."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ModelCapabilityCombination(_FrozenModelValue):
     """One explicitly supported concurrent protocol-mode combination."""
 
     streaming: StreamingMode = StreamingMode.NONE
@@ -121,7 +127,7 @@ class ModelRequirementReason(str, enum.Enum):
     MAX_OUTPUT_TOO_SMALL = "MAX_OUTPUT_TOO_SMALL"
 
 
-class ModelCapabilities(BaseModel, frozen=True):
+class ModelCapabilities(_FrozenModelValue):
     """Typed Model Contract capability modes.
 
     Stored contracts and Runner decisions always contain the explicit modes
@@ -242,14 +248,14 @@ class ModelCapabilities(BaseModel, frozen=True):
         )
 
 
-class ModelLimits(BaseModel, frozen=True):
+class ModelLimits(_FrozenModelValue):
     """Stable request-size limits declared by one Model Contract."""
 
     context_window_tokens: int = Field(ge=1)
     max_output_tokens: int = Field(ge=1)
 
 
-class ModelUsageGuarantees(BaseModel, frozen=True):
+class ModelUsageGuarantees(_FrozenModelValue):
     """Field-level Model Contract guarantees, never a single usage boolean."""
 
     input_tokens: UsageFieldGuarantee = UsageFieldGuarantee.OPTIONAL
@@ -258,7 +264,7 @@ class ModelUsageGuarantees(BaseModel, frozen=True):
     reasoning_tokens: UsageFieldGuarantee = UsageFieldGuarantee.UNSUPPORTED
 
 
-class ModelContract(BaseModel, frozen=True):
+class ModelContract(_FrozenModelValue):
     """Versioned, non-secret model/deployment contract frozen into a Run."""
 
     contract_id: str = Field(min_length=1)
@@ -345,14 +351,14 @@ class ModelContract(BaseModel, frozen=True):
         return super().model_copy(update=update, deep=deep)
 
 
-class ModelRequirementMatch(BaseModel, frozen=True):
+class ModelRequirementMatch(_FrozenModelValue):
     """Deterministic, inspectable result of matching requirements to a Contract."""
 
     compatible: bool
     reason: ModelRequirementReason
 
 
-class ModelRequirements(BaseModel, frozen=True):
+class ModelRequirements(_FrozenModelValue):
     """Minimum semantic and numeric requirements for one model binding."""
 
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
@@ -421,7 +427,7 @@ class ModelRequirements(BaseModel, frozen=True):
         )
 
 
-class ModelBinding(BaseModel, frozen=True):
+class ModelBinding(_FrozenModelValue):
     """One selected Contract and its requirements for a Model Step purpose."""
 
     purpose: ModelPurpose
@@ -441,7 +447,7 @@ class ModelBinding(BaseModel, frozen=True):
         return self
 
 
-class ModelBindingSet(BaseModel, frozen=True):
+class ModelBindingSet(_FrozenModelValue):
     """Frozen purpose-to-Contract selection with explicit primary reuse."""
 
     bindings: tuple[ModelBinding, ...]
@@ -509,7 +515,7 @@ class ModelBindingSet(BaseModel, frozen=True):
         )
 
 
-class ModelExecutionBudget(BaseModel, frozen=True):
+class ModelExecutionBudget(_FrozenModelValue):
     """Persisted upper bounds for all model dispatch attempts in one Run."""
 
     run_max_attempts: int = Field(default=8, ge=0)
@@ -525,7 +531,7 @@ class ModelExecutionBudget(BaseModel, frozen=True):
         }[purpose]
 
 
-class ModelUsage(BaseModel, frozen=True):
+class ModelUsage(_FrozenModelValue):
     """Normalized usage with provenance retained for every usage field."""
 
     input_tokens: int | None = None
@@ -575,7 +581,7 @@ class ModelUsage(BaseModel, frozen=True):
         return self
 
 
-class ModelRequest(BaseModel, frozen=True):
+class ModelRequest(_FrozenModelValue):
     """一次模型请求。
 
     - ``instructions``：来自 Definition 的 Agent Instruction（受信）；
@@ -599,7 +605,7 @@ class ModelRequest(BaseModel, frozen=True):
     usage_reporting: UsageReportingMode = UsageReportingMode.NONE
 
 
-class ModelDelta(BaseModel, frozen=True):
+class ModelDelta(_FrozenModelValue):
     """一次模型流式输出增量（Ticket 08 / ADR 0011）。
 
     增量只作为带 ``attempt_id`` 的 Run Update 发布（:class:`RunUpdate`
@@ -612,7 +618,7 @@ class ModelDelta(BaseModel, frozen=True):
     content: str
 
 
-class ModelResponse(BaseModel, frozen=True):
+class ModelResponse(_FrozenModelValue):
     """一次模型请求的完整响应。
 
     - ``content``：文本内容；当响应只请求工具时可以为 None；
@@ -687,9 +693,13 @@ def normalize_model_response(
         raise ModelContractViolationError(
             "Model Contract does not declare the response capability combination"
         )
-    if request.structured_output in (
-        StructuredOutputMode.JSON_OBJECT,
-        StructuredOutputMode.JSON_SCHEMA_STRICT,
+    if (
+        not response.tool_calls
+        and request.structured_output
+        in (
+            StructuredOutputMode.JSON_OBJECT,
+            StructuredOutputMode.JSON_SCHEMA_STRICT,
+        )
     ):
         try:
             structured = json.loads(response.content or "")
@@ -728,6 +738,13 @@ def normalize_model_response(
         is UsageProvenance.PROVIDER_REPORTED
         for field in fields
     )
+    if (
+        contract.capabilities.usage_reporting is UsageReportingMode.NONE
+        and provider_reported
+    ):
+        raise ModelContractViolationError(
+            "Model Contract does not declare provider-reported usage"
+        )
     if (
         contract.capabilities.usage_reporting
         is UsageReportingMode.PROVIDER_REPORTED

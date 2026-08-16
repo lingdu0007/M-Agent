@@ -311,16 +311,29 @@ def extract_usage(data: dict[str, Any]) -> ModelUsage | None:
     )
     input_tokens = usage.get(input_key)
     output_tokens = usage.get(output_key)
-    if input_tokens is None and output_tokens is None:
+    cached_input_tokens = usage.get("cached_input_tokens")
+    reasoning_tokens = usage.get("reasoning_tokens")
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and cached_input_tokens is None
+        and reasoning_tokens is None
+    ):
         return None
     mappings = []
     if input_tokens is not None:
         mappings.append(f"{input_key}->input_tokens")
     if output_tokens is not None:
         mappings.append(f"{output_key}->output_tokens")
+    if cached_input_tokens is not None:
+        mappings.append("cached_input_tokens->cached_input_tokens")
+    if reasoning_tokens is not None:
+        mappings.append("reasoning_tokens->reasoning_tokens")
     return ModelUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=reasoning_tokens,
         raw_unit="tokens",
         normalization_source="openai-compatible-usage-v1:" + ",".join(mappings),
     )
@@ -513,7 +526,7 @@ def _matches_json_schema(
             return False
     if isinstance(value, dict):
         properties = schema.get("properties", {})
-        required = schema.get("required", ())
+        required = schema.get("required", [])
         if not isinstance(properties, dict) or not isinstance(required, list):
             return False
         if not all(isinstance(key, str) and key in value for key in required):
@@ -760,7 +773,10 @@ class ProviderModelAdapter(ModelAdapter):
     def validate_response(
         self, request: ModelRequest, response: ModelResponse
     ) -> ModelResponse:
-        if request.structured_output is StructuredOutputMode.JSON_SCHEMA_STRICT:
+        if (
+            request.structured_output is StructuredOutputMode.JSON_SCHEMA_STRICT
+            and not response.tool_calls
+        ):
             schema = self.structured_output_schema
             if schema is None:
                 raise ModelContractViolationError(

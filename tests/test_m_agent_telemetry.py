@@ -52,6 +52,7 @@ from m_agent import (
     ToolFailure,
     ToolOutcome,
     ToolRequest,
+    UsageProvenance,
 )
 
 #: 穿过 Run input / 模型 / Context / Tool / resolution 路径的哨兵值，
@@ -121,7 +122,11 @@ class UsageReportingAdapter(DeterministicModelAdapter):
         response = await super().generate(request)
         return ModelResponse(
             content=response.content,
-            usage=ModelUsage(input_tokens=11, output_tokens=7),
+            usage=ModelUsage(
+                input_tokens=11,
+                output_tokens=7,
+                provenance=UsageProvenance.RUNTIME_SIZED,
+            ),
         )
 
 

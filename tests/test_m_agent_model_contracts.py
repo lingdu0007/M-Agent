@@ -175,6 +175,88 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 input_tokens_provenance=UsageProvenance.PROVIDER_REPORTED,
             )
 
+    def test_typed_model_contract_values_reject_unknown_fields(self) -> None:
+        """Future modes and typos cannot silently weaken a frozen binding."""
+        from pydantic import ValidationError
+
+        from m_agent.runtime import (
+            ModelBinding,
+            ModelBindingSet,
+            ModelCapabilities,
+            ModelCapabilityCombination,
+            ModelContract,
+            ModelDelta,
+            ModelExecutionBudget,
+            ModelLimits,
+            ModelPurpose,
+            ModelRequirementMatch,
+            ModelRequirementReason,
+            ModelRequirements,
+            ModelResponse,
+            ModelUsage,
+            ModelUsageGuarantees,
+            RevisionStability,
+        )
+
+        contract = ModelContract(
+            contract_id="closed-model-values",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:closed-model-values",
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+        bindings = ModelBindingSet.reuse_primary(contract)
+        invalid_constructors = (
+            lambda: ModelCapabilityCombination(future_mode="NATIVE"),
+            lambda: ModelCapabilities(future_mode="NATIVE"),
+            lambda: ModelLimits(
+                context_window_tokens=128,
+                max_output_tokens=32,
+                future_limit=1,
+            ),
+            lambda: ModelUsageGuarantees(future_guarantee="REQUIRED"),
+            lambda: ModelContract(
+                contract_id="closed-model-values",
+                version="1",
+                revision_stability=RevisionStability.PINNED,
+                model_identity="deterministic:closed-model-values",
+                limits=ModelLimits(
+                    context_window_tokens=128, max_output_tokens=32
+                ),
+                input_sizer_id="deterministic-v1",
+                serialization_id="deterministic-text-v1",
+                future_contract="unsupported",
+            ),
+            lambda: ModelRequirementMatch(
+                compatible=True,
+                reason=ModelRequirementReason.SATISFIED,
+                future_reason="unsupported",
+            ),
+            lambda: ModelRequirements(future_requirement="unsupported"),
+            lambda: ModelBinding(
+                purpose=ModelPurpose.PRIMARY,
+                contract=contract,
+                future_binding="unsupported",
+            ),
+            lambda: ModelBindingSet(
+                bindings=bindings.bindings,
+                future_binding_set="unsupported",
+            ),
+            lambda: ModelExecutionBudget(future_budget=1),
+            lambda: ModelUsage(future_usage=1),
+            lambda: ModelDelta(content="delta", future_delta="unsupported"),
+            lambda: ModelResponse(
+                content="response", future_response="unsupported"
+            ),
+        )
+
+        for constructor in invalid_constructors:
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(ValidationError):
+                    constructor()
+
     def test_binding_reuse_and_capability_combinations_are_explicit(self) -> None:
         """Binding reuse and multi-mode protocols need durable declarations."""
         from pydantic import ValidationError
@@ -414,6 +496,113 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             adapter.last_request.structured_output,
             StructuredOutputMode.JSON_OBJECT,
         )
+
+    async def test_tool_call_can_precede_a_strict_structured_final_response(
+        self,
+    ) -> None:
+        """A tool-only intermediate response does not need final JSON content."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelCapabilityCombination,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StepStatus,
+            StepType,
+            StructuredOutputMode,
+            ToolCall,
+            ToolCallingMode,
+            ToolEffect,
+            ToolOutcome,
+        )
+
+        capabilities = ModelCapabilities(
+            tool_calling=ToolCallingMode.NATIVE,
+            structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+            supported_combinations=(
+                ModelCapabilityCombination(
+                    tool_calling=ToolCallingMode.NATIVE,
+                    structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+                ),
+            ),
+        )
+        contract = ModelContract(
+            contract_id="tool-then-strict-json",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:tool-then-strict-json",
+            capabilities=capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+
+        class ToolThenStrictResponseAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                self.call_count += 1
+                self._last_request = request
+                if self.call_count == 1:
+                    return ModelResponse(
+                        tool_calls=(
+                            ToolCall(
+                                call_id="lookup-1",
+                                tool_name="lookup",
+                                arguments="{}",
+                            ),
+                        )
+                    )
+                return ModelResponse(content='{"answer":"confirmed"}')
+
+        adapter = ToolThenStrictResponseAdapter(
+            ("unused",), model_contract=contract
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="tool-then-strict-json",
+                version="1",
+                instructions="Use lookup before returning JSON.",
+                model_requirements=ModelRequirements(capabilities=capabilities),
+                model_adapter=adapter,
+                tools=(
+                    DeterministicTool(
+                        name="lookup",
+                        effect=ToolEffect.READ_ONLY,
+                        handler=lambda request: ToolOutcome.success(
+                            request.call_id, request.tool_name, "confirmed"
+                        ),
+                    ),
+                ),
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("tool-then-strict-json", "1", "hi")
+        terminal = await runner.start_run(created.run_id)
+        inspection = await runner.inspect_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(adapter.call_count, 2)
+        self.assertEqual(
+            [step.step_type for step in inspection.steps],
+            [StepType.MODEL, StepType.TOOL, StepType.MODEL],
+        )
+        self.assertEqual(inspection.steps[1].status, StepStatus.SUCCEEDED)
 
     async def test_snapshotless_persisted_run_fails_closed_without_dispatch(
         self,
@@ -1125,6 +1314,67 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 1)
 
+    async def test_provider_reported_usage_is_rejected_when_contract_disables_it(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelResponse,
+            ModelUsage,
+            Runner,
+            RunStatus,
+            StepStatus,
+            UsageProvenance,
+        )
+
+        class UndeclaredUsageAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                self.call_count += 1
+                self._last_request = request
+                return ModelResponse(
+                    content="answer",
+                    usage=ModelUsage(
+                        input_tokens=3,
+                        output_tokens=2,
+                        provenance=UsageProvenance.PROVIDER_REPORTED,
+                        raw_unit="tokens",
+                        normalization_source="test-provider-usage-v1",
+                    ),
+                )
+
+        adapter = UndeclaredUsageAdapter(("unused",))
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="undeclared-provider-usage",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("undeclared-provider-usage", "1", "hi")
+        terminal = await runner.start_run(created.run_id)
+        inspection = await runner.inspect_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(
+            [attempt.status for attempt in inspection.attempts], [StepStatus.FAILED]
+        )
+        self.assertIsNone(inspection.attempts[0].usage)
+
     async def test_actual_provider_revision_is_persisted_with_response(self) -> None:
         from m_agent import deserialize_model_response
         from m_agent.adapters import (
@@ -1794,8 +2044,12 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         class UsageAdapter(DeterministicModelAdapter):
-            def __init__(self, provenance: UsageProvenance) -> None:
-                super().__init__(("accepted",))
+            def __init__(
+                self,
+                provenance: UsageProvenance,
+                model_contract: ModelContract,
+            ) -> None:
+                super().__init__(("accepted",), model_contract=model_contract)
                 self._provenance = provenance
 
             async def generate(self, request):
@@ -1900,7 +2154,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         provider_terminal, provider_inspection = await run(
             ModelUsageGuarantees(),
-            UsageAdapter(UsageProvenance.PROVIDER_REPORTED),
+            UsageAdapter(
+                UsageProvenance.PROVIDER_REPORTED,
+                contract(ModelUsageGuarantees()),
+            ),
         )
         self.assertIs(provider_terminal.status, RunStatus.SUCCEEDED)
         provider_response = deserialize_model_response(
@@ -1918,7 +2175,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         sized_terminal, sized_inspection = await run(
             ModelUsageGuarantees(),
-            UsageAdapter(UsageProvenance.RUNTIME_SIZED),
+            UsageAdapter(
+                UsageProvenance.RUNTIME_SIZED,
+                contract(ModelUsageGuarantees()),
+            ),
         )
         self.assertIs(sized_terminal.status, RunStatus.SUCCEEDED)
         sized_response = deserialize_model_response(
@@ -1931,7 +2191,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         partial_terminal, partial_inspection = await run(
-            ModelUsageGuarantees(), PartialUsageAdapter(("accepted",))
+            ModelUsageGuarantees(),
+            PartialUsageAdapter(
+                ("accepted",), model_contract=contract(ModelUsageGuarantees())
+            ),
         )
         self.assertIs(partial_terminal.status, RunStatus.SUCCEEDED)
         partial_response = deserialize_model_response(
@@ -2427,7 +2690,9 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(terminal.status, RunStatus.FAILED)
         self.assertEqual(terminal.error_code, "model_checkpoint_unconfirmed")
         self.assertEqual(adapter.call_count, 1)
-        self.assertEqual([step.status for step in inspection.steps], [StepStatus.FAILED])
+        self.assertEqual(
+            [step.status for step in inspection.steps], [StepStatus.FAILED]
+        )
         self.assertEqual(
             [attempt.status for attempt in inspection.attempts],
             [StepStatus.FAILED],
@@ -2448,6 +2713,133 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 with self.assertRaisesRegex(
                     RuntimeError, "attempt persistence"
+                ):
+                    await Runner(registry, first_store).start_run(created.run_id)
+                crashed = await first_store.get_run(created.run_id)
+                assert crashed is not None
+                assert crashed.lease_expires_at is not None
+                restart_clock = FakeClock(
+                    crashed.lease_expires_at + timedelta(seconds=1)
+                )
+            finally:
+                first_store.close()
+            reopened = SQLiteRunStore(
+                db_path,
+                payload_codec=PlaintextPayloadCodec(),
+                clock=restart_clock,
+            )
+            try:
+                terminal = await Runner(registry, reopened).resume_run(
+                    created.run_id
+                )
+                inspection = await Runner(registry, reopened).inspect_run(
+                    created.run_id
+                )
+            finally:
+                reopened.close()
+            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertEqual(
+                terminal.error_code, "model_checkpoint_unconfirmed"
+            )
+            self.assertEqual(adapter.call_count, 1)
+            self.assertEqual(
+                [step.status for step in inspection.steps], [StepStatus.FAILED]
+            )
+            self.assertEqual(
+                [attempt.status for attempt in inspection.attempts],
+                [StepStatus.FAILED],
+            )
+
+    async def test_recovery_fails_closed_when_success_checkpoint_persistence_fails(
+        self,
+    ) -> None:
+        """A successful model attempt without its checkpoint is never replayed."""
+        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+            StepStatus,
+            StepType,
+        )
+
+        class FailingCheckpointStore:
+            fail_model_checkpoint = True
+
+            async def record_checkpoint(self, checkpoint, **kwargs):
+                if (
+                    self.fail_model_checkpoint
+                    and checkpoint.step_type is StepType.MODEL
+                ):
+                    self.fail_model_checkpoint = False
+                    raise RuntimeError("injected checkpoint persistence failure")
+                return await super().record_checkpoint(checkpoint, **kwargs)
+
+        class FailingInMemoryStore(FailingCheckpointStore, InMemoryRunStore):
+            pass
+
+        class FailingSQLiteStore(FailingCheckpointStore, SQLiteRunStore):
+            pass
+
+        def registry_and_adapter():
+            adapter = DeterministicModelAdapter(("answer",))
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="checkpoint-persistence",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                )
+            )
+            return registry, adapter
+
+        clock = FakeClock()
+        memory_store = FailingInMemoryStore(
+            payload_codec=PlaintextPayloadCodec(), clock=clock
+        )
+        registry, adapter = registry_and_adapter()
+        created = await Runner(registry, memory_store).create_run(
+            "checkpoint-persistence", "1", "hello"
+        )
+        with self.assertRaisesRegex(RuntimeError, "checkpoint persistence"):
+            await Runner(registry, memory_store).start_run(created.run_id)
+        clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+        terminal = await Runner(registry, memory_store).resume_run(created.run_id)
+        inspection = await Runner(registry, memory_store).inspect_run(
+            created.run_id
+        )
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "model_checkpoint_unconfirmed")
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual([step.status for step in inspection.steps], [StepStatus.FAILED])
+        self.assertEqual(
+            [attempt.status for attempt in inspection.attempts],
+            [StepStatus.FAILED],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "run.db")
+            first_clock = FakeClock()
+            first_store = FailingSQLiteStore(
+                db_path,
+                payload_codec=PlaintextPayloadCodec(),
+                clock=first_clock,
+            )
+            registry, adapter = registry_and_adapter()
+            try:
+                created = await Runner(registry, first_store).create_run(
+                    "checkpoint-persistence", "1", "hello"
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "checkpoint persistence"
                 ):
                     await Runner(registry, first_store).start_run(created.run_id)
                 crashed = await first_store.get_run(created.run_id)
