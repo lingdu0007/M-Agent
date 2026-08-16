@@ -164,6 +164,218 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(terminal.status, RunStatus.SUCCEEDED)
 
+    async def test_legacy_snapshot_without_fingerprint_refuses_dispatch(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            DefinitionSnapshot,
+            ModelCapabilities,
+            RunRecord,
+            Runner,
+            RunStatus,
+        )
+
+        adapter = DeterministicModelAdapter(("DRIFTED",))
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="unverified-legacy-snapshot",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        snapshot = DefinitionSnapshot(
+            definition_id="unverified-legacy-snapshot",
+            version="1",
+            instructions="Reply.",
+            required_capabilities=ModelCapabilities(),
+            adapter_capabilities=adapter.capabilities,
+            adapter_contract_fingerprint="",
+        )
+        store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        created = await store.create_run(
+            RunRecord(
+                run_id="unverified-legacy-snapshot-run",
+                definition_id=snapshot.definition_id,
+                definition_version=snapshot.version,
+                input="hello",
+                status=RunStatus.CREATED,
+                snapshot=snapshot,
+            )
+        )
+        runner = Runner(registry, store)
+
+        with self.assertRaisesRegex(RuntimeError, "not verifiable"):
+            await runner.start_run(created.run_id)
+
+        self.assertEqual(adapter.call_count, 0)
+        unchanged = await runner.get_run(created.run_id)
+        self.assertIs(unchanged.status, RunStatus.CREATED)
+
+    async def test_recovery_does_not_replay_persisted_failed_model_step(
+        self,
+    ) -> None:
+        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            FailureClassification,
+            ModelFailure,
+            ModelResponse,
+            Runner,
+            RunStatus,
+            StepStatus,
+        )
+
+        class PermanentThenSuccessAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                self.call_count += 1
+                self._last_request = request
+                if self.call_count == 1:
+                    raise ModelFailure(
+                        FailureClassification.PERMANENT,
+                        "model_rejected",
+                        "permanent model rejection",
+                    )
+                return ModelResponse(content="unexpected replay success")
+
+        class InterruptedTerminalFailure:
+            fail_terminal_transition = True
+
+            async def transition_run(self, *args, **kwargs):
+                if (
+                    self.fail_terminal_transition
+                    and kwargs.get("status") is RunStatus.FAILED
+                ):
+                    self.fail_terminal_transition = False
+                    raise RuntimeError("simulated loss after failed model step")
+                return await super().transition_run(*args, **kwargs)
+
+        class InterruptedInMemoryStore(
+            InterruptedTerminalFailure, InMemoryRunStore
+        ):
+            pass
+
+        class InterruptedSQLiteStore(InterruptedTerminalFailure, SQLiteRunStore):
+            pass
+
+        def registry_and_adapter():
+            adapter = PermanentThenSuccessAdapter(("unused",))
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="persisted-model-failure",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                )
+            )
+            return registry, adapter
+
+        async def assert_no_replay(store, clock, registry, adapter) -> None:
+            runner = Runner(registry, store)
+            created = await runner.create_run(
+                "persisted-model-failure", "1", "hello"
+            )
+            with self.assertRaisesRegex(RuntimeError, "failed model step"):
+                await runner.start_run(created.run_id)
+            before = await runner.inspect_run(created.run_id)
+            self.assertIs(before.run.status, RunStatus.RUNNING)
+            self.assertEqual(adapter.call_count, 1)
+            self.assertEqual(
+                [step.status for step in before.steps], [StepStatus.FAILED]
+            )
+            self.assertEqual(
+                [attempt.status for attempt in before.attempts],
+                [StepStatus.FAILED],
+            )
+
+            clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+            terminal = await Runner(registry, store).resume_run(created.run_id)
+            after = await Runner(registry, store).inspect_run(created.run_id)
+            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertEqual(adapter.call_count, 1)
+            self.assertEqual(
+                [step.status for step in after.steps], [StepStatus.FAILED]
+            )
+            self.assertEqual(
+                [attempt.status for attempt in after.attempts],
+                [StepStatus.FAILED],
+            )
+
+        memory_clock = FakeClock()
+        memory_store = InterruptedInMemoryStore(
+            payload_codec=PlaintextPayloadCodec(), clock=memory_clock
+        )
+        memory_registry, memory_adapter = registry_and_adapter()
+        await assert_no_replay(
+            memory_store, memory_clock, memory_registry, memory_adapter
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "persisted-model-failure.db")
+            first_clock = FakeClock()
+            first_store = InterruptedSQLiteStore(
+                db_path,
+                payload_codec=PlaintextPayloadCodec(),
+                clock=first_clock,
+            )
+            registry, adapter = registry_and_adapter()
+            try:
+                runner = Runner(registry, first_store)
+                created = await runner.create_run(
+                    "persisted-model-failure", "1", "hello"
+                )
+                with self.assertRaisesRegex(RuntimeError, "failed model step"):
+                    await runner.start_run(created.run_id)
+                crashed = await first_store.get_run(created.run_id)
+                assert crashed is not None
+                assert crashed.lease_expires_at is not None
+                restart_clock = FakeClock(
+                    crashed.lease_expires_at + timedelta(seconds=1)
+                )
+            finally:
+                first_store.close()
+
+            reopened = SQLiteRunStore(
+                db_path,
+                payload_codec=PlaintextPayloadCodec(),
+                clock=restart_clock,
+            )
+            try:
+                terminal = await Runner(registry, reopened).resume_run(
+                    created.run_id
+                )
+                inspection = await Runner(registry, reopened).inspect_run(
+                    created.run_id
+                )
+            finally:
+                reopened.close()
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(
+            [step.status for step in inspection.steps], [StepStatus.FAILED]
+        )
+        self.assertEqual(
+            [attempt.status for attempt in inspection.attempts],
+            [StepStatus.FAILED],
+        )
+
     def test_live_contract_metadata_is_explicit_and_coherent(self) -> None:
         from pydantic import ValidationError
 

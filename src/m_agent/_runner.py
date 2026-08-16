@@ -1190,7 +1190,10 @@ class Runner:
             # 0.2 snapshots predate purpose bindings. Retain their original
             # configuration check rather than inferring a new frozen binding.
             if not snapshot.adapter_contract_fingerprint:
-                return
+                raise RuntimeError(
+                    f"run {run.run_id} legacy snapshot Model Contract is not "
+                    "verifiable; refusing to dispatch an unfrozen adapter"
+                )
             if snapshot.adapter_capabilities != definition.model_adapter.capabilities:
                 raise RuntimeError(
                     f"run {run.run_id} legacy snapshot Model Capabilities do not "
@@ -1305,6 +1308,14 @@ class Runner:
             ),
             None,
         )
+        last_model_step = next(
+            (
+                step
+                for step in reversed(persisted_steps)
+                if step.step_type is StepType.MODEL
+            ),
+            None,
+        )
         model_steps = {
             step.step_id: step
             for step in persisted_steps
@@ -1349,6 +1360,14 @@ class Runner:
             return await self._fail_run(
                 run, lease, ERROR_MODEL_CHECKPOINT_UNCONFIRMED
             )
+        if (
+            last_model_step is not None
+            and last_model_step.status is StepStatus.FAILED
+        ):
+            # A terminal Model Step was already durable when process loss
+            # interrupted the Run transition. Its frozen retry decision was
+            # exhausted, so recovery must finish FAILED without another call.
+            return await self._fail_run(run, lease)
         # 是否注入外部上下文以冻结 Snapshot 的 has_context_provider 为准
         # （ADR 0022/0023：恢复行为由 Run 启动时冻结的定义决定，后续注册
         # 的同 id+version 定义不能改变恢复行为）。已确认的 Context Step
