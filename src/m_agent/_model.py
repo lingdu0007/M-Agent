@@ -138,7 +138,27 @@ class ModelContract(BaseModel, frozen=True):
     usage_guarantees: ModelUsageGuarantees = Field(
         default_factory=ModelUsageGuarantees
     )
-    fingerprint: str
+    fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_usage_reporting(self) -> "ModelContract":
+        if (
+            self.capabilities.usage_reporting is UsageReportingMode.NONE
+            and any(
+                getattr(self.usage_guarantees, field)
+                is UsageFieldGuarantee.REQUIRED
+                for field in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "reasoning_tokens",
+                )
+            )
+        ):
+            raise ValueError(
+                "usage_reporting=NONE cannot require usage fields"
+            )
+        return self
 
 
 class ModelRequirementMatch(BaseModel, frozen=True):
@@ -252,13 +272,37 @@ class ModelExecutionBudget(BaseModel, frozen=True):
 
 
 class ModelUsage(BaseModel, frozen=True):
-    """Normalized usage with an explicit source; missing values stay missing."""
+    """Normalized usage with provenance retained for every usage field."""
 
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_tokens: int | None = None
+    input_tokens_provenance: UsageProvenance | None = None
+    output_tokens_provenance: UsageProvenance | None = None
+    cached_input_tokens_provenance: UsageProvenance | None = None
+    reasoning_tokens_provenance: UsageProvenance | None = None
+    #: Compatibility summary only; field-level provenance is authoritative.
     provenance: UsageProvenance = UsageProvenance.PROVIDER_REPORTED
+
+    @model_validator(mode="after")
+    def _normalize_field_provenance(self) -> "ModelUsage":
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "reasoning_tokens",
+        ):
+            value = getattr(self, field)
+            source = getattr(self, f"{field}_provenance")
+            object.__setattr__(
+                self,
+                f"{field}_provenance",
+                UsageProvenance.UNAVAILABLE
+                if value is None
+                else source or self.provenance
+            )
+        return self
 
 
 class ModelRequest(BaseModel, frozen=True):
@@ -312,6 +356,13 @@ def normalize_model_response(
     contract: ModelContract, response: ModelResponse
 ) -> ModelResponse:
     """Apply field guarantees without inventing missing provider usage."""
+    if (
+        response.tool_calls
+        and contract.capabilities.tool_calling is ToolCallingMode.NONE
+    ):
+        raise ModelContractViolationError(
+            "Model Contract does not declare native tool calling"
+        )
     usage = response.usage
     guarantees = contract.usage_guarantees
     fields = (
@@ -345,6 +396,19 @@ def normalize_model_response(
     return response
 
 
+def assert_model_request_compatible(
+    contract: ModelContract, request: ModelRequest
+) -> None:
+    """Reject an undeclared request protocol combination before dispatch."""
+    if (
+        (request.tools or request.tool_outcomes)
+        and contract.capabilities.tool_calling is ToolCallingMode.NONE
+    ):
+        raise ModelContractViolationError(
+            "Model Contract does not declare native tool calling"
+        )
+
+
 class ModelAdapter(ABC):
     """Live provider Model Adapter 基类 / 扩展边界。
 
@@ -358,46 +422,9 @@ class ModelAdapter(ABC):
 
     @property
     def model_contract(self) -> ModelContract:
-        """Return this instance's declared Contract without credentials.
-
-        Existing adapters that have not yet supplied a bespoke Contract are
-        converted conservatively from their typed capability modes. The
-        Runner consumes this Contract, never the adapter's class attributes.
-        """
-        identity = f"{type(self).__module__}.{type(self).__qualname__}"
-        fingerprint = self.definition_contract_fingerprint()
-        # Legacy deterministic fixtures were intentionally portable across
-        # subprocess entry-point module names. They remain conservative until
-        # an integrator supplies an explicit instance ModelContract.
-        if self.deterministic and not fingerprint:
-            identity = "deterministic"
-        if self.deterministic and not fingerprint:
-            encoded = json.dumps(
-                {
-                    "identity": identity,
-                    "capabilities": self.capabilities.model_dump(mode="json"),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-            fingerprint = hashlib.sha256(encoded).hexdigest()
-        return ModelContract(
-            contract_id=identity,
-            version="1",
-            revision_stability=(
-                RevisionStability.PINNED
-                if self.deterministic
-                else RevisionStability.PROVIDER_ALIAS
-            ),
-            model_identity=getattr(self, "model", identity),
-            capabilities=self.capabilities,
-            limits=ModelLimits(
-                context_window_tokens=1_000_000,
-                max_output_tokens=1_000_000,
-            ),
-            input_sizer_id=f"{identity}:unsized-v1",
-            serialization_id=f"{identity}:v1",
-            fingerprint=fingerprint,
+        """Return the explicitly declared Contract for this live instance."""
+        raise ValueError(
+            f"{type(self).__name__} must declare an instance ModelContract"
         )
 
     def definition_contract_fingerprint(self) -> str:
@@ -480,7 +507,27 @@ class DeterministicModelAdapter(ModelAdapter):
     def model_contract(self) -> ModelContract:
         if self._model_contract is not None:
             return self._model_contract
-        return super().model_contract
+        encoded = json.dumps(
+            {
+                "capabilities": self.capabilities.model_dump(mode="json"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return ModelContract(
+            contract_id="deterministic",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic",
+            capabilities=self.capabilities,
+            limits=ModelLimits(
+                context_window_tokens=1_000_000,
+                max_output_tokens=1_000_000,
+            ),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+            fingerprint=hashlib.sha256(encoded).hexdigest(),
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1

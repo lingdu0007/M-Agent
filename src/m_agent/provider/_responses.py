@@ -38,6 +38,7 @@ from ._base import (
 )
 from m_agent._model import (
     ModelCapabilities,
+    ModelContract,
     ModelDelta,
     ModelRequest,
     ModelResponse,
@@ -70,6 +71,8 @@ class ResponsesModelAdapter(ProviderModelAdapter):
     :param responses_path: 端点路径，默认 ``/responses``（也读取
         ``M_AGENT_OPENAI_RESPONSES_PATH`` / ``OPENAI_RESPONSES_PATH`` /
         ``AGENT_RESPONSES_PATH``）。
+    :param model_contract: 当前 model/deployment 的显式实例 Contract；
+        缺失时 Adapter 可构造但不能注册进 DefinitionRegistry。
     :param structured_output_schema: 可选 JSON Schema；声明
         structured_output 时随请求发送（json_schema）。
     """
@@ -82,6 +85,7 @@ class ResponsesModelAdapter(ProviderModelAdapter):
         model: str | None = None,
         base_url: str | None = None,
         timeout: float = 120.0,
+        model_contract: ModelContract | None = None,
         responses_path: str | None = None,
         structured_output_schema: dict[str, Any] | None = None,
         structured_output_name: str = "result",
@@ -90,6 +94,7 @@ class ResponsesModelAdapter(ProviderModelAdapter):
             model=model,
             base_url=base_url,
             timeout=timeout,
+            model_contract=model_contract,
             structured_output_schema=structured_output_schema,
             structured_output_name=structured_output_name,
         )

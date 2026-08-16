@@ -507,7 +507,10 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "run.db")
             clock = FakeClock()
-            model = DeterministicModelAdapter(responses=(_ANSWER,))
+            # Ticket 08 的 request preflight 会在 telemetry 前拒绝不支持
+            # 工具的模型；此处需使用支持工具的 Adapter，才会覆盖 lease
+            # 在 STEP_STARTED hook 之后、真正 model dispatch 之前的守卫。
+            model = ToolThenAnswerAdapter()
             store = SQLiteRunStore(
                 db, payload_codec=PlaintextPayloadCodec(), clock=clock
             )

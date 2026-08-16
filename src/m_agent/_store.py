@@ -230,6 +230,17 @@ class RunStore(Protocol):
         lease_owner: str | None = None,
     ) -> StepAttempt: ...
 
+    async def reserve_model_attempt(
+        self,
+        step: StepRecord,
+        attempt: StepAttempt,
+        *,
+        run_max_attempts: int,
+        purpose_max_attempts: int,
+        expected_version: int,
+        lease_owner: str,
+    ) -> bool: ...
+
     async def record_checkpoint(
         self,
         checkpoint: StepCheckpoint,

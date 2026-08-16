@@ -723,6 +723,101 @@ class SQLiteRunStore:
         self._conn.commit()
         return stored.to_record(output=attempt.output, error=attempt.error)
 
+    async def reserve_model_attempt(
+        self,
+        step: StepRecord,
+        attempt: StepAttempt,
+        *,
+        run_max_attempts: int,
+        purpose_max_attempts: int,
+        expected_version: int,
+        lease_owner: str,
+    ) -> bool:
+        """Atomically consume a model budget slot and persist its attempt."""
+        if (
+            step.step_type is not StepType.MODEL
+            or step.run_id != attempt.run_id
+            or step.step_id != attempt.step_id
+            or attempt.model_purpose is None
+        ):
+            raise ValueError("model reservation requires one MODEL StepAttempt")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT version, lease_owner, lease_expires_at FROM runs "
+                "WHERE run_id=?",
+                (attempt.run_id,),
+            ).fetchone()
+            if row is None:
+                raise RunNotFoundError(f"run {attempt.run_id} not found")
+            if row["version"] != expected_version:
+                raise StaleRunVersionError(
+                    f"stale model reservation for run {attempt.run_id}: expected "
+                    f"version {expected_version}, authoritative version is "
+                    f"{row['version']}; model attempt was not reserved"
+                )
+            expires_at = (
+                datetime.fromisoformat(row["lease_expires_at"])
+                if row["lease_expires_at"] is not None
+                else None
+            )
+            if (
+                row["lease_owner"] != lease_owner
+                or expires_at is None
+                or expires_at <= self._clock.now()
+            ):
+                raise LeaseNotHeldError(
+                    f"run {attempt.run_id} lease is not held by {lease_owner!r}"
+                )
+            model_attempts = self._conn.execute(
+                "SELECT COUNT(*) FROM step_attempts WHERE run_id=? "
+                "AND model_purpose IS NOT NULL",
+                (attempt.run_id,),
+            ).fetchone()[0]
+            purpose_attempts = self._conn.execute(
+                "SELECT COUNT(*) FROM step_attempts WHERE run_id=? "
+                "AND model_purpose=?",
+                (attempt.run_id, attempt.model_purpose.value),
+            ).fetchone()[0]
+            if (
+                model_attempts >= run_max_attempts
+                or purpose_attempts >= purpose_max_attempts
+            ):
+                self._conn.rollback()
+                return False
+            self._conn.execute(
+                "INSERT OR REPLACE INTO steps (step_id, run_id, step_type, "
+                "status, created_at) VALUES (?,?,?,?,?)",
+                (
+                    step.step_id,
+                    step.run_id,
+                    step.step_type.value,
+                    step.status.value,
+                    step.created_at.isoformat(),
+                ),
+            )
+            self._conn.execute(
+                "INSERT INTO step_attempts (attempt_id, step_id, run_id, status, "
+                "error, classification, error_code, model_purpose, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    attempt.attempt_id,
+                    attempt.step_id,
+                    attempt.run_id,
+                    attempt.status.value,
+                    None,
+                    None,
+                    None,
+                    attempt.model_purpose.value,
+                    attempt.created_at.isoformat(),
+                ),
+            )
+            self._conn.commit()
+            return True
+        except BaseException:
+            self._conn.rollback()
+            raise
+
     async def record_checkpoint(
         self,
         checkpoint: StepCheckpoint,

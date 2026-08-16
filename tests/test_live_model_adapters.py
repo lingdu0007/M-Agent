@@ -52,7 +52,9 @@ from m_agent import (
     ModelAdapter,
     ModelCapabilities,
     ModelCapabilityError,
+    ModelContract,
     ModelFailure,
+    ModelLimits,
     ModelPurpose,
     ModelRequirements,
     PlaintextPayloadCodec,
@@ -61,6 +63,7 @@ from m_agent import (
     RunResolution,
     RunStatus,
     RunUpdateType,
+    RevisionStability,
     SQLiteRunStore,
     StepStatus,
     StepType,
@@ -151,6 +154,23 @@ def make_answer_tool() -> tuple[DeterministicTool, list[int]]:
     return tool, calls
 
 
+def configure_mock_contract(adapter):
+    """Supply the explicit instance Contract required by Runner mock seams."""
+    if getattr(adapter, "_model_contract", None) is None:
+        adapter._model_contract = ModelContract(
+            contract_id=f"mock-{type(adapter).__name__}",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity=adapter.model,
+            capabilities=adapter.capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="mock-provider-sizer-v1",
+            serialization_id="mock-provider-wire-v1",
+            fingerprint=adapter.definition_contract_fingerprint(),
+        )
+    return adapter
+
+
 async def run_to_terminal(
     testcase: unittest.TestCase,
     adapter,
@@ -167,6 +187,7 @@ async def run_to_terminal(
     测试失败，与普通断言失败在报告中可区分（AC：Test reporting
     distinguishes provider failure from assertion failure）。
     """
+    adapter = configure_mock_contract(adapter)
     registry = DefinitionRegistry()
     registry.register(
         AgentDefinition(
@@ -439,6 +460,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_schema=STRUCTURED_SCHEMA,
                 structured_output_mode="json_object",
             )
+            configure_mock_contract(original)
             original_definition = AgentDefinition(
                 definition_id="frozen-adapter-contract",
                 version="1.0",
@@ -471,6 +493,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 timeout=timeout,
             )
             changed._transport = httpx.MockTransport(counter_transport)
+            configure_mock_contract(changed)
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition(
@@ -526,6 +549,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_schema=STRUCTURED_SCHEMA,
                 structured_output_mode="json_object",
             )
+            configure_mock_contract(original)
             snapshot = AgentDefinition(
                 definition_id="frozen-resolution-contract",
                 version="1.0",
@@ -558,6 +582,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_mode="json_schema",
             )
             changed._transport = httpx.MockTransport(counter_transport)
+            configure_mock_contract(changed)
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition(
@@ -607,7 +632,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 raise AssertionError("must not be dispatched")
 
         registry = DefinitionRegistry()
-        with self.assertRaisesRegex(ValueError, "fingerprint"):
+        with self.assertRaisesRegex(ValueError, "instance ModelContract"):
             registry.register(
                 AgentDefinition(
                     definition_id="unfrozen-live-adapter",
@@ -642,6 +667,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_mode="json_object",
             )
             adapter._transport = httpx.MockTransport(counter_transport)
+            configure_mock_contract(adapter)
 
             class MutatingSink:
                 def emit(self, event) -> None:
@@ -728,6 +754,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             adapter._transport = httpx.MockTransport(
                 lambda request: httpx.Response(401)
             )
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition(
@@ -810,6 +837,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
 
         adapter = PartialLiveAdapter()
         adapter._transport = httpx.MockTransport(counter_transport)
+        configure_mock_contract(adapter)
         registry = DefinitionRegistry()
         with self.assertRaises(ModelCapabilityError):
             registry.register(
@@ -838,6 +866,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             ResponsesModelAdapter,
         ):
             adapter = adapter_cls()
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition(
@@ -930,6 +959,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     headers={"content-type": "text/event-stream"},
                 )
             )
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition(
@@ -980,6 +1010,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     },
                 )
             )
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition(
@@ -1199,6 +1230,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 base_url="https://live-contract.invalid/v1",
             )
             adapter._transport = httpx.MockTransport(handler)
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition(
@@ -1290,6 +1322,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 base_url="https://live-contract.invalid/v1",
             )
             adapter._transport = httpx.MockTransport(handler)
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
                 AgentDefinition(

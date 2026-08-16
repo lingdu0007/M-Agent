@@ -23,12 +23,16 @@ Completions 默认使用严格的 `json_schema`；仅支持原生 JSON object �
 `M_AGENT_OPENAI_CHAT_STRUCTURED_OUTPUT_MODE=json_object`（或构造器的同名
 `structured_output_mode`），这不是静默降级。
 
-Adapter 的 model、净化后的 endpoint、timeout、structured-output schema 与
-Chat mode 只会形成不可逆的 configuration fingerprint，随
-`DefinitionSnapshot` 冻结。恢复时重新注册同一 definition/version 若
-fingerprint 不一致，会在任何网络或工具调用前失败，不能静默改变既有 Run
-的模型语义；fingerprint 不保存凭证、URL 或 schema 正文。所有 live
-adapter 都必须声明非空、稳定的 fingerprint，注册时会被校验。
+运行时集成者必须在构造 live Adapter 时显式传入实例级
+`model_contract=ModelContract(...)`，其中声明真实的 model/deployment
+identity、limits、Sizer、serialization、usage guarantee 和非敏感
+fingerprint；Adapter 类的 capability 常量只是协议上限，不能推导这些
+实例事实。未传 Contract 的 Adapter 可以无凭证地构造以配置 HTTP，但
+`DefinitionRegistry.register` 会在任何网络或工具调用前拒绝它。Contract
+能力必须与 Adapter 当前能力相同；Adapter 的 model、净化后的 endpoint、
+timeout、structured-output schema 与 Chat mode 在首次注册时形成不可逆的
+非敏感 configuration fingerprint，之后变化会在 dispatch 前失败，不能
+静默改变既有 Run 的模型语义。
 
 能力声明（`capabilities`）是**如实声明**（ADR 0030）：声明为支持的能力
 才有契约案例；未声明的能力（本版本两者均无）绝不做静默降级。Runner
@@ -60,8 +64,9 @@ adapter 都必须声明非空、稳定的 fingerprint，注册时会被校验。
 - Adapter 的错误是结构化 `m_agent.ModelFailure`（分类 +
   稳定错误码），消息只含 HTTP 状态 / 传输层类型，**不包含 provider
   错误 body**，从机制上杜绝凭证回显与内容审计。
-- 未配置凭证时 Adapter 可以构造与注册；任何网络请求都会以
-  `ModelFailure(PERMANENT, provider_credentials_missing)` 失败。
+- 未配置凭证时 Adapter 可以构造；提供显式实例 Contract 后可注册。任何
+  网络请求都会以 `ModelFailure(PERMANENT, provider_credentials_missing)`
+  失败。
 
 ## 安装与运行
 
@@ -122,7 +127,8 @@ compatibility 已验证。
 - **native structured output**：配置 JSON Schema，断言输出是符合
   Schema 的 JSON；
 - **usage reporting**：provider 返回 usage 时透传为 `ModelUsage`
-  （缺失时显式为 `None`，绝不伪造）；
+  （Adapter 缺失时显式为 `None`；Runner 将每个缺失 optional 字段持久化为
+  `UNAVAILABLE`，绝不伪造）；
 - **凭证隔离**：离线 `MockTransport` 的成功与 provider-failure case 使用
   sentinel 检查 SQLite 原始 bytes、Snapshot、Attempt、Checkpoint、Run
   Update 与 Telemetry 均不含凭证；真实 live 测试只检查环境是否已配置，

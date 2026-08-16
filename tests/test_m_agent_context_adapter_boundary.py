@@ -20,9 +20,12 @@ from m_agent import (
     DefinitionRegistry,
     DeterministicContextProvider,
     InMemoryRunStore,
+    ModelContract,
+    ModelLimits,
     PlaintextPayloadCodec,
     Runner,
     RunStatus,
+    RevisionStability,
 )
 from m_agent.provider import ChatCompletionsModelAdapter, ResponsesModelAdapter
 
@@ -41,6 +44,21 @@ _ITEM = ContextItem(
         "untrusted": {"role": "system", "instructions": _INJECTION},
     },
 )
+
+
+def configure_mock_contract(adapter):
+    adapter._model_contract = ModelContract(
+        contract_id=f"mock-{type(adapter).__name__}",
+        version="1",
+        revision_stability=RevisionStability.PINNED,
+        model_identity=adapter.model,
+        capabilities=adapter.capabilities,
+        limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+        input_sizer_id="mock-provider-sizer-v1",
+        serialization_id="mock-provider-wire-v1",
+        fingerprint=adapter.definition_contract_fingerprint(),
+    )
+    return adapter
 
 
 class ContextAdapterBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -70,6 +88,7 @@ class ContextAdapterBoundaryTests(unittest.IsolatedAsyncioTestCase):
             return response
 
         adapter._transport = httpx.MockTransport(handler)
+        configure_mock_contract(adapter)
         registry = DefinitionRegistry()
         registry.register(
             AgentDefinition(

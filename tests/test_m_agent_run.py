@@ -219,7 +219,8 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         created = await runner.create_run("assistant", "1.0", input="hi")
         self.assertEqual(created.status, RunStatus.CREATED)
         self.assertFalse(created.status.is_terminal)
-        self.assertIsNone(created.snapshot)  # 启动时才冻结
+        self.assertIsNotNone(created.snapshot)  # Ticket 08：创建时冻结
+        self.assertEqual(created.snapshot.definition_id, "assistant")
         self.assertEqual(adapter.call_count, 0)
 
         stored = await runner.get_run(created.run_id)

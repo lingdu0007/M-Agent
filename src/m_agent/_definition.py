@@ -134,18 +134,7 @@ class AgentDefinition(BaseModel, frozen=True):
                 "PRIMARY Model Binding contract does not match the adapter "
                 "instance contract"
             )
-        return ModelBindingSet(
-            bindings=tuple(
-                binding.model_copy(
-                    update=(
-                        {"requirements": requirements}
-                        if binding.purpose is ModelPurpose.PRIMARY
-                        else {}
-                    )
-                )
-                for binding in self.model_bindings.bindings
-            )
-        ).resolved()
+        return self.model_bindings.resolved()
 
     def frozen_snapshot(self) -> DefinitionSnapshot:
         """冻结当前版本为 Run 使用的不可变 Definition Snapshot。"""

@@ -38,6 +38,7 @@ from m_agent._context import ContextItem
 from m_agent._failure import FailureClassification, ModelFailure
 from m_agent._model import (
     ModelAdapter,
+    ModelContract,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -401,12 +402,15 @@ class ProviderModelAdapter(ModelAdapter):
         model: str | None = None,
         base_url: str | None = None,
         timeout: float = 120.0,
+        model_contract: ModelContract | None = None,
         structured_output_schema: dict[str, Any] | None = None,
         structured_output_name: str = "result",
     ) -> None:
         self.model: str = resolve_model(model)
         self.base_url: str = resolve_base_url(base_url)
         self.timeout: float = timeout
+        self._model_contract = model_contract
+        self._contract_configuration_fingerprint: str | None = None
         self.structured_output_schema: dict[str, Any] | None = (
             structured_output_schema
         )
@@ -416,6 +420,24 @@ class ProviderModelAdapter(ModelAdapter):
         self._client: httpx.AsyncClient | None = None
         #: 可替换的本地 HTTP transport（测试用，不改变 provider 协议）。
         self._transport: httpx.AsyncBaseTransport | None = None
+
+    @property
+    def model_contract(self) -> ModelContract:
+        if self._model_contract is None:
+            return super().model_contract
+        if self._model_contract.capabilities != self.capabilities:
+            raise ValueError(
+                "provider instance capabilities do not match its ModelContract"
+            )
+        current = self.definition_contract_fingerprint()
+        if self._contract_configuration_fingerprint is None:
+            self._contract_configuration_fingerprint = current
+        elif self._contract_configuration_fingerprint != current:
+            raise ValueError(
+                "provider instance configuration changed after ModelContract "
+                "was frozen"
+            )
+        return self._model_contract
 
     def _definition_contract_configuration(self) -> dict[str, Any]:
         """Return semantic provider configuration without credential material.

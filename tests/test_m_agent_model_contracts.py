@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -35,8 +37,64 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 model_adapter=DeterministicModelAdapter(),
             )
 
-    async def test_runner_freezes_a_typed_primary_binding(self) -> None:
-        """A public Runner Run persists the exact checked primary Contract."""
+    def test_live_contract_metadata_is_explicit_and_coherent(self) -> None:
+        from pydantic import ValidationError
+
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelAdapter,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelUsageGuarantees,
+            RevisionStability,
+            UsageFieldGuarantee,
+            UsageReportingMode,
+        )
+
+        contract_fields = dict(
+            contract_id="contract",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="provider:model",
+            limits=ModelLimits(context_window_tokens=8, max_output_tokens=4),
+            input_sizer_id="provider-sizer-v1",
+            serialization_id="provider-wire-v1",
+        )
+        with self.assertRaises(ValidationError):
+            ModelContract(**contract_fields, fingerprint="")
+        with self.assertRaises(ValidationError):
+            ModelContract(
+                **contract_fields,
+                capabilities=ModelCapabilities(
+                    usage_reporting=UsageReportingMode.NONE
+                ),
+                usage_guarantees=ModelUsageGuarantees(
+                    input_tokens=UsageFieldGuarantee.REQUIRED
+                ),
+                fingerprint="coherent-contract",
+            )
+
+        class UndeclaredLiveAdapter(ModelAdapter):
+            capabilities = ModelCapabilities()
+
+            async def generate(self, request):
+                raise AssertionError("must not be dispatched")
+
+        with self.assertRaisesRegex(ValueError, "instance ModelContract"):
+            DefinitionRegistry().register(
+                AgentDefinition(
+                    definition_id="unknown-live-contract",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_adapter=UndeclaredLiveAdapter(),
+                )
+            )
+
+    async def test_create_run_freezes_explicit_primary_binding(self) -> None:
+        """A CREATED Run preserves the caller's checked primary binding."""
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -46,6 +104,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             AgentDefinition,
             DefinitionRegistry,
             ModelCapabilities,
+            ModelBinding,
+            ModelBindingSet,
             ModelContract,
             ModelExecutionBudget,
             ModelLimits,
@@ -73,8 +133,20 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 version="1",
                 instructions="Reply deterministically.",
                 model_requirements=ModelRequirements(
-                    min_context_window_tokens=64,
-                    min_output_tokens=16,
+                    min_context_window_tokens=1,
+                    min_output_tokens=1,
+                ),
+                model_bindings=ModelBindingSet(
+                    bindings=(
+                        ModelBinding(
+                            purpose=ModelPurpose.PRIMARY,
+                            contract=contract,
+                            requirements=ModelRequirements(
+                                min_context_window_tokens=64,
+                                min_output_tokens=16,
+                            ),
+                        ),
+                    )
                 ),
                 model_execution_budget=ModelExecutionBudget(
                     run_max_attempts=1,
@@ -93,12 +165,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         created = await runner.create_run("typed-contract", "1", "hello")
-        terminal = await runner.start_run(created.run_id)
-        inspection = await runner.inspect_run(created.run_id)
-
-        self.assertEqual(terminal.output, "accepted")
-        assert inspection.run.snapshot is not None
-        primary = inspection.run.snapshot.model_bindings.for_purpose(
+        assert created.snapshot is not None
+        primary = created.snapshot.model_bindings.for_purpose(
             ModelPurpose.PRIMARY
         )
         self.assertEqual(primary.contract, contract)
@@ -136,6 +204,116 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     model_adapter=adapter,
                 )
             )
+        self.assertEqual(adapter.call_count, 0)
+
+    async def test_start_rejects_contract_drift_after_run_creation(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelContract,
+            ModelLimits,
+            RevisionStability,
+            Runner,
+        )
+
+        def contract(fingerprint: str) -> ModelContract:
+            return ModelContract(
+                contract_id="frozen-at-create",
+                version="1",
+                revision_stability=RevisionStability.PINNED,
+                model_identity="deterministic:frozen",
+                limits=ModelLimits(
+                    context_window_tokens=128, max_output_tokens=32
+                ),
+                input_sizer_id="deterministic-v1",
+                serialization_id="deterministic-text-v1",
+                fingerprint=fingerprint,
+            )
+
+        original = DeterministicModelAdapter(
+            ("first",), model_contract=contract("first")
+        )
+        initial_registry = DefinitionRegistry()
+        initial_registry.register(
+            AgentDefinition(
+                definition_id="create-freeze",
+                version="1",
+                instructions="Reply.",
+                model_adapter=original,
+            )
+        )
+        store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        created = await Runner(initial_registry, store).create_run(
+            "create-freeze", "1", "hello"
+        )
+
+        changed = DeterministicModelAdapter(
+            ("must not dispatch",), model_contract=contract("changed")
+        )
+        changed_registry = DefinitionRegistry()
+        changed_registry.register(
+            AgentDefinition(
+                definition_id="create-freeze",
+                version="1",
+                instructions="Reply.",
+                model_adapter=changed,
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "snapshot Model Contract"):
+            await Runner(changed_registry, store).start_run(created.run_id)
+        self.assertEqual(changed.call_count, 0)
+
+    async def test_tool_bearing_request_fails_before_dispatch_when_unsupported(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+            ToolEffect,
+            ToolOutcome,
+        )
+
+        adapter = DeterministicModelAdapter(("unreachable",))
+        tool = DeterministicTool(
+            name="lookup",
+            effect=ToolEffect.READ_ONLY,
+            handler=lambda request: ToolOutcome.success(
+                request.call_id, request.tool_name, "found"
+            ),
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition(
+                definition_id="undeclared-tools",
+                version="1",
+                instructions="Never dispatch unsupported tools.",
+                model_adapter=adapter,
+                tools=(tool,),
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("undeclared-tools", "1", "lookup")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 0)
 
     async def test_run_budget_stops_a_second_primary_dispatch(self) -> None:
@@ -241,6 +419,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
+            ModelCapabilities,
             ModelContract,
             ModelLimits,
             ModelUsageGuarantees,
@@ -249,6 +428,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             RunStatus,
             UsageFieldGuarantee,
             UsageProvenance,
+            UsageReportingMode,
         )
 
         class UsageAdapter(DeterministicModelAdapter):
@@ -269,12 +449,28 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
+        class PartialUsageAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                response = await super().generate(request)
+                from m_agent.runtime import ModelUsage, ModelResponse
+
+                return ModelResponse(
+                    content=response.content,
+                    usage=ModelUsage(
+                        input_tokens=5,
+                        provenance=UsageProvenance.PROVIDER_REPORTED,
+                    ),
+                )
+
         def contract(guarantees: ModelUsageGuarantees) -> ModelContract:
             return ModelContract(
                 contract_id="usage-contract",
                 version="1",
                 revision_stability=RevisionStability.PINNED,
                 model_identity="deterministic:usage",
+                capabilities=ModelCapabilities(
+                    usage_reporting=UsageReportingMode.PROVIDER_REPORTED
+                ),
                 limits=ModelLimits(
                     context_window_tokens=128, max_output_tokens=32
                 ),
@@ -322,6 +518,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         assert response.usage is not None
         self.assertIs(response.usage.provenance, UsageProvenance.UNAVAILABLE)
         self.assertIsNone(response.usage.input_tokens)
+        self.assertIs(
+            response.usage.output_tokens_provenance,
+            UsageProvenance.UNAVAILABLE,
+        )
 
         provider_terminal, provider_inspection = await run(
             ModelUsageGuarantees(),
@@ -334,6 +534,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         assert provider_response.usage is not None
         self.assertIs(
             provider_response.usage.provenance,
+            UsageProvenance.PROVIDER_REPORTED,
+        )
+        self.assertIs(
+            provider_response.usage.input_tokens_provenance,
             UsageProvenance.PROVIDER_REPORTED,
         )
 
@@ -349,6 +553,23 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             sized_response.usage.provenance,
             UsageProvenance.RUNTIME_SIZED,
+        )
+
+        partial_terminal, partial_inspection = await run(
+            ModelUsageGuarantees(), PartialUsageAdapter(("accepted",))
+        )
+        self.assertIs(partial_terminal.status, RunStatus.SUCCEEDED)
+        partial_response = deserialize_model_response(
+            partial_inspection.attempts[0].output
+        )
+        assert partial_response.usage is not None
+        self.assertIs(
+            partial_response.usage.input_tokens_provenance,
+            UsageProvenance.PROVIDER_REPORTED,
+        )
+        self.assertIs(
+            partial_response.usage.output_tokens_provenance,
+            UsageProvenance.UNAVAILABLE,
         )
 
         required_terminal, required_inspection = await run(
@@ -549,3 +770,106 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 1,
             )
+
+    async def test_sqlite_model_reservation_is_atomic_across_connections(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelExecutionBudget,
+            ModelPurpose,
+            Runner,
+            RunStatus,
+            StepAttempt,
+            StepRecord,
+            StepStatus,
+            StepType,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "run.db")
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition(
+                    definition_id="atomic-budget",
+                    version="1",
+                    instructions="Reply.",
+                    model_execution_budget=ModelExecutionBudget(
+                        run_max_attempts=1,
+                        primary_max_attempts=1,
+                        context_compression_max_attempts=0,
+                        output_repair_max_attempts=0,
+                    ),
+                    model_adapter=DeterministicModelAdapter(("unused",)),
+                )
+            )
+            seed = SQLiteRunStore(db_path, payload_codec=PlaintextPayloadCodec())
+            try:
+                created = await Runner(registry, seed).create_run(
+                    "atomic-budget", "1", "hello"
+                )
+                running = await seed.transition_run(
+                    created.run_id,
+                    created.version,
+                    status=RunStatus.RUNNING,
+                )
+                await seed.acquire_lease(
+                    created.run_id,
+                    "shared-owner",
+                    timedelta(minutes=1),
+                    expected_version=running.version,
+                )
+            finally:
+                seed.close()
+
+            barrier = threading.Barrier(2)
+
+            def reserve(index: int) -> bool:
+                async def invoke() -> bool:
+                    store = SQLiteRunStore(
+                        db_path, payload_codec=PlaintextPayloadCodec()
+                    )
+                    try:
+                        barrier.wait(timeout=5)
+                        return await store.reserve_model_attempt(
+                            StepRecord(
+                                step_id=f"model-{index}",
+                                run_id=created.run_id,
+                                step_type=StepType.MODEL,
+                                status=StepStatus.RUNNING,
+                            ),
+                            StepAttempt(
+                                attempt_id=f"attempt-{index}",
+                                step_id=f"model-{index}",
+                                run_id=created.run_id,
+                                status=StepStatus.RUNNING,
+                                model_purpose=ModelPurpose.PRIMARY,
+                            ),
+                            run_max_attempts=1,
+                            purpose_max_attempts=1,
+                            expected_version=running.version,
+                            lease_owner="shared-owner",
+                        )
+                    finally:
+                        store.close()
+
+                return asyncio.run(invoke())
+
+            results = await asyncio.gather(
+                asyncio.to_thread(reserve, 1),
+                asyncio.to_thread(reserve, 2),
+            )
+            probe = SQLiteRunStore(db_path, payload_codec=PlaintextPayloadCodec())
+            try:
+                attempts = await probe.get_attempts(created.run_id)
+            finally:
+                probe.close()
+
+            self.assertEqual(sorted(results), [False, True])
+            self.assertEqual(len(attempts), 1)

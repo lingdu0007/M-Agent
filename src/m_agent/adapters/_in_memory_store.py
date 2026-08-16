@@ -16,7 +16,7 @@ from .._errors import (
 )
 from .._run import RunRecord
 from .._status import RunStatus, validate_transition
-from .._steps import StepAttempt, StepCheckpoint, StepRecord, utc_now
+from .._steps import StepAttempt, StepCheckpoint, StepRecord, StepType, utc_now
 from .._store import (
     FIELD_RUN_INPUT,
     FIELD_RUN_OUTPUT,
@@ -332,6 +332,59 @@ class InMemoryRunStore:
         for field, encoded in payloads.items():
             self._payloads[(attempt.run_id, field)] = encoded
         return stored.to_record(output=attempt.output, error=attempt.error)
+
+    async def reserve_model_attempt(
+        self,
+        step: StepRecord,
+        attempt: StepAttempt,
+        *,
+        run_max_attempts: int,
+        purpose_max_attempts: int,
+        expected_version: int,
+        lease_owner: str,
+    ) -> bool:
+        if (
+            step.step_type is not StepType.MODEL
+            or step.run_id != attempt.run_id
+            or step.step_id != attempt.step_id
+            or attempt.model_purpose is None
+        ):
+            raise ValueError("model reservation requires one MODEL StepAttempt")
+        current = self._runs.get(attempt.run_id)
+        if current is None:
+            raise RunNotFoundError(f"run {attempt.run_id} not found")
+        if current.version != expected_version:
+            raise StaleRunVersionError(
+                f"stale model reservation for run {attempt.run_id}: expected "
+                f"version {expected_version}, authoritative version is "
+                f"{current.version}; model attempt was not reserved"
+            )
+        self._check_lease(current, lease_owner)
+        attempts = self._attempts.setdefault(attempt.run_id, [])
+        model_attempts = [
+            stored for stored in attempts if stored.model_purpose is not None
+        ]
+        purpose_attempts = [
+            stored
+            for stored in model_attempts
+            if stored.model_purpose == attempt.model_purpose.value
+        ]
+        if (
+            len(model_attempts) >= run_max_attempts
+            or len(purpose_attempts) >= purpose_max_attempts
+        ):
+            return False
+        stored_step = step.model_copy(deep=True)
+        steps = self._steps.setdefault(step.run_id, [])
+        for index, existing in enumerate(steps):
+            if existing.step_id == step.step_id:
+                steps[index] = stored_step
+                break
+        else:
+            steps.append(stored_step)
+        stored, _ = _split_attempt(attempt, self._codec)
+        attempts.append(stored)
+        return True
 
     async def record_checkpoint(
         self,

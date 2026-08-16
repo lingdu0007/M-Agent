@@ -93,6 +93,7 @@ from ._model import (
     ModelRequest,
     ModelResponse,
     StreamingMode,
+    assert_model_request_compatible,
     deserialize_model_response,
     normalize_model_response,
     serialize_model_response,
@@ -274,6 +275,7 @@ class Runner:
             definition_version=definition.version,
             input=input,
             status=RunStatus.CREATED,
+            snapshot=definition.frozen_snapshot(),
         )
         result = await self._store.create_run(run)
         # Ticket 09：Run 生命周期从 CREATED 起即可观测（与 Run Store
@@ -328,12 +330,18 @@ class Runner:
         lease: RunLease,
     ) -> RunRecord:
         """在已持有租约的前提下从 CREATED 启动（start/resume 共用）。"""
-        snapshot = definition.frozen_snapshot()
+        snapshot = run.snapshot
+        if snapshot is None:
+            # Backward-compatible migration for CREATED records persisted
+            # before Model Bindings became a create-time requirement.
+            snapshot = definition.frozen_snapshot()
+        else:
+            self._assert_adapter_contract_matches_snapshot(run, definition)
         running = await self._store.transition_run(
             run.run_id,
             expected_version=run.version,
             status=RunStatus.RUNNING,
-            snapshot=snapshot,
+            snapshot=snapshot if run.snapshot is None else None,
             lease_owner=lease.owner,
         )
         self._publish_status(run.run_id, RunStatus.RUNNING)
@@ -930,51 +938,16 @@ class Runner:
         attempt_id: str,
         purpose: ModelPurpose,
     ) -> bool:
-        """Persist one model dispatch reservation under the Run's lease.
-
-        The lease makes the count-and-write sequence exclusive for this Run;
-        the Store commit happens before the external call, so an interrupted
-        process consumes capacity conservatively on every later recovery.
-        """
+        """Persist one model dispatch reservation under the Run's lease."""
         assert run.snapshot is not None
-        attempts = await self._store.get_attempts(run.run_id)
-        steps = await self._store.get_steps(run.run_id)
-        model_step_ids = {
-            step.step_id for step in steps if step.step_type is StepType.MODEL
-        }
-        all_model_attempts = [
-            attempt
-            for attempt in attempts
-            if attempt.model_purpose is not None
-            or attempt.step_id in model_step_ids
-        ]
-        purpose_attempts = [
-            attempt
-            for attempt in attempts
-            if attempt.model_purpose is purpose
-            or (
-                purpose is ModelPurpose.PRIMARY
-                and attempt.model_purpose is None
-                and attempt.step_id in model_step_ids
-            )
-        ]
         budget = run.snapshot.model_execution_budget
-        if (
-            len(all_model_attempts) >= budget.run_max_attempts
-            or len(purpose_attempts) >= budget.maximum_for(purpose)
-        ):
-            return False
-        await self._store.record_step(
+        reserved = await self._store.reserve_model_attempt(
             StepRecord(
                 step_id=step_id,
                 run_id=run.run_id,
                 step_type=StepType.MODEL,
                 status=StepStatus.RUNNING,
             ),
-            expected_version=run.version,
-            lease_owner=lease.owner,
-        )
-        await self._store.record_attempt(
             StepAttempt(
                 attempt_id=attempt_id,
                 step_id=step_id,
@@ -982,11 +955,16 @@ class Runner:
                 status=StepStatus.RUNNING,
                 model_purpose=purpose,
             ),
+            run_max_attempts=budget.run_max_attempts,
+            purpose_max_attempts=budget.maximum_for(purpose),
             expected_version=run.version,
             lease_owner=lease.owner,
         )
-        self._maybe_crash(CrashPoint.AFTER_MODEL_ATTEMPT_RESERVATION, run.run_id)
-        return True
+        if reserved:
+            self._maybe_crash(
+                CrashPoint.AFTER_MODEL_ATTEMPT_RESERVATION, run.run_id
+            )
+        return reserved
 
     async def _stream_model(
         self,
@@ -1809,6 +1787,20 @@ class Runner:
             cancelled = await self._maybe_cancel(run, lease)
             if cancelled is not None:
                 return cancelled, None
+            request = ModelRequest(
+                input=run.input,
+                instructions=run.snapshot.instructions,
+                context_items=tuple(context_items),
+                tools=tuple(tool.spec() for tool in definition.tools),
+                tool_outcomes=tuple(tool_outcomes),
+            )
+            try:
+                assert_model_request_compatible(model_contract, request)
+            except ModelContractViolationError as exc:
+                await self._record_failed_step(
+                    run, lease, step_id, StepType.MODEL
+                )
+                return await self._fail_run(run, lease, exc.code), None
             attempt_id = new_id()
             self._publish(
                 RunUpdate(
@@ -1829,14 +1821,8 @@ class Runner:
                     step_type=StepType.MODEL,
                 )
             )
-            request = ModelRequest(
-                input=run.input,
-                instructions=run.snapshot.instructions,
-                context_items=tuple(context_items),
-                tools=tuple(tool.spec() for tool in definition.tools),
-                tool_outcomes=tuple(tool_outcomes),
-            )
             terminal_error_code: str | None = None
+            reserved = False
             try:
                 # STEP_STARTED telemetry 是应用回调；它返回后再次校验，
                 # 使 guard 紧贴真正的 Model dispatch。
@@ -1847,9 +1833,11 @@ class Runner:
                 self._assert_adapter_contract_matches_snapshot(
                     run, definition
                 )
-                if not await self._reserve_model_attempt(
+                assert_model_request_compatible(model_contract, request)
+                reserved = await self._reserve_model_attempt(
                     run, lease, step_id, attempt_id, purpose
-                ):
+                )
+                if not reserved:
                     await self._record_failed_step(
                         run, lease, step_id, StepType.MODEL
                     )
@@ -1887,17 +1875,18 @@ class Runner:
                 else:
                     classification, code, message = classify_exception(exc)
                 failure = (classification, code, message)
-                # Reservation 已在外部 dispatch 前持久化；将同一 identity
-                # 更新为 FAILED，恢复时才能如实保留已消耗的预算。
-                await self._record_failed_attempt(
-                    run,
-                    lease,
-                    step_id,
-                    failure,
-                    StepType.MODEL,
-                    attempt_id=attempt_id,
-                    model_purpose=purpose,
-                )
+                if reserved:
+                    # Reservation 已在外部 dispatch 前持久化；将同一 identity
+                    # 更新为 FAILED，恢复时才能如实保留已消耗的预算。
+                    await self._record_failed_attempt(
+                        run,
+                        lease,
+                        step_id,
+                        failure,
+                        StepType.MODEL,
+                        attempt_id=attempt_id,
+                        model_purpose=purpose,
+                    )
                 # 已 dispatch 的 Model 调用已经如实形成失败 Attempt；
                 # 取消请求到达时不启动 retry，也不以 FAILED 覆盖取消。
                 if self._cancel_requested(run.run_id):
