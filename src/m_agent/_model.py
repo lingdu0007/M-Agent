@@ -1016,8 +1016,11 @@ class ModelAdapter(ABC):
 
 
 def _deterministic_adapter_type_identity(adapter_type: type[object]) -> str:
-    """Identify deterministic code without a process-local ``__main__`` name."""
-    source = inspect.getsourcefile(adapter_type)
+    """Identify deterministic adapter types without a process-local name."""
+    try:
+        source = inspect.getsourcefile(adapter_type)
+    except (OSError, TypeError):
+        source = None
     if source is None:
         return f"{adapter_type.__module__}.{adapter_type.__qualname__}"
     source_path = Path(source)

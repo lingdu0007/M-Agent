@@ -162,7 +162,7 @@ class RequestToolModel(DeterministicModelAdapter):
         self.call_count += 1
         self._last_request = request
         self.requests.append(request)
-        if self.call_count == 1:
+        if not request.tool_outcomes:
             return ModelResponse(
                 tool_calls=(
                     ToolCall(
@@ -1147,7 +1147,7 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                     effect=ToolEffect.READ_ONLY,
                 )
                 recovered_runner, _, _ = make_runner(
-                    TransientThenSuccessModel(transient_failures=0),
+                    RequestToolModel(),
                     tools=(recovered_tool,),
                     retry_policy=RetryPolicy(max_attempts=1),
                     store=recovered_store,
