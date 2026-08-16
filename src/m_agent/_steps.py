@@ -60,6 +60,9 @@ class StepRecord(BaseModel):
     run_id: str
     step_type: StepType
     status: StepStatus
+    #: Stable terminal error identity for a failed Step when no Attempt exists
+    #: (for example, a pre-dispatch Model budget rejection).
+    error_code: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

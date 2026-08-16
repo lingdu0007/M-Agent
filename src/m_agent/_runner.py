@@ -94,6 +94,7 @@ from ._model import (
     ModelPurpose,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
     StreamingMode,
     StructuredOutputMode,
     assert_model_request_compatible,
@@ -1355,7 +1356,11 @@ class Runner:
                     usage=inflight_model_attempt.usage,
                 )
             await self._record_failed_step(
-                run, lease, inflight_model_step.step_id, StepType.MODEL
+                run,
+                lease,
+                inflight_model_step.step_id,
+                StepType.MODEL,
+                error_code=ERROR_MODEL_CHECKPOINT_UNCONFIRMED,
             )
             return await self._fail_run(
                 run, lease, ERROR_MODEL_CHECKPOINT_UNCONFIRMED
@@ -1367,7 +1372,9 @@ class Runner:
             # A terminal Model Step was already durable when process loss
             # interrupted the Run transition. Its frozen retry decision was
             # exhausted, so recovery must finish FAILED without another call.
-            return await self._fail_run(run, lease)
+            return await self._fail_run(
+                run, lease, last_model_step.error_code
+            )
         # 是否注入外部上下文以冻结 Snapshot 的 has_context_provider 为准
         # （ADR 0022/0023：恢复行为由 Run 启动时冻结的定义决定，后续注册
         # 的同 id+version 定义不能改变恢复行为）。已确认的 Context Step
@@ -1885,9 +1892,15 @@ class Runner:
                 )
             ):
                 await self._record_failed_step(
-                    run, lease, step_id, StepType.MODEL
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=last_attempt.error_code,
                 )
-                return await self._fail_run(run, lease), None
+                return await self._fail_run(
+                    run, lease, last_attempt.error_code
+                ), None
         while True:
             attempt_count += 1
             # 安全边界：发起新的 Step Attempt 之前检查协作取消。
@@ -1913,12 +1926,20 @@ class Runner:
                 )
             except ModelCapabilityError as exc:
                 await self._record_failed_step(
-                    run, lease, step_id, StepType.MODEL
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=exc.code,
                 )
                 return await self._fail_run(run, lease, exc.code), None
             except ModelContractViolationError as exc:
                 await self._record_failed_step(
-                    run, lease, step_id, StepType.MODEL
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=exc.code,
                 )
                 return await self._fail_run(run, lease, exc.code), None
             attempt_id = new_id()
@@ -1944,6 +1965,7 @@ class Runner:
             terminal_error_code: str | None = None
             reserved = False
             succeeded_attempt: StepAttempt | None = None
+            observed_usage: ModelUsage | None = None
             try:
                 # STEP_STARTED telemetry 是应用回调；它返回后再次校验，
                 # 使 guard 紧贴真正的 Model dispatch。
@@ -1962,7 +1984,11 @@ class Runner:
                 )
                 if not reserved:
                     await self._record_failed_step(
-                        run, lease, step_id, StepType.MODEL
+                        run,
+                        lease,
+                        step_id,
+                        StepType.MODEL,
+                        error_code=ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED,
                     )
                     return (
                         await self._fail_run(
@@ -2018,6 +2044,10 @@ class Runner:
                     response = await adapter.generate(request)
                 self._assert_adapter_contract_matches_snapshot(run, definition)
                 response = adapter.validate_response(request, response)
+                if isinstance(response, ModelResponse) and isinstance(
+                    response.usage, ModelUsage
+                ):
+                    observed_usage = response.usage
                 response = normalize_model_response(
                     model_contract,
                     response,
@@ -2054,7 +2084,7 @@ class Runner:
                         usage=(
                             succeeded_attempt.usage
                             if succeeded_attempt is not None
-                            else None
+                            else observed_usage
                         ),
                     )
                 # 已 dispatch 的 Model 调用已经如实形成失败 Attempt；
@@ -2073,7 +2103,11 @@ class Runner:
                     continue
                 # 不再重试：记录 FAILED Step（最终状态）并到达终态 FAILED。
                 await self._record_failed_step(
-                    run, lease, step_id, StepType.MODEL
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=terminal_error_code,
                 )
                 cancelled = await self._maybe_cancel(run, lease)
                 if cancelled is not None:
@@ -2547,6 +2581,8 @@ class Runner:
         lease: RunLease,
         step_id: str,
         step_type: StepType,
+        *,
+        error_code: str | None = None,
     ) -> None:
         """在 Step 到达最终失败状态时记录 FAILED StepRecord。
 
@@ -2559,6 +2595,7 @@ class Runner:
                 run_id=run.run_id,
                 step_type=step_type,
                 status=StepStatus.FAILED,
+                error_code=error_code,
             ),
             expected_version=run.version,
             lease_owner=lease.owner,

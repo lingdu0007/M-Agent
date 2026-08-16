@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS steps (
     run_id     TEXT NOT NULL,
     step_type  TEXT NOT NULL,
     status     TEXT NOT NULL,
+    error_code TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS step_attempts (
@@ -215,6 +216,11 @@ class SQLiteRunStore:
             )
         if "error_code" not in columns:
             self._conn.execute("ALTER TABLE runs ADD COLUMN error_code TEXT")
+        step_columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(steps)")
+        }
+        if "error_code" not in step_columns:
+            self._conn.execute("ALTER TABLE steps ADD COLUMN error_code TEXT")
         attempt_columns = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(step_attempts)")
@@ -645,7 +651,7 @@ class SQLiteRunStore:
         lease_clause, lease_params = self._lease_condition(lease_owner)
         cursor = self._conn.execute(
             "INSERT OR REPLACE INTO steps (step_id, run_id, step_type, status,"
-            " created_at) SELECT ?,?,?,?,? WHERE EXISTS ("
+            " error_code, created_at) SELECT ?,?,?,?,?,? WHERE EXISTS ("
             " SELECT 1 FROM runs WHERE run_id=? AND version=?"
             + lease_clause
             + ")",
@@ -654,6 +660,7 @@ class SQLiteRunStore:
                 step.run_id,
                 step.step_type.value,
                 step.status.value,
+                step.error_code,
                 step.created_at.isoformat(),
                 step.run_id,
                 expected_version,
@@ -798,12 +805,13 @@ class SQLiteRunStore:
                 return False
             self._conn.execute(
                 "INSERT OR REPLACE INTO steps (step_id, run_id, step_type, "
-                "status, created_at) VALUES (?,?,?,?,?)",
+                "status, error_code, created_at) VALUES (?,?,?,?,?,?)",
                 (
                     step.step_id,
                     step.run_id,
                     step.step_type.value,
                     step.status.value,
+                    step.error_code,
                     step.created_at.isoformat(),
                 ),
             )
@@ -887,6 +895,7 @@ class SQLiteRunStore:
                 run_id=row["run_id"],
                 step_type=row["step_type"],
                 status=row["status"],
+                error_code=row["error_code"],
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
             for row in rows

@@ -376,6 +376,143 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             [StepStatus.FAILED],
         )
 
+    async def test_recovery_preserves_pre_dispatch_budget_failure_code(
+        self,
+    ) -> None:
+        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelExecutionBudget,
+            Runner,
+            RunStatus,
+            StepStatus,
+        )
+
+        class InterruptedTerminalFailure:
+            fail_terminal_transition = True
+
+            async def transition_run(self, *args, **kwargs):
+                if (
+                    self.fail_terminal_transition
+                    and kwargs.get("status") is RunStatus.FAILED
+                ):
+                    self.fail_terminal_transition = False
+                    raise SystemExit("simulated loss after budget failure")
+                return await super().transition_run(*args, **kwargs)
+
+        class InterruptedInMemoryStore(
+            InterruptedTerminalFailure, InMemoryRunStore
+        ):
+            pass
+
+        class InterruptedSQLiteStore(InterruptedTerminalFailure, SQLiteRunStore):
+            pass
+
+        def registry_and_adapter():
+            adapter = DeterministicModelAdapter(("must not dispatch",))
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="persisted-budget-failure",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_execution_budget=ModelExecutionBudget(
+                        run_max_attempts=0,
+                        primary_max_attempts=0,
+                        context_compression_max_attempts=0,
+                        output_repair_max_attempts=0,
+                    ),
+                    model_adapter=adapter,
+                )
+            )
+            return registry, adapter
+
+        async def assert_memory_recovery() -> None:
+            clock = FakeClock()
+            store = InterruptedInMemoryStore(
+                payload_codec=PlaintextPayloadCodec(), clock=clock
+            )
+            registry, adapter = registry_and_adapter()
+            runner = Runner(registry, store)
+            created = await runner.create_run(
+                "persisted-budget-failure", "1", "hello"
+            )
+            with self.assertRaisesRegex(SystemExit, "budget failure"):
+                await runner.start_run(created.run_id)
+            before = await runner.inspect_run(created.run_id)
+            self.assertIs(before.run.status, RunStatus.RUNNING)
+            self.assertEqual(adapter.call_count, 0)
+            self.assertEqual(
+                before.steps[0].error_code,
+                "MODEL_EXECUTION_BUDGET_EXCEEDED",
+            )
+
+            clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+            terminal = await Runner(registry, store).resume_run(created.run_id)
+            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertEqual(
+                terminal.error_code, "MODEL_EXECUTION_BUDGET_EXCEEDED"
+            )
+            self.assertEqual(adapter.call_count, 0)
+
+        await assert_memory_recovery()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "persisted-budget-failure.db")
+            first_clock = FakeClock()
+            first_store = InterruptedSQLiteStore(
+                db_path,
+                payload_codec=PlaintextPayloadCodec(),
+                clock=first_clock,
+            )
+            registry, adapter = registry_and_adapter()
+            try:
+                runner = Runner(registry, first_store)
+                created = await runner.create_run(
+                    "persisted-budget-failure", "1", "hello"
+                )
+                with self.assertRaisesRegex(SystemExit, "budget failure"):
+                    await runner.start_run(created.run_id)
+                before = await runner.inspect_run(created.run_id)
+                self.assertIs(before.run.status, RunStatus.RUNNING)
+                self.assertEqual(
+                    before.steps[0].error_code,
+                    "MODEL_EXECUTION_BUDGET_EXCEEDED",
+                )
+                crashed = await first_store.get_run(created.run_id)
+                assert crashed is not None
+                assert crashed.lease_expires_at is not None
+                restart_clock = FakeClock(
+                    crashed.lease_expires_at + timedelta(seconds=1)
+                )
+            finally:
+                first_store.close()
+
+            reopened = SQLiteRunStore(
+                db_path,
+                payload_codec=PlaintextPayloadCodec(),
+                clock=restart_clock,
+            )
+            try:
+                terminal = await Runner(registry, reopened).resume_run(
+                    created.run_id
+                )
+            finally:
+                reopened.close()
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(
+            terminal.error_code, "MODEL_EXECUTION_BUDGET_EXCEEDED"
+        )
+        self.assertEqual(adapter.call_count, 0)
+
     def test_live_contract_metadata_is_explicit_and_coherent(self) -> None:
         from pydantic import ValidationError
 
@@ -2266,7 +2403,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [attempt.status for attempt in inspection.attempts], [StepStatus.FAILED]
         )
-        self.assertIsNone(inspection.attempts[0].usage)
+        usage = inspection.attempts[0].usage
+        assert usage is not None
+        self.assertEqual(usage.input_tokens, 3)
+        self.assertEqual(usage.output_tokens, 2)
 
     async def test_actual_provider_revision_is_persisted_with_response(self) -> None:
         from m_agent import deserialize_model_response
@@ -3340,6 +3480,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             DeterministicModelAdapter,
             InMemoryRunStore,
             PlaintextPayloadCodec,
+            SQLiteRunStore,
         )
         from m_agent.runtime import (
             AgentDefinition,
@@ -3351,6 +3492,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             RevisionStability,
             Runner,
             RunStatus,
+            StepStatus,
             UsageFieldGuarantee,
             UsageProvenance,
             UsageReportingMode,
@@ -3425,6 +3567,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         async def run(
             guarantees: ModelUsageGuarantees,
             adapter: DeterministicModelAdapter | None = None,
+            store=None,
         ):
             registry = DefinitionRegistry()
             registry.register(
@@ -3444,15 +3587,19 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             )
             runner = Runner(
                 registry=registry,
-                store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+                store=(
+                    store
+                    if store is not None
+                    else InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+                ),
             )
             created = await runner.create_run(
                 "usage", guarantees.input_tokens.value, "hello"
             )
             terminal = await runner.start_run(created.run_id)
-            return terminal, await runner.inspect_run(created.run_id)
+            return created, terminal, await runner.inspect_run(created.run_id)
 
-        optional_terminal, optional_inspection = await run(
+        _, optional_terminal, optional_inspection = await run(
             ModelUsageGuarantees()
         )
         self.assertIs(optional_terminal.status, RunStatus.SUCCEEDED)
@@ -3465,7 +3612,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             UsageProvenance.UNAVAILABLE,
         )
 
-        provider_terminal, provider_inspection = await run(
+        _, provider_terminal, provider_inspection = await run(
             ModelUsageGuarantees(),
             UsageAdapter(
                 UsageProvenance.PROVIDER_REPORTED,
@@ -3486,7 +3633,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             UsageProvenance.PROVIDER_REPORTED,
         )
 
-        sized_terminal, sized_inspection = await run(
+        _, sized_terminal, sized_inspection = await run(
             ModelUsageGuarantees(),
             UsageAdapter(
                 UsageProvenance.RUNTIME_SIZED,
@@ -3503,7 +3650,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             UsageProvenance.RUNTIME_SIZED,
         )
 
-        partial_terminal, partial_inspection = await run(
+        _, partial_terminal, partial_inspection = await run(
             ModelUsageGuarantees(),
             PartialUsageAdapter(
                 ("accepted",), model_contract=contract(ModelUsageGuarantees())
@@ -3523,7 +3670,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             UsageProvenance.UNAVAILABLE,
         )
 
-        required_terminal, required_inspection = await run(
+        _, required_terminal, required_inspection = await run(
             ModelUsageGuarantees(input_tokens=UsageFieldGuarantee.REQUIRED)
         )
         self.assertIs(required_terminal.status, RunStatus.FAILED)
@@ -3531,6 +3678,57 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             required_terminal.error_code, "MODEL_CONTRACT_VIOLATION"
         )
         self.assertEqual(len(required_inspection.attempts), 1)
+
+        required_usage = ModelUsageGuarantees(
+            input_tokens=UsageFieldGuarantee.REQUIRED,
+            output_tokens=UsageFieldGuarantee.REQUIRED,
+        )
+
+        async def assert_failed_attempt_keeps_usage(store):
+            created, terminal, inspection = await run(
+                required_usage,
+                PartialUsageAdapter(
+                    ("accepted",), model_contract=contract(required_usage)
+                ),
+                store,
+            )
+            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertEqual(
+                terminal.error_code, "MODEL_CONTRACT_VIOLATION"
+            )
+            self.assertEqual(inspection.attempts[0].status, StepStatus.FAILED)
+            usage = inspection.attempts[0].usage
+            assert usage is not None
+            self.assertEqual(usage.input_tokens, 5)
+            self.assertIsNone(usage.output_tokens)
+            self.assertIs(
+                usage.input_tokens_provenance,
+                UsageProvenance.PROVIDER_REPORTED,
+            )
+            return created.run_id
+
+        await assert_failed_attempt_keeps_usage(
+            InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "failed-usage.db")
+            store = SQLiteRunStore(db_path, payload_codec=PlaintextPayloadCodec())
+            try:
+                run_id = await assert_failed_attempt_keeps_usage(store)
+            finally:
+                store.close()
+            reopened = SQLiteRunStore(
+                db_path, payload_codec=PlaintextPayloadCodec()
+            )
+            try:
+                inspection = await Runner(
+                    DefinitionRegistry(), reopened
+                ).inspect_run(run_id)
+            finally:
+                reopened.close()
+        usage = inspection.attempts[0].usage
+        assert usage is not None
+        self.assertEqual(usage.input_tokens, 5)
 
     async def test_recovery_rejects_changed_frozen_model_contract_before_dispatch(
         self,
