@@ -19,7 +19,7 @@ import hashlib
 import json
 from typing import Any, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from ._context import ContextItem
 from ._errors import ModelContractViolationError
@@ -337,7 +337,7 @@ class ModelContract(BaseModel, frozen=True):
             "serialization_id",
             "usage_guarantees",
         }
-        if update and semantic_fields.intersection(update):
+        if update and (semantic_fields.intersection(update) or "fingerprint" in update):
             values = self.model_dump()
             values.update(update)
             values["fingerprint"] = None
@@ -643,6 +643,23 @@ def normalize_model_response(
             "Model Adapter returned an unnormalizable response"
         )
     if (
+        not isinstance(response.tool_calls, tuple)
+        or not all(isinstance(call, ToolCall) for call in response.tool_calls)
+        or (
+            response.usage is not None
+            and not isinstance(response.usage, ModelUsage)
+        )
+    ):
+        raise ModelContractViolationError(
+            "Model Adapter returned an unnormalizable response"
+        )
+    try:
+        response = ModelResponse.model_validate(response.model_dump())
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise ModelContractViolationError(
+            "Model Adapter returned an unnormalizable response"
+        ) from exc
+    if (
         response.tool_calls
         and contract.capabilities.tool_calling is ToolCallingMode.NONE
     ):
@@ -787,6 +804,12 @@ class ModelAdapter(ABC):
         doubles, whose behavior is not a provider deployment contract.
         """
         return ""
+
+    def validate_response(
+        self, request: ModelRequest, response: ModelResponse
+    ) -> ModelResponse:
+        """Validate provider-specific response guarantees before normalization."""
+        return response
 
     @abstractmethod
     async def generate(self, request: ModelRequest) -> ModelResponse:

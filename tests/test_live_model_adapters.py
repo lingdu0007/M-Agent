@@ -159,6 +159,12 @@ def make_answer_tool() -> tuple[DeterministicTool, list[int]]:
 
 def configure_mock_contract(adapter):
     """Supply the explicit instance Contract required by Runner mock seams."""
+    if (
+        adapter.capabilities.structured_output
+        is StructuredOutputMode.JSON_SCHEMA_STRICT
+        and adapter.structured_output_schema is None
+    ):
+        adapter.structured_output_schema = STRUCTURED_SCHEMA
     if getattr(adapter, "_model_contract", None) is None:
         adapter._model_contract = ModelContract(
             contract_id=f"mock-{type(adapter).__name__}",
@@ -432,10 +438,14 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             )
 
         first_probe = ChatCompletionsModelAdapter(
-            model="model", base_url="https://contract.invalid/v1"
+            model="model",
+            base_url="https://contract.invalid/v1",
+            structured_output_schema=STRUCTURED_SCHEMA,
         )
         second_probe = ChatCompletionsModelAdapter(
-            model="model", base_url="https://contract.invalid/v1"
+            model="model",
+            base_url="https://contract.invalid/v1",
+            structured_output_schema=STRUCTURED_SCHEMA,
         )
         first_contract = contract(
             first_probe,
@@ -450,11 +460,13 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         first = ChatCompletionsModelAdapter(
             model="model",
             base_url="https://contract.invalid/v1",
+            structured_output_schema=STRUCTURED_SCHEMA,
             model_contract=first_contract,
         )
         second = ChatCompletionsModelAdapter(
             model="model",
             base_url="https://contract.invalid/v1",
+            structured_output_schema=STRUCTURED_SCHEMA,
             model_contract=second_contract,
         )
         registry = DefinitionRegistry()

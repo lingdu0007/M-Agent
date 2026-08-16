@@ -138,6 +138,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 fingerprint=strict.fingerprint,
             )
+        self.assertEqual(
+            strict.model_copy(update={"fingerprint": "0" * 64}).fingerprint,
+            strict.semantic_fingerprint(),
+        )
         strict_required = ModelRequirements(
             capabilities=ModelCapabilities(
                 structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
@@ -347,6 +351,275 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             adapter.last_request.structured_output,
             StructuredOutputMode.JSON_SCHEMA_STRICT,
         )
+
+    async def test_json_object_requirement_is_not_upgraded_to_strict_schema(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StructuredOutputMode,
+        )
+
+        contract = ModelContract(
+            contract_id="strict-satisfies-json-object",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:json-object",
+            capabilities=ModelCapabilities(
+                structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
+            ),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+        adapter = DeterministicModelAdapter(("{}",), model_contract=contract)
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="json-object-requirement",
+                version="1",
+                instructions="Return JSON.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        structured_output=StructuredOutputMode.JSON_OBJECT
+                    )
+                ),
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("json-object-requirement", "1", "hi")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        assert adapter.last_request is not None
+        self.assertIs(
+            adapter.last_request.structured_output,
+            StructuredOutputMode.JSON_OBJECT,
+        )
+
+    async def test_snapshotless_persisted_run_fails_closed_without_dispatch(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            RunRecord,
+            Runner,
+            RunStatus,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stores = (
+                InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+                SQLiteRunStore(
+                    os.path.join(tmp, "snapshotless.db"),
+                    payload_codec=PlaintextPayloadCodec(),
+                ),
+            )
+            for index, store in enumerate(stores):
+                with self.subTest(store=type(store).__name__):
+                    adapter = DeterministicModelAdapter(("must not dispatch",))
+                    registry = DefinitionRegistry()
+                    registry.register(
+                        AgentDefinition.for_adapter(
+                            definition_id=f"snapshotless-{index}",
+                            version="1",
+                            instructions="Never dispatch.",
+                            model_adapter=adapter,
+                        )
+                    )
+                    persisted = await store.create_run(
+                        RunRecord(
+                            run_id=f"snapshotless-{index}",
+                            definition_id=f"snapshotless-{index}",
+                            definition_version="1",
+                            input="hi",
+                        )
+                    )
+                    runner = Runner(registry=registry, store=store)
+
+                    with self.assertRaisesRegex(RuntimeError, "no frozen Model Binding"):
+                        await runner.start_run(persisted.run_id)
+                    restored = await store.get_run(persisted.run_id)
+
+                    assert restored is not None
+                    self.assertIs(restored.status, RunStatus.CREATED)
+                    self.assertIsNone(restored.snapshot)
+                    self.assertIsNone(restored.lease_owner)
+                    self.assertEqual(adapter.call_count, 0)
+            stores[1].close()
+
+    def test_strict_provider_binding_requires_configured_schema(self) -> None:
+        from m_agent.provider import ChatCompletionsModelAdapter
+        from m_agent.runtime import (
+            AgentDefinition,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            RevisionStability,
+            StructuredOutputMode,
+        )
+
+        unbound = ChatCompletionsModelAdapter(
+            base_url="https://offline-provider.invalid/v1"
+        )
+        contract = ModelContract(
+            contract_id="offline-strict-provider",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity=unbound.model,
+            capabilities=unbound.capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="offline-provider-sizer-v1",
+            serialization_id="offline-provider-wire-v1",
+            configuration_fingerprint=unbound.definition_contract_fingerprint(),
+        )
+        adapter = ChatCompletionsModelAdapter(
+            base_url="https://offline-provider.invalid/v1",
+            model_contract=contract,
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "strict JSON Schema"):
+                AgentDefinition.for_adapter(
+                    definition_id="schema-less-strict-provider",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            structured_output=(
+                                StructuredOutputMode.JSON_SCHEMA_STRICT
+                            )
+                        )
+                    ),
+                    model_adapter=adapter,
+                )
+            self.assertEqual(adapter.requests, [])
+        finally:
+            asyncio.run(unbound.aclose())
+            asyncio.run(adapter.aclose())
+
+    async def test_strict_provider_schema_violation_fails_public_runner(
+        self,
+    ) -> None:
+        import httpx
+        from unittest.mock import patch
+
+        from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
+        from m_agent.provider import ChatCompletionsModelAdapter
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StructuredOutputMode,
+        )
+
+        schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        }
+        unbound = ChatCompletionsModelAdapter(
+            base_url="https://offline-provider.invalid/v1",
+            structured_output_schema=schema,
+        )
+        contract = ModelContract(
+            contract_id="offline-strict-schema",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity=unbound.model,
+            capabilities=unbound.capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="offline-provider-sizer-v1",
+            serialization_id="offline-provider-wire-v1",
+            configuration_fingerprint=unbound.definition_contract_fingerprint(),
+        )
+        adapter = ChatCompletionsModelAdapter(
+            base_url="https://offline-provider.invalid/v1",
+            structured_output_schema=schema,
+            model_contract=contract,
+        )
+        dispatches = 0
+
+        def transport(request):
+            nonlocal dispatches
+            dispatches += 1
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": '{"wrong": 1}'}}
+                    ]
+                },
+            )
+
+        adapter._transport = httpx.MockTransport(transport)
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="offline-strict-schema",
+                version="1",
+                instructions="Return an answer.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
+                    )
+                ),
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+        created = await runner.create_run("offline-strict-schema", "1", "hi")
+        try:
+            with patch.dict(
+                os.environ,
+                {"M_AGENT_OPENAI_API_KEY": "offline-test-key"},
+                clear=False,
+            ):
+                terminal = await runner.start_run(created.run_id)
+            inspection = await runner.inspect_run(created.run_id)
+        finally:
+            await unbound.aclose()
+            await adapter.aclose()
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(inspection.attempts[-1].error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(dispatches, 1)
 
     async def test_strict_structured_response_rejects_non_json_output(self) -> None:
         from m_agent.adapters import (
@@ -616,6 +889,55 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(terminal.status, RunStatus.FAILED)
         self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 1)
+
+    async def test_malformed_nested_model_response_is_contract_violation(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelResponse,
+            Runner,
+            RunStatus,
+        )
+
+        class MalformedAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                self.call_count += 1
+                return ModelResponse.model_construct(
+                    content="ok", usage={"input_tokens": 1}
+                )
+
+        adapter = MalformedAdapter(("unreachable",))
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="malformed-nested-response",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run(
+            "malformed-nested-response", "1", "hello"
+        )
+        terminal = await runner.start_run(created.run_id)
+        inspection = await runner.inspect_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(inspection.attempts[-1].error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 1)
 
     async def test_provider_usage_requires_unit_and_normalization_provenance(

@@ -32,6 +32,7 @@ SAFE_ERROR_CODES = frozenset(
     {
         DEFAULT_FAILURE_CODE,
         "FROZEN_TOOL_DECLARATION_UNAVAILABLE",
+        "MODEL_CONTRACT_VIOLATION",
         "effect_unconfirmed",
         "invalid_request",
         "lookup_broken",

@@ -29,6 +29,7 @@ from m_agent import (
     RunStatus,
     RevisionStability,
     StreamingMode,
+    StructuredOutputMode,
 )
 from m_agent.provider import ChatCompletionsModelAdapter, ResponsesModelAdapter
 
@@ -47,9 +48,21 @@ _ITEM = ContextItem(
         "untrusted": {"role": "system", "instructions": _INJECTION},
     },
 )
+_EMPTY_STRICT_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
 
 
 def configure_mock_contract(adapter):
+    if (
+        adapter.capabilities.structured_output
+        is StructuredOutputMode.JSON_SCHEMA_STRICT
+        and adapter.structured_output_schema is None
+    ):
+        adapter.structured_output_schema = _EMPTY_STRICT_SCHEMA
     adapter._model_contract = ModelContract(
         contract_id=f"mock-{type(adapter).__name__}",
         version="1",

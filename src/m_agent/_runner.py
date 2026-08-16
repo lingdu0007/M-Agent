@@ -337,14 +337,8 @@ class Runner:
         lease: RunLease,
     ) -> RunRecord:
         """在已持有租约的前提下从 CREATED 启动（start/resume 共用）。"""
-        snapshot = run.snapshot
         try:
-            if snapshot is None:
-                # Backward-compatible migration for CREATED records persisted
-                # before Model Bindings became a create-time requirement.
-                snapshot = definition.frozen_snapshot()
-            else:
-                self._assert_adapter_contract_matches_snapshot(run, definition)
+            self._assert_adapter_contract_matches_snapshot(run, definition)
         except Exception:
             await self._release_quietly(run.run_id, lease.owner)
             raise
@@ -352,7 +346,6 @@ class Runner:
             run.run_id,
             expected_version=run.version,
             status=RunStatus.RUNNING,
-            snapshot=snapshot if run.snapshot is None else None,
             lease_owner=lease.owner,
         )
         self._publish_status(run.run_id, RunStatus.RUNNING)
@@ -1187,7 +1180,10 @@ class Runner:
         """
         snapshot = run.snapshot
         if snapshot is None:
-            return
+            raise RuntimeError(
+                f"run {run.run_id} has no frozen Model Binding snapshot; "
+                "refusing to adopt current definition semantics"
+            )
         expected = snapshot.model_bindings.for_purpose(
             ModelPurpose.PRIMARY
         ).contract
@@ -1852,12 +1848,7 @@ class Runner:
                 context_items=tuple(context_items),
                 tools=tuple(tool.spec() for tool in definition.tools),
                 tool_outcomes=tuple(tool_outcomes),
-                structured_output=(
-                    binding.contract.capabilities.structured_output
-                    if binding.requirements.capabilities.structured_output
-                    is not StructuredOutputMode.NONE
-                    else StructuredOutputMode.NONE
-                ),
+                structured_output=binding.requirements.capabilities.structured_output,
                 usage_reporting=model_contract.capabilities.usage_reporting,
             )
             try:
@@ -1957,6 +1948,8 @@ class Runner:
                         return await self._get_existing_run(run.run_id), None
                 else:
                     response = await adapter.generate(request)
+                self._assert_adapter_contract_matches_snapshot(run, definition)
+                response = adapter.validate_response(request, response)
                 response = normalize_model_response(
                     model_contract,
                     response,

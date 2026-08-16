@@ -31,10 +31,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from m_agent._context import ContextItem
+from m_agent._errors import ModelContractViolationError
 from m_agent._failure import FailureClassification, ModelFailure
 from m_agent._model import (
     ModelAdapter,
@@ -396,6 +398,221 @@ def build_responses_structured_output(
     }
 
 
+_JSON_SCHEMA_ANNOTATIONS = frozenset(
+    {
+        "$id",
+        "$schema",
+        "default",
+        "deprecated",
+        "description",
+        "examples",
+        "readOnly",
+        "title",
+        "writeOnly",
+    }
+)
+_JSON_SCHEMA_KEYWORDS = _JSON_SCHEMA_ANNOTATIONS | {
+    "$defs",
+    "$ref",
+    "additionalProperties",
+    "allOf",
+    "anyOf",
+    "const",
+    "else",
+    "enum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "if",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maxProperties",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minProperties",
+    "minimum",
+    "multipleOf",
+    "not",
+    "oneOf",
+    "pattern",
+    "prefixItems",
+    "properties",
+    "required",
+    "then",
+    "type",
+    "uniqueItems",
+}
+
+
+def _json_equal(left: object, right: object) -> bool:
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    return left == right
+
+
+def _resolve_schema_ref(root: dict[str, Any], reference: object) -> object:
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        return False
+    value: object = root
+    for part in reference[2:].split("/"):
+        if not isinstance(value, dict):
+            return False
+        value = value.get(part.replace("~1", "/").replace("~0", "~"), False)
+    return value
+
+
+def _matches_json_schema(
+    value: object, schema: object, root: dict[str, Any]
+) -> bool:
+    """Validate the strict-schema subset we can prove without a dependency."""
+    if schema is True:
+        return True
+    if schema is False or not isinstance(schema, dict):
+        return False
+    if set(schema) - _JSON_SCHEMA_KEYWORDS:
+        return False
+    reference = schema.get("$ref")
+    if reference is not None and not _matches_json_schema(
+        value, _resolve_schema_ref(root, reference), root
+    ):
+        return False
+    for keyword, expected in (("allOf", True), ("anyOf", False), ("oneOf", None)):
+        branches = schema.get(keyword)
+        if branches is None:
+            continue
+        if not isinstance(branches, list):
+            return False
+        matches = sum(_matches_json_schema(value, branch, root) for branch in branches)
+        if (expected is True and matches != len(branches)) or (
+            expected is False and matches == 0
+        ) or (expected is None and matches != 1):
+            return False
+    if "not" in schema and _matches_json_schema(value, schema["not"], root):
+        return False
+    condition = schema.get("if")
+    if condition is not None:
+        branch = schema.get("then") if _matches_json_schema(value, condition, root) else schema.get("else")
+        if branch is not None and not _matches_json_schema(value, branch, root):
+            return False
+    if "const" in schema and not _json_equal(value, schema["const"]):
+        return False
+    if "enum" in schema and (
+        not isinstance(schema["enum"], list)
+        or not any(_json_equal(value, item) for item in schema["enum"])
+    ):
+        return False
+    declared_type = schema.get("type")
+    types = (declared_type,) if isinstance(declared_type, str) else declared_type
+    if declared_type is not None:
+        if not isinstance(types, list | tuple) or not any(
+            _matches_json_type(value, candidate) for candidate in types
+        ):
+            return False
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        required = schema.get("required", ())
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            return False
+        if not all(isinstance(key, str) and key in value for key in required):
+            return False
+        if not _in_range(len(value), schema, "minProperties", "maxProperties"):
+            return False
+        extra = set(value) - set(properties)
+        additional = schema.get("additionalProperties", True)
+        if additional is False and extra:
+            return False
+        if additional is not True and additional is not False and not isinstance(additional, dict):
+            return False
+        for key, item in value.items():
+            child = properties.get(key, additional)
+            if child is not True and not _matches_json_schema(item, child, root):
+                return False
+    if isinstance(value, list):
+        if not _in_range(len(value), schema, "minItems", "maxItems"):
+            return False
+        if schema.get("uniqueItems") is True:
+            serialized = [json.dumps(item, sort_keys=True) for item in value]
+            if len(serialized) != len(set(serialized)):
+                return False
+        prefixes = schema.get("prefixItems", ())
+        if not isinstance(prefixes, list):
+            return False
+        if any(
+            not _matches_json_schema(item, prefixes[index], root)
+            for index, item in enumerate(value[: len(prefixes)])
+        ):
+            return False
+        items = schema.get("items", True)
+        if items is not True and any(
+            not _matches_json_schema(item, items, root)
+            for item in value[len(prefixes) :]
+        ):
+            return False
+    if isinstance(value, str):
+        if not _in_range(len(value), schema, "minLength", "maxLength"):
+            return False
+        pattern = schema.get("pattern")
+        if pattern is not None:
+            if not isinstance(pattern, str):
+                return False
+            try:
+                if re.search(pattern, value) is None:
+                    return False
+            except re.error:
+                return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not _matches_number(value, schema):
+            return False
+    return True
+
+
+def _matches_json_type(value: object, declared: object) -> bool:
+    return {
+        "array": isinstance(value, list),
+        "boolean": isinstance(value, bool),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "null": value is None,
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+        "object": isinstance(value, dict),
+        "string": isinstance(value, str),
+    }.get(declared, False)
+
+
+def _in_range(
+    value: int, schema: dict[str, Any], minimum: str, maximum: str
+) -> bool:
+    lower = schema.get(minimum)
+    upper = schema.get(maximum)
+    return (
+        (lower is None or isinstance(lower, int) and value >= lower)
+        and (upper is None or isinstance(upper, int) and value <= upper)
+    )
+
+
+def _matches_number(value: int | float, schema: dict[str, Any]) -> bool:
+    for keyword, comparison in (
+        ("minimum", value.__ge__),
+        ("maximum", value.__le__),
+        ("exclusiveMinimum", value.__gt__),
+        ("exclusiveMaximum", value.__lt__),
+    ):
+        bound = schema.get(keyword)
+        if bound is not None and (
+            not isinstance(bound, (int, float))
+            or isinstance(bound, bool)
+            or not comparison(bound)
+        ):
+            return False
+    multiple = schema.get("multipleOf")
+    return multiple is None or (
+        isinstance(multiple, (int, float))
+        and not isinstance(multiple, bool)
+        and multiple > 0
+        and value / multiple == round(value / multiple)
+    )
+
+
 # -- 共享 live Adapter 基类 --------------------------------------------
 
 
@@ -466,6 +683,15 @@ class ProviderModelAdapter(ModelAdapter):
                 "provider instance configuration fingerprint does not match "
                 "its ModelContract configuration fingerprint"
             )
+        if (
+            declared_structured_output
+            is StructuredOutputMode.JSON_SCHEMA_STRICT
+            and self.structured_output_schema is None
+        ):
+            raise ValueError(
+                "provider instance strict JSON Schema ModelContract requires "
+                "a configured structured_output_schema"
+            )
         if self._contract_configuration_fingerprint is None:
             self._contract_configuration_fingerprint = current
         elif self._contract_configuration_fingerprint != current:
@@ -508,6 +734,27 @@ class ProviderModelAdapter(ModelAdapter):
                 "provider adapter configuration must be JSON-serializable"
             ) from exc
         return hashlib.sha256(encoded).hexdigest()
+
+    def validate_response(
+        self, request: ModelRequest, response: ModelResponse
+    ) -> ModelResponse:
+        if request.structured_output is StructuredOutputMode.JSON_SCHEMA_STRICT:
+            schema = self.structured_output_schema
+            if schema is None:
+                raise ModelContractViolationError(
+                    "strict JSON Schema output requires an adapter schema"
+                )
+            try:
+                content = json.loads(response.content or "")
+            except (AttributeError, json.JSONDecodeError) as exc:
+                raise ModelContractViolationError(
+                    "strict structured response is not valid JSON"
+                ) from exc
+            if not _matches_json_schema(content, schema, schema):
+                raise ModelContractViolationError(
+                    "strict structured response violates the configured JSON Schema"
+                )
+        return response
 
     # -- 供子类使用的 HTTP 基础设施 -----------------------------------
 
