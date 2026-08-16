@@ -132,17 +132,20 @@ class ResponsesModelAdapter(ProviderModelAdapter):
                 tool_spec_to_responses_schema(spec) for spec in request.tools
             ]
         if request.structured_output is not StructuredOutputMode.NONE:
-            if request.structured_output is not StructuredOutputMode.JSON_SCHEMA_STRICT:
+            if request.structured_output is StructuredOutputMode.JSON_OBJECT:
+                payload["text"] = {"format": {"type": "json_object"}}
+            elif request.structured_output is not StructuredOutputMode.JSON_SCHEMA_STRICT:
                 raise ModelContractViolationError(
                     "Responses adapter does not provide the requested "
                     "structured-output guarantee"
                 )
-            structured = self._structured_output_responses_payload
-            if structured is None:
-                raise ModelContractViolationError(
-                    "strict JSON Schema output requires an adapter schema"
-                )
-            payload["text"] = {"format": structured}
+            else:
+                structured = self._structured_output_responses_payload
+                if structured is None:
+                    raise ModelContractViolationError(
+                        "strict JSON Schema output requires an adapter schema"
+                    )
+                payload["text"] = {"format": structured}
         return payload
 
     async def generate(self, request: ModelRequest) -> ModelResponse:

@@ -81,6 +81,7 @@ from ._errors import (
     DefinitionNotFoundError,
     IllegalRunTransitionError,
     LeaseNotHeldError,
+    ModelCapabilityError,
     ModelContractViolationError,
     ResolutionNotAllowedError,
     RunNotFoundError,
@@ -1280,20 +1281,26 @@ class Runner:
             ),
             None,
         )
-        inflight_model_attempt = (
-            next(
-                (
-                    attempt
-                    for attempt in reversed(persisted_attempts)
-                    if attempt.step_id == inflight_model_step.step_id
-                    and attempt.status is StepStatus.RUNNING
-                ),
-                None,
-            )
-            if inflight_model_step is not None
-            else None
+        model_steps = {
+            step.step_id: step
+            for step in persisted_steps
+            if step.step_type is StepType.MODEL
+        }
+        checkpoint_attempt_ids = {
+            checkpoint.attempt_id for checkpoint in model_checkpoints
+        }
+        inflight_model_attempt = next(
+            (
+                attempt
+                for attempt in reversed(persisted_attempts)
+                if attempt.step_id in model_steps
+                and attempt.status is StepStatus.RUNNING
+                and attempt.attempt_id not in checkpoint_attempt_ids
+            ),
+            None,
         )
         if inflight_model_attempt is not None:
+            inflight_model_step = model_steps[inflight_model_attempt.step_id]
             await self._record_failed_attempt(
                 run,
                 lease,
@@ -1849,12 +1856,17 @@ class Runner:
                 tools=tuple(tool.spec() for tool in definition.tools),
                 tool_outcomes=tuple(tool_outcomes),
                 structured_output=binding.requirements.capabilities.structured_output,
-                usage_reporting=model_contract.capabilities.usage_reporting,
+                usage_reporting=binding.requirements.capabilities.usage_reporting,
             )
             try:
                 assert_model_request_compatible(
                     model_contract, request, streaming=streaming
                 )
+            except ModelCapabilityError as exc:
+                await self._record_failed_step(
+                    run, lease, step_id, StepType.MODEL
+                )
+                return await self._fail_run(run, lease, exc.code), None
             except ModelContractViolationError as exc:
                 await self._record_failed_step(
                     run, lease, step_id, StepType.MODEL
@@ -1959,7 +1971,12 @@ class Runner:
             except (LeaseNotHeldError, StaleRunVersionError):
                 raise
             except Exception as exc:  # 模型失败：结构化分类 + 失败 Attempt
-                if isinstance(exc, ModelContractViolationError):
+                if isinstance(exc, ModelCapabilityError):
+                    classification = FailureClassification.PERMANENT
+                    code = exc.code
+                    message = str(exc)
+                    terminal_error_code = code
+                elif isinstance(exc, ModelContractViolationError):
                     classification = FailureClassification.PERMANENT
                     code = exc.code
                     message = str(exc)
@@ -2027,6 +2044,7 @@ class Runner:
                 status=StepStatus.SUCCEEDED,
                 output=payload,
                 model_purpose=purpose,
+                usage=response.usage,
             )
             await self._store.record_attempt(
                 attempt,

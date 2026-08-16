@@ -596,6 +596,125 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             StructuredOutputMode.JSON_OBJECT,
         )
 
+    def test_strict_adapters_encode_json_object_requirement(self) -> None:
+        """A strict native ceiling also fulfills the weaker JSON-object mode."""
+        request = _request().model_copy(
+            update={"structured_output": StructuredOutputMode.JSON_OBJECT}
+        )
+
+        chat = ChatCompletionsModelAdapter(
+            structured_output_schema=STRUCTURED_SCHEMA
+        )._build_payload(request)
+        responses = ResponsesModelAdapter(
+            structured_output_schema=STRUCTURED_SCHEMA
+        )._build_payload(request)
+
+        self.assertEqual(chat["response_format"], {"type": "json_object"})
+        self.assertEqual(
+            responses["text"], {"format": {"type": "json_object"}}
+        )
+
+    def test_strict_json_object_requirement_reaches_provider_transport(self) -> None:
+        """Accepted JSON-object Requirements are executable through Runner."""
+
+        async def invoke(adapter_cls, response_payload):
+            payloads: list[dict] = []
+
+            def handler(request):
+                payloads.append(json.loads(request.content))
+                return httpx.Response(200, json=response_payload)
+
+            adapter = adapter_cls(
+                base_url="https://live-contract.invalid/v1",
+                structured_output_schema=STRUCTURED_SCHEMA,
+            )
+            adapter._transport = httpx.MockTransport(handler)
+            try:
+                _, _, status, _ = await run_to_terminal(
+                    self,
+                    adapter,
+                    instructions="Return a JSON object.",
+                    required=ModelCapabilities(
+                        structured_output=StructuredOutputMode.JSON_OBJECT
+                    ),
+                )
+            finally:
+                await adapter.aclose()
+            return status, payloads
+
+        cases = (
+            (
+                ChatCompletionsModelAdapter,
+                {"choices": [{"message": {"content": '{"answer":"ok"}'}}]},
+                lambda payload: payload["response_format"],
+            ),
+            (
+                ResponsesModelAdapter,
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": '{"answer":"ok"}',
+                                }
+                            ],
+                        }
+                    ]
+                },
+                lambda payload: payload["text"]["format"],
+            ),
+        )
+        with credential_environment():
+            for adapter_cls, response_payload, format_from in cases:
+                with self.subTest(adapter=adapter_cls.__name__):
+                    status, payloads = asyncio.run(
+                        invoke(adapter_cls, response_payload)
+                    )
+                    self.assertIs(status, RunStatus.SUCCEEDED)
+                    self.assertEqual(len(payloads), 1)
+                    self.assertEqual(
+                        format_from(payloads[0]), {"type": "json_object"}
+                    )
+
+    def test_provider_contract_accepts_split_capability_ceiling(self) -> None:
+        split_capabilities = ModelCapabilities(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            supported_combinations=(
+                ModelCapabilityCombination(streaming=StreamingMode.DELTA),
+                ModelCapabilityCombination(tool_calling=ToolCallingMode.NATIVE),
+            ),
+        )
+
+        class SplitCapabilitiesAdapter(ChatCompletionsModelAdapter):
+            capabilities = split_capabilities
+
+        probe = SplitCapabilitiesAdapter(
+            base_url="https://contract.invalid/v1"
+        )
+        contract = ModelContract(
+            contract_id="split-capability-ceiling",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity=probe.model,
+            capabilities=split_capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="provider-sizer-v1",
+            serialization_id="provider-wire-v1",
+            configuration_fingerprint=probe.definition_contract_fingerprint(),
+        )
+        adapter = SplitCapabilitiesAdapter(
+            base_url="https://contract.invalid/v1",
+            model_contract=contract,
+        )
+        try:
+            self.assertEqual(adapter.model_contract, contract)
+        finally:
+            asyncio.run(probe.aclose())
+            asyncio.run(adapter.aclose())
+
     def test_json_object_contract_rejects_strict_schema_requirement(self) -> None:
         """A weaker native mode never passes a strict schema Requirement."""
         adapter = configure_mock_contract(

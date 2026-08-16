@@ -39,6 +39,7 @@ from .._errors import (
     StaleRunVersionError,
 )
 from .._run import RunRecord
+from .._model import ModelUsage
 from .._status import RunStatus, validate_transition
 from .._steps import (
     StepAttempt,
@@ -104,6 +105,7 @@ CREATE TABLE IF NOT EXISTS step_attempts (
     classification TEXT,
     error_code TEXT,
     model_purpose TEXT,
+    usage_json TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS step_checkpoints (
@@ -220,6 +222,10 @@ class SQLiteRunStore:
         if "model_purpose" not in attempt_columns:
             self._conn.execute(
                 "ALTER TABLE step_attempts ADD COLUMN model_purpose TEXT"
+            )
+        if "usage_json" not in attempt_columns:
+            self._conn.execute(
+                "ALTER TABLE step_attempts ADD COLUMN usage_json TEXT"
             )
         # Ticket 02 旧版本把完整 DefinitionSnapshot 直接写进
         # ``snapshot_json``，Step Attempt 的诊断也落在 ``error`` 列。
@@ -683,8 +689,8 @@ class SQLiteRunStore:
         lease_clause, lease_params = self._lease_condition(lease_owner)
         cursor = self._conn.execute(
             "INSERT OR REPLACE INTO step_attempts (attempt_id, step_id, run_id,"
-            " status, error, classification, error_code, model_purpose, created_at)"
-            " SELECT ?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM runs"
+            " status, error, classification, error_code, model_purpose, usage_json, created_at)"
+            " SELECT ?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM runs"
             " WHERE run_id=? AND version=?"
             + lease_clause
             + ")",
@@ -697,6 +703,11 @@ class SQLiteRunStore:
                 stored.classification,
                 stored.error_code,
                 stored.model_purpose,
+                (
+                    stored.usage.model_dump_json()
+                    if stored.usage is not None
+                    else None
+                ),
                 stored.created_at.isoformat(),
                 stored.run_id,
                 expected_version,
@@ -798,8 +809,8 @@ class SQLiteRunStore:
             )
             self._conn.execute(
                 "INSERT INTO step_attempts (attempt_id, step_id, run_id, status, "
-                "error, classification, error_code, model_purpose, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "error, classification, error_code, model_purpose, usage_json, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     attempt.attempt_id,
                     attempt.step_id,
@@ -809,6 +820,7 @@ class SQLiteRunStore:
                     None,
                     None,
                     attempt.model_purpose.value,
+                    None,
                     attempt.created_at.isoformat(),
                 ),
             )
@@ -896,6 +908,11 @@ class SQLiteRunStore:
                 classification=row["classification"],
                 error_code=row["error_code"],
                 model_purpose=row["model_purpose"],
+                usage=(
+                    ModelUsage.model_validate_json(row["usage_json"])
+                    if row["usage_json"] is not None
+                    else None
+                ),
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
             attempts.append(

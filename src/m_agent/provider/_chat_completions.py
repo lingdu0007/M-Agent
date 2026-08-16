@@ -159,7 +159,12 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
             ]
             payload["tool_choice"] = "auto"
         if request.structured_output is not StructuredOutputMode.NONE:
-            if request.structured_output is not self.capabilities.structured_output:
+            if (
+                request.structured_output
+                is StructuredOutputMode.JSON_SCHEMA_STRICT
+                and self.capabilities.structured_output
+                is not StructuredOutputMode.JSON_SCHEMA_STRICT
+            ):
                 raise ModelContractViolationError(
                     "requested structured-output guarantee does not match "
                     "the configured provider mode"

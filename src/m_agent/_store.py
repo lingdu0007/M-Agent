@@ -20,7 +20,7 @@ from ._codec import PayloadCodec
 from ._definition import DefinitionSnapshot
 from ._failure import sanitize_error_code
 from ._run import RunRecord
-from ._model import ModelPurpose
+from ._model import ModelPurpose, ModelUsage
 from ._status import RunStatus
 from ._steps import (
     FailureClassification,
@@ -116,6 +116,7 @@ class _StoredAttempt:
     classification: str | None
     error_code: str | None
     model_purpose: str | None
+    usage: ModelUsage | None
     created_at: datetime
 
     def to_record(self, output: str | None, error: str | None) -> StepAttempt:
@@ -137,6 +138,7 @@ class _StoredAttempt:
                 if self.model_purpose is not None
                 else None
             ),
+            usage=self.usage,
             created_at=self.created_at,
         )
 
@@ -314,6 +316,7 @@ def _split_attempt(
             if attempt.model_purpose is not None
             else None
         ),
+        usage=attempt.usage,
         created_at=attempt.created_at,
     )
     return stored, payloads

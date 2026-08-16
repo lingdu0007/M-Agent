@@ -679,6 +679,64 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 1)
 
+    async def test_json_object_response_rejects_non_json_output(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StructuredOutputMode,
+        )
+
+        contract = ModelContract(
+            contract_id="json-object-output",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:json-object-output",
+            capabilities=ModelCapabilities(
+                structured_output=StructuredOutputMode.JSON_OBJECT
+            ),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+        adapter = DeterministicModelAdapter(("not-json",), model_contract=contract)
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="json-object-output",
+                version="1",
+                instructions="Return a JSON object.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        structured_output=StructuredOutputMode.JSON_OBJECT
+                    )
+                ),
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("json-object-output", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 1)
+
     async def test_streaming_response_tool_call_requires_declared_combination(
         self,
     ) -> None:
@@ -762,7 +820,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(adapter.call_count, 1)
 
-    async def test_streaming_usage_combination_rejects_before_dispatch(self) -> None:
+    async def test_streaming_uses_requirement_selected_usage_mode(self) -> None:
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -832,7 +890,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             AgentDefinition.for_adapter(
                 definition_id="stream-usage-split",
                 version="1",
-                instructions="Never dispatch incompatible modes.",
+                instructions="Stream without requesting provider usage.",
                 model_requirements=ModelRequirements(
                     capabilities=ModelCapabilities(streaming=StreamingMode.DELTA)
                 ),
@@ -847,8 +905,63 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         created = await runner.create_run("stream-usage-split", "1", "hello")
         terminal = await runner.start_run(created.run_id)
 
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(adapter.call_count, 1)
+        assert adapter.last_request is not None
+        self.assertIs(
+            adapter.last_request.usage_reporting,
+            UsageReportingMode.NONE,
+        )
+
+    async def test_unsupported_predispatch_request_has_capability_error_code(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+            ToolEffect,
+            ToolOutcome,
+        )
+
+        adapter = DeterministicModelAdapter(("must not dispatch",))
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="predispatch-capability",
+                version="1",
+                instructions="Use the supplied tool.",
+                model_adapter=adapter,
+                tools=(
+                    DeterministicTool(
+                        name="lookup",
+                        effect=ToolEffect.READ_ONLY,
+                        handler=lambda request: ToolOutcome.success(
+                            request.call_id,
+                            request.tool_name,
+                            "unused",
+                        ),
+                    ),
+                ),
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("predispatch-capability", "1", "hi")
+        terminal = await runner.start_run(created.run_id)
+
         self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(terminal.error_code, "MODEL_CAPABILITY_UNSUPPORTED")
         self.assertEqual(adapter.call_count, 0)
 
     async def test_malformed_model_response_is_contract_violation(self) -> None:
@@ -1319,7 +1432,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         terminal = await runner.start_run(created.run_id)
 
         self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(terminal.error_code, "MODEL_CAPABILITY_UNSUPPORTED")
         self.assertEqual(adapter.call_count, 0)
 
 
@@ -1562,7 +1675,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         terminal = await runner.start_run(created.run_id)
 
         self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(terminal.error_code, "MODEL_CAPABILITY_UNSUPPORTED")
         self.assertEqual(adapter.call_count, 0)
 
     async def test_run_budget_stops_a_second_primary_dispatch(self) -> None:
@@ -2239,6 +2352,235 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 1,
             )
+
+    async def test_recovery_fails_closed_when_success_attempt_persistence_fails(
+        self,
+    ) -> None:
+        """A successful Step without a successful Attempt is never replayed."""
+        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+            StepStatus,
+        )
+
+        class FailingInMemoryStore(InMemoryRunStore):
+            fail_success_attempt = True
+
+            async def record_attempt(self, attempt, **kwargs):
+                if (
+                    self.fail_success_attempt
+                    and attempt.status is StepStatus.SUCCEEDED
+                ):
+                    self.fail_success_attempt = False
+                    raise RuntimeError("injected attempt persistence failure")
+                return await super().record_attempt(attempt, **kwargs)
+
+        class FailingSQLiteStore(SQLiteRunStore):
+            fail_success_attempt = True
+
+            async def record_attempt(self, attempt, **kwargs):
+                if (
+                    self.fail_success_attempt
+                    and attempt.status is StepStatus.SUCCEEDED
+                ):
+                    self.fail_success_attempt = False
+                    raise RuntimeError("injected attempt persistence failure")
+                return await super().record_attempt(attempt, **kwargs)
+
+        def registry_and_adapter():
+            adapter = DeterministicModelAdapter(("answer",))
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="attempt-persistence",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                )
+            )
+            return registry, adapter
+
+        clock = FakeClock()
+        memory_store = FailingInMemoryStore(
+            payload_codec=PlaintextPayloadCodec(), clock=clock
+        )
+        registry, adapter = registry_and_adapter()
+        created = await Runner(registry, memory_store).create_run(
+            "attempt-persistence", "1", "hello"
+        )
+        with self.assertRaisesRegex(RuntimeError, "attempt persistence"):
+            await Runner(registry, memory_store).start_run(created.run_id)
+        clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+        terminal = await Runner(registry, memory_store).resume_run(created.run_id)
+        inspection = await Runner(registry, memory_store).inspect_run(
+            created.run_id
+        )
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "model_checkpoint_unconfirmed")
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual([step.status for step in inspection.steps], [StepStatus.FAILED])
+        self.assertEqual(
+            [attempt.status for attempt in inspection.attempts],
+            [StepStatus.FAILED],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "run.db")
+            first_clock = FakeClock()
+            first_store = FailingSQLiteStore(
+                db_path,
+                payload_codec=PlaintextPayloadCodec(),
+                clock=first_clock,
+            )
+            registry, adapter = registry_and_adapter()
+            try:
+                created = await Runner(registry, first_store).create_run(
+                    "attempt-persistence", "1", "hello"
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "attempt persistence"
+                ):
+                    await Runner(registry, first_store).start_run(created.run_id)
+                crashed = await first_store.get_run(created.run_id)
+                assert crashed is not None
+                assert crashed.lease_expires_at is not None
+                restart_clock = FakeClock(
+                    crashed.lease_expires_at + timedelta(seconds=1)
+                )
+            finally:
+                first_store.close()
+            reopened = SQLiteRunStore(
+                db_path,
+                payload_codec=PlaintextPayloadCodec(),
+                clock=restart_clock,
+            )
+            try:
+                terminal = await Runner(registry, reopened).resume_run(
+                    created.run_id
+                )
+                inspection = await Runner(registry, reopened).inspect_run(
+                    created.run_id
+                )
+            finally:
+                reopened.close()
+            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertEqual(
+                terminal.error_code, "model_checkpoint_unconfirmed"
+            )
+            self.assertEqual(adapter.call_count, 1)
+            self.assertEqual(
+                [step.status for step in inspection.steps], [StepStatus.FAILED]
+            )
+            self.assertEqual(
+                [attempt.status for attempt in inspection.attempts],
+                [StepStatus.FAILED],
+            )
+
+    async def test_model_usage_is_authoritative_attempt_metadata(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            ModelResponse,
+            ModelUsage,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            UsageReportingMode,
+        )
+
+        usage = ModelUsage(
+            input_tokens=11,
+            output_tokens=7,
+            raw_unit="tokens",
+            normalization_source="test-usage-v1",
+        )
+        contract = ModelContract(
+            contract_id="attempt-usage",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:attempt-usage",
+            capabilities=ModelCapabilities(
+                usage_reporting=UsageReportingMode.PROVIDER_REPORTED
+            ),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+
+        class UsageAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                self.call_count += 1
+                self._last_request = request
+                return ModelResponse(content="answer", usage=usage)
+
+        def registry() -> DefinitionRegistry:
+            result = DefinitionRegistry()
+            result.register(
+                AgentDefinition.for_adapter(
+                    definition_id="attempt-usage",
+                    version="1",
+                    instructions="Reply.",
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            usage_reporting=UsageReportingMode.PROVIDER_REPORTED
+                        )
+                    ),
+                    model_adapter=UsageAdapter(("unused",), model_contract=contract),
+                )
+            )
+            return result
+
+        memory_registry = registry()
+        memory_runner = Runner(
+            memory_registry,
+            InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+        created = await memory_runner.create_run("attempt-usage", "1", "hello")
+        terminal = await memory_runner.start_run(created.run_id)
+        inspection = await memory_runner.inspect_run(created.run_id)
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(inspection.attempts[0].usage, usage)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "run.db")
+            store = SQLiteRunStore(db_path, payload_codec=PlaintextPayloadCodec())
+            sqlite_registry = registry()
+            try:
+                runner = Runner(sqlite_registry, store)
+                created = await runner.create_run("attempt-usage", "1", "hello")
+                terminal = await runner.start_run(created.run_id)
+                self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+            finally:
+                store.close()
+            reopened = SQLiteRunStore(
+                db_path, payload_codec=PlaintextPayloadCodec()
+            )
+            try:
+                inspection = await Runner(sqlite_registry, reopened).inspect_run(
+                    created.run_id
+                )
+            finally:
+                reopened.close()
+            self.assertEqual(inspection.attempts[0].usage, usage)
 
     async def test_sqlite_model_reservation_is_atomic_across_connections(
         self,

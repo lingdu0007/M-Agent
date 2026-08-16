@@ -14,6 +14,8 @@ class MAgentError(Exception):
 class ModelCapabilityError(MAgentError):
     """Definition 要求的 Model Capabilities 未被所选 Model Adapter 声明。"""
 
+    code = "MODEL_CAPABILITY_UNSUPPORTED"
+
 
 class ModelContractViolationError(MAgentError):
     """Adapter response failed the frozen Model Contract at normalization."""

@@ -40,6 +40,8 @@ from m_agent._errors import ModelContractViolationError
 from m_agent._failure import FailureClassification, ModelFailure
 from m_agent._model import (
     ModelAdapter,
+    ModelCapabilityCombination,
+    ModelCapabilities,
     ModelContract,
     ModelRequest,
     ModelResponse,
@@ -613,6 +615,33 @@ def _matches_number(value: int | float, schema: dict[str, Any]) -> bool:
     )
 
 
+def _capability_ceiling_supports(
+    ceiling: ModelCapabilities, declared: ModelCapabilities
+) -> bool:
+    """Check every declared protocol combination against the class ceiling."""
+    combinations: tuple[ModelCapabilityCombination, ...] = (
+        declared.supported_combinations
+        or (
+            ModelCapabilityCombination(
+                streaming=declared.streaming,
+                tool_calling=declared.tool_calling,
+                structured_output=declared.structured_output,
+                usage_reporting=declared.usage_reporting,
+            ),
+        )
+    )
+    for combination in combinations:
+        values = combination.model_dump()
+        active = sum(value.value != "NONE" for value in values.values())
+        required = ModelCapabilities(
+            **values,
+            supported_combinations=(combination,) if active > 1 else (),
+        )
+        if not ceiling.supports(required):
+            return False
+    return True
+
+
 # -- 共享 live Adapter 基类 --------------------------------------------
 
 
@@ -656,7 +685,9 @@ class ProviderModelAdapter(ModelAdapter):
     def model_contract(self) -> ModelContract:
         if self._model_contract is None:
             return super().model_contract
-        if not self.capabilities.supports(self._model_contract.capabilities):
+        if not _capability_ceiling_supports(
+            self.capabilities, self._model_contract.capabilities
+        ):
             raise ValueError(
                 "provider instance ModelContract exceeds class capability ceiling"
             )
@@ -668,15 +699,6 @@ class ProviderModelAdapter(ModelAdapter):
         declared_structured_output = (
             self._model_contract.capabilities.structured_output
         )
-        if (
-            declared_structured_output is not StructuredOutputMode.NONE
-            and declared_structured_output
-            is not self.capabilities.structured_output
-        ):
-            raise ValueError(
-                "provider instance structured-output mode does not match "
-                "its ModelContract"
-            )
         current = self.definition_contract_fingerprint()
         if self._model_contract.configuration_fingerprint != current:
             raise ValueError(

@@ -22,7 +22,7 @@ from typing import Any, Self
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from ._context import ContextItem
-from ._errors import ModelContractViolationError
+from ._errors import ModelCapabilityError, ModelContractViolationError
 from ._tools import ToolCall, ToolOutcome, ToolSpec
 
 class _CapabilityMode(str, enum.Enum):
@@ -687,16 +687,19 @@ def normalize_model_response(
         raise ModelContractViolationError(
             "Model Contract does not declare the response capability combination"
         )
-    if request.structured_output is StructuredOutputMode.JSON_SCHEMA_STRICT:
+    if request.structured_output in (
+        StructuredOutputMode.JSON_OBJECT,
+        StructuredOutputMode.JSON_SCHEMA_STRICT,
+    ):
         try:
             structured = json.loads(response.content or "")
         except json.JSONDecodeError as exc:
             raise ModelContractViolationError(
-                "strict structured response is not valid JSON"
+                "structured response is not valid JSON"
             ) from exc
         if not isinstance(structured, dict):
             raise ModelContractViolationError(
-                "strict structured response must be a JSON object"
+                "structured response must be a JSON object"
             )
     usage = response.usage
     guarantees = contract.usage_guarantees
@@ -773,7 +776,7 @@ def assert_model_request_compatible(
         ),
     )
     if not contract.capabilities.supports(required):
-        raise ModelContractViolationError(
+        raise ModelCapabilityError(
             "Model Contract does not declare the requested capability combination"
         )
 
