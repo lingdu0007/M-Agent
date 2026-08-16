@@ -1297,26 +1297,30 @@ class Runner:
                 attempt
                 for attempt in reversed(persisted_attempts)
                 if attempt.step_id in model_steps
-                and attempt.status in (StepStatus.RUNNING, StepStatus.SUCCEEDED)
                 and attempt.attempt_id not in checkpoint_attempt_ids
+                and (
+                    attempt.status in (StepStatus.RUNNING, StepStatus.SUCCEEDED)
+                    or attempt.error_code == ERROR_MODEL_CHECKPOINT_UNCONFIRMED
+                )
             ),
             None,
         )
         if inflight_model_attempt is not None:
             inflight_model_step = model_steps[inflight_model_attempt.step_id]
-            await self._record_failed_attempt(
-                run,
-                lease,
-                inflight_model_step.step_id,
-                (
-                    FailureClassification.UNCERTAIN,
-                    ERROR_MODEL_CHECKPOINT_UNCONFIRMED,
-                    "model attempt reservation has no checkpoint",
-                ),
-                StepType.MODEL,
-                attempt_id=inflight_model_attempt.attempt_id,
-                model_purpose=inflight_model_attempt.model_purpose,
-            )
+            if inflight_model_attempt.status is not StepStatus.FAILED:
+                await self._record_failed_attempt(
+                    run,
+                    lease,
+                    inflight_model_step.step_id,
+                    (
+                        FailureClassification.UNCERTAIN,
+                        ERROR_MODEL_CHECKPOINT_UNCONFIRMED,
+                        "model attempt reservation has no checkpoint",
+                    ),
+                    StepType.MODEL,
+                    attempt_id=inflight_model_attempt.attempt_id,
+                    model_purpose=inflight_model_attempt.model_purpose,
+                )
             await self._record_failed_step(
                 run, lease, inflight_model_step.step_id, StepType.MODEL
             )
@@ -1948,9 +1952,13 @@ class Runner:
                 assert_model_request_compatible(
                     model_contract, request, streaming=streaming
                 )
-                # Adapter hooks are synchronous but may mutate external state;
-                # the lease guard must be the final action before dispatch.
+                # The lease assertion awaits. Recheck the frozen binding only
+                # after it returns so configuration cannot drift in that window.
                 await self._assert_step_dispatch(run, lease)
+                self._assert_adapter_contract_matches_snapshot(run, definition)
+                assert_model_request_compatible(
+                    model_contract, request, streaming=streaming
+                )
                 if streaming:
                     response = await self._stream_model(
                         adapter,

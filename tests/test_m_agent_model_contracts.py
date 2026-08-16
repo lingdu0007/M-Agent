@@ -3850,6 +3850,197 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 [StepStatus.FAILED],
             )
 
+    async def test_recovery_never_replays_checkpoint_unconfirmed_attempt(
+        self,
+    ) -> None:
+        from m_agent import DEFAULT_LEASE_TTL, CrashPoint, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+            StepStatus,
+            StepType,
+        )
+
+        class FailingCheckpointStore:
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.fail_model_checkpoint = True
+
+            async def record_checkpoint(self, checkpoint, **kwargs):
+                if (
+                    self.fail_model_checkpoint
+                    and checkpoint.step_type is StepType.MODEL
+                ):
+                    self.fail_model_checkpoint = False
+                    raise RuntimeError("injected checkpoint persistence failure")
+                return await super().record_checkpoint(checkpoint, **kwargs)
+
+        class FailingInMemoryStore(FailingCheckpointStore, InMemoryRunStore):
+            pass
+
+        class FailingSQLiteStore(FailingCheckpointStore, SQLiteRunStore):
+            pass
+
+        async def assert_no_replay(store, clock) -> None:
+            adapter = DeterministicModelAdapter(("first", "must not dispatch"))
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="checkpoint-unconfirmed-recovery",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                )
+            )
+            created = await Runner(registry, store).create_run(
+                "checkpoint-unconfirmed-recovery", "1", "hello"
+            )
+            with self.assertRaisesRegex(RuntimeError, "checkpoint persistence"):
+                await Runner(registry, store).start_run(created.run_id)
+
+            clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+
+            def crash_after_failure(point: CrashPoint, run_id: str) -> None:
+                if point is CrashPoint.AFTER_ATTEMPT_FAILED:
+                    raise RuntimeError("interrupt after checkpoint failure")
+
+            with self.assertRaisesRegex(RuntimeError, "checkpoint failure"):
+                await Runner(
+                    registry, store, crash_hook=crash_after_failure
+                ).resume_run(created.run_id)
+
+            intermediate = await store.get_run(created.run_id)
+            self.assertIsNotNone(intermediate)
+            assert intermediate is not None
+            self.assertIs(intermediate.status, RunStatus.RUNNING)
+            self.assertEqual(
+                [attempt.status for attempt in await store.get_attempts(created.run_id)],
+                [StepStatus.FAILED],
+            )
+
+            clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+            terminal = await Runner(registry, store).resume_run(created.run_id)
+
+            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertEqual(
+                terminal.error_code, "model_checkpoint_unconfirmed"
+            )
+            self.assertEqual(adapter.call_count, 1)
+
+        memory_clock = FakeClock()
+        memory_store = FailingInMemoryStore(
+            payload_codec=PlaintextPayloadCodec(), clock=memory_clock
+        )
+        await assert_no_replay(memory_store, memory_clock)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sqlite_clock = FakeClock()
+            sqlite_store = FailingSQLiteStore(
+                os.path.join(tmp, "checkpoint-unconfirmed-recovery.db"),
+                payload_codec=PlaintextPayloadCodec(),
+                clock=sqlite_clock,
+            )
+            try:
+                await assert_no_replay(sqlite_store, sqlite_clock)
+            finally:
+                sqlite_store.close()
+
+    async def test_final_lease_guard_rechecks_binding_before_model_dispatch(
+        self,
+    ) -> None:
+        from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelAdapter,
+            ModelContract,
+            ModelLimits,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+            RunStatus,
+        )
+
+        contract = ModelContract(
+            contract_id="final-lease-binding",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:final-lease-binding",
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-sizer-v1",
+            serialization_id="deterministic-wire-v1",
+            configuration_fingerprint="configuration-a",
+        )
+
+        class MutableFingerprintAdapter(ModelAdapter):
+            deterministic = True
+            capabilities = contract.capabilities
+
+            def __init__(self) -> None:
+                self.configuration = "configuration-a"
+                self.dispatched_configurations: list[str] = []
+
+            @property
+            def model_contract(self) -> ModelContract:
+                return contract
+
+            def definition_contract_fingerprint(self) -> str:
+                return self.configuration
+
+            async def generate(self, request) -> ModelResponse:
+                self.dispatched_configurations.append(self.configuration)
+                return ModelResponse(content="must not dispatch")
+
+        class YieldingFinalLeaseStore(InMemoryRunStore):
+            def __init__(self) -> None:
+                super().__init__(payload_codec=PlaintextPayloadCodec())
+                self._reserved_model_attempt = False
+                self.final_lease_guard_entered = asyncio.Event()
+                self.allow_final_lease_guard = asyncio.Event()
+
+            async def reserve_model_attempt(self, *args, **kwargs) -> bool:
+                reserved = await super().reserve_model_attempt(*args, **kwargs)
+                self._reserved_model_attempt = reserved
+                return reserved
+
+            async def assert_lease(self, *args, **kwargs) -> None:
+                await super().assert_lease(*args, **kwargs)
+                if self._reserved_model_attempt:
+                    self.final_lease_guard_entered.set()
+                    await self.allow_final_lease_guard.wait()
+                    self._reserved_model_attempt = False
+
+        adapter = MutableFingerprintAdapter()
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="final-lease-binding",
+                version="1",
+                instructions="Never dispatch a drifted binding.",
+                model_adapter=adapter,
+            )
+        )
+        store = YieldingFinalLeaseStore()
+        runner = Runner(registry, store)
+        created = await runner.create_run("final-lease-binding", "1", "hello")
+
+        advancing = asyncio.create_task(runner.start_run(created.run_id))
+        await asyncio.wait_for(store.final_lease_guard_entered.wait(), timeout=1)
+        adapter.configuration = "configuration-b"
+        store.allow_final_lease_guard.set()
+        terminal = await advancing
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(adapter.dispatched_configurations, [])
+
     async def test_model_usage_is_authoritative_attempt_metadata(self) -> None:
         from m_agent.adapters import (
             DeterministicModelAdapter,
