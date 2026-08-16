@@ -47,12 +47,14 @@ from m_agent import (
     DeterministicTool,
     FakeClock,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
     RetryPolicy,
     SQLiteRunStore,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
@@ -67,7 +69,7 @@ DEFINITION_VERSION = "1.0"
 CONFIRM_RESULT = "notification-confirmed-by-app"
 
 #: 模型所需的 tool calling 能力（ADR 0030：注册时校验，无静默降级）。
-_TOOL_CALLING = ModelCapabilities(tool_calling=True)
+_TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 #: 场景中固定的工单 / 订单 / 通知参数（确定性演示数据）。
 TICKET_ID = "T-1024"
@@ -415,7 +417,7 @@ def build_registry(
                 "ticket, notify the customer, then return the structured "
                 "result."
             ),
-            required_capabilities=_TOOL_CALLING,
+            model_requirements=ModelRequirements(capabilities=_TOOL_CALLING),
             model_adapter=SupportModel(logs_dir),
             context_provider=TicketContextProvider(logs_dir),
             tools=(

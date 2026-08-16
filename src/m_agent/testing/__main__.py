@@ -128,7 +128,10 @@ _TELEMETRY_CANARIES = (
 
 class UsageModel(DeterministicModelAdapter):
     def __init__(self):
-        super().__init__(("accepted",), capabilities=ModelCapabilities(usage_reporting=True))
+        super().__init__(
+            ("accepted",),
+            capabilities=ModelCapabilities(usage_reporting="PROVIDER_REPORTED"),
+        )
 
     async def generate(self, request):
         response = await super().generate(request)
@@ -174,10 +177,12 @@ def telemetry_usage_provenance(events):
     completed = [
         event for event in events if event.get("event_type") == "STEP_COMPLETED"
     ]
+    usage = completed[0].get("usage") if len(completed) == 1 else None
     return (
-        len(completed) == 1
-        and completed[0].get("usage")
-        == {"input_tokens": 11, "output_tokens": 7}
+        isinstance(usage, dict)
+        and usage.get("input_tokens") == 11
+        and usage.get("output_tokens") == 7
+        and usage.get("provenance") == "PROVIDER_REPORTED"
         and all(
             event.get("usage") is None
             for event in events

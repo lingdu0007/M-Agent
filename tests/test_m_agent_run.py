@@ -18,6 +18,8 @@ from m_agent import (
     ModelAdapter,
     ModelCapabilities,
     ModelCapabilityError,
+    ModelPurpose,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -26,6 +28,9 @@ from m_agent import (
     RunStatus,
     StepStatus,
     StepType,
+    StructuredOutputMode,
+    StreamingMode,
+    ToolCallingMode,
     deserialize_model_response,
     is_terminal,
 )
@@ -38,7 +43,6 @@ def make_registry() -> DefinitionRegistry:
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=ModelCapabilities(),
             model_adapter=DeterministicModelAdapter(
                 responses=("deterministic answer",)
             ),
@@ -163,8 +167,11 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
             definition_id="assistant",
             version="1.0",
             instructions="v1",
-            required_capabilities=ModelCapabilities(
-                streaming=True, tool_calling=True
+            model_requirements=ModelRequirements(
+                capabilities=ModelCapabilities(
+                    streaming=StreamingMode.DELTA,
+                    tool_calling=ToolCallingMode.NATIVE,
+                )
             ),
             model_adapter=adapter,
         )
@@ -178,15 +185,20 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
         adapter = DeterministicModelAdapter(
             responses=("a",),
             capabilities=ModelCapabilities(
-                streaming=True, tool_calling=True, structured_output=True
+                streaming=StreamingMode.DELTA,
+                tool_calling=ToolCallingMode.NATIVE,
+                structured_output=StructuredOutputMode.NATIVE,
             ),
         )
         definition = AgentDefinition(
             definition_id="assistant",
             version="1.0",
             instructions="v1",
-            required_capabilities=ModelCapabilities(
-                streaming=True, tool_calling=True
+            model_requirements=ModelRequirements(
+                capabilities=ModelCapabilities(
+                    streaming=StreamingMode.DELTA,
+                    tool_calling=ToolCallingMode.NATIVE,
+                )
             ),
             model_adapter=adapter,
         )
@@ -238,11 +250,14 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             terminal.snapshot.instructions, definition.instructions
         )
         self.assertEqual(
-            terminal.snapshot.required_capabilities,
-            definition.required_capabilities,
+            terminal.snapshot.model_bindings.for_purpose(ModelPurpose.PRIMARY).requirements,
+            definition.model_requirements,
         )
         self.assertEqual(
-            terminal.snapshot.adapter_capabilities, adapter.capabilities
+            terminal.snapshot.model_bindings.for_purpose(
+                ModelPurpose.PRIMARY
+            ).contract.capabilities,
+            adapter.model_contract.capabilities,
         )
         self.assertEqual(adapter.call_count, 1)
         # 模型请求携带 Definition 的 Agent Instruction。

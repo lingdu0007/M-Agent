@@ -44,7 +44,8 @@ class _UsageReportingModel(DeterministicModelAdapter):
 
     def __init__(self, response: str) -> None:
         super().__init__(
-            (response,), capabilities=ModelCapabilities(usage_reporting=True)
+            (response,),
+            capabilities=ModelCapabilities(usage_reporting="PROVIDER_REPORTED"),
         )
 
     async def generate(self, request):
@@ -93,7 +94,10 @@ from m_agent.runtime import (
 
 class UsageModel(DeterministicModelAdapter):
     def __init__(self):
-        super().__init__(("child-response",), capabilities=ModelCapabilities(usage_reporting=True))
+        super().__init__(
+            ("child-response",),
+            capabilities=ModelCapabilities(usage_reporting="PROVIDER_REPORTED"),
+        )
 
     async def generate(self, request):
         response = await super().generate(request)
@@ -148,18 +152,30 @@ _EXPAND_RUNTIME_EXPORTS = (
     "DefinitionSnapshot",
     "DuplicateRunError",
     "ERROR_EFFECT_UNCONFIRMED",
+    "ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED",
     "FailureClassification",
     "IllegalRunTransitionError",
     "LeaseNotHeldError",
     "MAgentError",
     "ModelAdapter",
+    "ModelBinding",
+    "ModelBindingSet",
     "ModelCapabilities",
     "ModelCapabilityError",
+    "ModelContract",
+    "ModelContractViolationError",
     "ModelDelta",
+    "ModelExecutionBudget",
     "ModelFailure",
+    "ModelLimits",
+    "ModelPurpose",
     "ModelRequest",
+    "ModelRequirementMatch",
+    "ModelRequirementReason",
+    "ModelRequirements",
     "ModelResponse",
     "ModelUsage",
+    "ModelUsageGuarantees",
     "PayloadCodec",
     "REASON_DEFINITION_UNAVAILABLE",
     "REASON_UNCERTAIN_NON_IDEMPOTENT",
@@ -175,6 +191,7 @@ _EXPAND_RUNTIME_EXPORTS = (
     "RunStore",
     "RunUpdate",
     "RunUpdateType",
+    "RevisionStability",
     "Runner",
     "StaleRunVersionError",
     "StepAttempt",
@@ -183,12 +200,15 @@ _EXPAND_RUNTIME_EXPORTS = (
     "StepRecord",
     "StepStatus",
     "StepType",
+    "StreamingMode",
+    "StructuredOutputMode",
     "SyncRunner",
     "TelemetryEvent",
     "TelemetryEventType",
     "TelemetrySink",
     "Tool",
     "ToolCall",
+    "ToolCallingMode",
     "ToolDeclaration",
     "ToolEffect",
     "ToolFailure",
@@ -198,6 +218,9 @@ _EXPAND_RUNTIME_EXPORTS = (
     "ToolSpec",
     "allowed_resolutions",
     "is_terminal",
+    "UsageFieldGuarantee",
+    "UsageProvenance",
+    "UsageReportingMode",
 )
 _EXPAND_ADAPTER_EXPORTS = (
     "DeterministicContextProvider",
@@ -355,10 +378,12 @@ def _telemetry_usage_provenance(events: list[dict]) -> bool:
         for event in events
         if event.get("event_type") == "STEP_COMPLETED"
     ]
+    usage = completions[0].get("usage") if len(completions) == 1 else None
     return (
-        len(completions) == 1
-        and completions[0].get("usage")
-        == {"input_tokens": 11, "output_tokens": 7}
+        isinstance(usage, dict)
+        and usage.get("input_tokens") == 11
+        and usage.get("output_tokens") == 7
+        and usage.get("provenance") == "PROVIDER_REPORTED"
         and all(
             event.get("usage") is None
             for event in events

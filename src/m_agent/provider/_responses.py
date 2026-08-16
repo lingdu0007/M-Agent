@@ -6,11 +6,11 @@
 
 能力声明（ADR 0030，如实且完整）：
 
-- ``streaming=True``：SSE 事件流（``response.output_text.delta`` /
+- ``streaming=DELTA``：SSE 事件流（``response.output_text.delta`` /
   ``response.function_call_arguments.delta`` / ``response.completed``）；
-- ``tool_calling=True``：``tools``（function 工具）；
-- ``structured_output=True``：``text.format``（json_schema）；
-- ``usage_reporting=True``：usage 从 provider 返回时映射为
+- ``tool_calling=NATIVE``：``tools``（function 工具）；
+- ``structured_output=NATIVE``：``text.format``（json_schema）；
+- ``usage_reporting=PROVIDER_REPORTED``：usage 从 provider 返回时映射为
   :class:`ModelUsage`，缺失时显式为 None（不伪造）。
 
 本 Adapter 是 live 实现（``deterministic=False``），构造不触网、不
@@ -41,14 +41,18 @@ from m_agent._model import (
     ModelDelta,
     ModelRequest,
     ModelResponse,
+    StreamingMode,
+    StructuredOutputMode,
+    ToolCallingMode,
+    UsageReportingMode,
 )
 
 #: Responses 兼容端点能力声明：四类语义全部如实支持。
 RESPONSES_CAPABILITIES = ModelCapabilities(
-    streaming=True,
-    tool_calling=True,
-    structured_output=True,
-    usage_reporting=True,
+    streaming=StreamingMode.DELTA,
+    tool_calling=ToolCallingMode.NATIVE,
+    structured_output=StructuredOutputMode.NATIVE,
+    usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
 )
 
 

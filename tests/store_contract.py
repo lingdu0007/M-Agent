@@ -18,12 +18,16 @@ from datetime import timedelta
 from m_agent import (
     DEFAULT_LEASE_TTL,
     DefinitionSnapshot,
+    DeterministicModelAdapter,
     DuplicateRunError,
     FailureClassification,
     FakeClock,
     IllegalRunTransitionError,
     LeaseNotHeldError,
-    ModelCapabilities,
+    ModelBinding,
+    ModelBindingSet,
+    ModelPurpose,
+    ModelRequirements,
     PayloadCodec,
     PlaintextPayloadCodec,
     RunNotFoundError,
@@ -72,8 +76,15 @@ def snapshot() -> DefinitionSnapshot:
         definition_id="assistant",
         version="1.0",
         instructions="x",
-        required_capabilities=ModelCapabilities(),
-        adapter_capabilities=ModelCapabilities(),
+        model_bindings=ModelBindingSet(
+            bindings=(
+                ModelBinding(
+                    purpose=ModelPurpose.PRIMARY,
+                    contract=DeterministicModelAdapter().model_contract,
+                    requirements=ModelRequirements(),
+                ),
+            )
+        ).resolved(),
     )
 
 

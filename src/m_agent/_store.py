@@ -20,6 +20,7 @@ from ._codec import PayloadCodec
 from ._definition import DefinitionSnapshot
 from ._failure import sanitize_error_code
 from ._run import RunRecord
+from ._model import ModelPurpose
 from ._status import RunStatus
 from ._steps import (
     FailureClassification,
@@ -72,6 +73,7 @@ class _StoredRun:
     version: int
     waiting_reason: str | None
     waiting_step_id: str | None
+    error_code: str | None
     lease_owner: str | None
     lease_expires_at: datetime | None
     created_at: datetime
@@ -93,6 +95,7 @@ class _StoredRun:
             output=output,
             waiting_reason=self.waiting_reason,
             waiting_step_id=self.waiting_step_id,
+            error_code=self.error_code,
             version=self.version,
             lease_owner=self.lease_owner,
             lease_expires_at=self.lease_expires_at,
@@ -112,6 +115,7 @@ class _StoredAttempt:
     error: str | None
     classification: str | None
     error_code: str | None
+    model_purpose: str | None
     created_at: datetime
 
     def to_record(self, output: str | None, error: str | None) -> StepAttempt:
@@ -128,6 +132,11 @@ class _StoredAttempt:
                 else None
             ),
             error_code=self.error_code,
+            model_purpose=(
+                ModelPurpose(self.model_purpose)
+                if self.model_purpose is not None
+                else None
+            ),
             created_at=self.created_at,
         )
 
@@ -201,6 +210,7 @@ class RunStore(Protocol):
         output: str | None = None,
         waiting_reason: str | None = None,
         waiting_step_id: str | None = None,
+        error_code: str | None = None,
         lease_owner: str | None = None,
     ) -> RunRecord: ...
 
@@ -251,6 +261,7 @@ def _split_run(run: RunRecord, codec: PayloadCodec) -> tuple[_StoredRun, dict[st
         version=run.version,
         waiting_reason=run.waiting_reason,
         waiting_step_id=run.waiting_step_id,
+        error_code=run.error_code,
         lease_owner=run.lease_owner,
         lease_expires_at=run.lease_expires_at,
         created_at=run.created_at,
@@ -285,6 +296,11 @@ def _split_attempt(
         error_code=(
             sanitize_error_code(attempt.error_code)
             if attempt.error_code is not None
+            else None
+        ),
+        model_purpose=(
+            attempt.model_purpose.value
+            if attempt.model_purpose is not None
             else None
         ),
         created_at=attempt.created_at,

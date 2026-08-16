@@ -41,6 +41,7 @@ from m_agent._model import (
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    StructuredOutputMode,
 )
 from m_agent._tools import ToolCall, ToolSpec
 
@@ -514,7 +515,7 @@ class ProviderModelAdapter(ModelAdapter):
 
     @property
     def _structured_output_payload(self) -> dict[str, Any] | None:
-        if not self.capabilities.structured_output:
+        if self.capabilities.structured_output is StructuredOutputMode.NONE:
             return None
         return build_structured_output(
             self.structured_output_schema, name=self.structured_output_name
@@ -522,7 +523,7 @@ class ProviderModelAdapter(ModelAdapter):
 
     @property
     def _structured_output_responses_payload(self) -> dict[str, Any] | None:
-        if not self.capabilities.structured_output:
+        if self.capabilities.structured_output is StructuredOutputMode.NONE:
             return None
         return build_responses_structured_output(
             self.structured_output_schema, name=self.structured_output_name

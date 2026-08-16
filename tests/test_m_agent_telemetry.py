@@ -32,6 +32,7 @@ from m_agent import (
     InMemoryRunStore,
     JsonlTelemetrySink,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -46,6 +47,7 @@ from m_agent import (
     TelemetryEvent,
     TelemetryEventType,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
@@ -72,7 +74,7 @@ _ALL_SENTINELS = (
     SENTINEL_RESOLUTION,
 )
 
-_TOOL_CALLING = ModelCapabilities(tool_calling=True)
+_TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 
 class CollectingSink:
@@ -208,7 +210,7 @@ def build_registry(
             definition_id="telemetry_agent",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=model.capabilities,
+            model_requirements=ModelRequirements(capabilities=model.capabilities),
             model_adapter=model,
             tools=tools,
             context_provider=context_provider,

@@ -26,6 +26,7 @@ from m_agent import (
     DeterministicModelAdapter,
     DeterministicTool,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -39,6 +40,7 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
@@ -63,7 +65,9 @@ class BenchmarkModel(DeterministicModelAdapter):
     """Stateless deterministic adapter: one Tool Step, then final output."""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         if not request.tool_outcomes:
@@ -351,7 +355,11 @@ async def execute_benchmark(
             definition_id=DEFINITION_ID,
             version=DEFINITION_VERSION,
             instructions="Execute the deterministic benchmark tool once.",
-            required_capabilities=ModelCapabilities(tool_calling=True),
+            model_requirements=ModelRequirements(
+                capabilities=ModelCapabilities(
+                    tool_calling=ToolCallingMode.NATIVE
+                )
+            ),
             model_adapter=model,
             tools=(tool,),
         )

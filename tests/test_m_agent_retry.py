@@ -39,6 +39,7 @@ from m_agent import (
     FakeClock,
     InMemoryRunStore,
     ModelCapabilities,
+    ModelRequirements,
     ModelFailure,
     ModelRequest,
     ModelResponse,
@@ -51,13 +52,14 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
     ToolRequest,
 )
 
-TOOL_CALLING = ModelCapabilities(tool_calling=True)
+TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 
 # -- fake 模型（确定性，结构化失败分类） --------------------------------
@@ -281,7 +283,9 @@ def make_runner(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=(TOOL_CALLING if tools else ModelCapabilities()),
+            model_requirements=ModelRequirements(
+                capabilities=(TOOL_CALLING if tools else ModelCapabilities())
+            ),
             model_adapter=model,
             tools=tools,
             retry_policy=retry_policy,
@@ -429,7 +433,6 @@ class ModelRetryTests(unittest.IsolatedAsyncioTestCase):
                 definition_id="assistant",
                 version="2.0",
                 instructions="changed",
-                required_capabilities=ModelCapabilities(),
                 model_adapter=DeterministicModelAdapter(responses=("x",)),
                 retry_policy=RetryPolicy(max_attempts=1),
             )

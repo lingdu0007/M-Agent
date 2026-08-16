@@ -34,6 +34,7 @@ from m_agent import (
     DeterministicTool,
     InMemoryRunStore,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -42,6 +43,7 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
+    ToolCallingMode,
     ToolDeclaration,
     ToolEffect,
     ToolOutcome,
@@ -171,7 +173,9 @@ class ToolThenAnswerModel(DeterministicModelAdapter):
     """第一次响应请求一个工具，收到 outcome 后给出最终答案。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
         self.requests: list[ModelRequest] = []
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -199,7 +203,9 @@ class ThreeSequentialToolsModel(DeterministicModelAdapter):
     """三次响应：同一响应内两个工具 + 下一响应一个工具，验证严格顺序。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
         self.requests: list[ModelRequest] = []
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -227,7 +233,9 @@ class RejectThenAnswerModel(DeterministicModelAdapter):
     """第一次请求会业务拒绝的工具；第二次给出最终答案。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
         self.requests: list[ModelRequest] = []
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -254,7 +262,9 @@ class ExplodingToolModel(DeterministicModelAdapter):
     """第一次响应请求会抛异常的工具；不应有任何后续模型调用。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
@@ -270,7 +280,9 @@ class InjectingOutcomeModel(DeterministicModelAdapter):
     """第一次请求注入文本工具；第二次把 outcome 作为数据引用。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
         self.requests: list[ModelRequest] = []
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -290,7 +302,9 @@ class UnknownToolModel(DeterministicModelAdapter):
     """第一次请求 Definition 中不存在的工具名。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
@@ -306,7 +320,9 @@ class ModelFailsAfterToolModel(DeterministicModelAdapter):
     """第一次请求工具并成功，第二次模型调用抛异常。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
         self.requests: list[ModelRequest] = []
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -324,7 +340,9 @@ class ModelFailsAfterToolModel(DeterministicModelAdapter):
 
 # -- 公共构造 -----------------------------------------------------------
 
-TOOL_CALLING_CAPABILITIES = ModelCapabilities(tool_calling=True)
+TOOL_CALLING_CAPABILITIES = ModelCapabilities(
+    tool_calling=ToolCallingMode.NATIVE
+)
 
 
 def make_runner(
@@ -338,7 +356,9 @@ def make_runner(
             definition_id="assistant",
             version="1.0",
             instructions=instructions,
-            required_capabilities=TOOL_CALLING_CAPABILITIES,
+            model_requirements=ModelRequirements(
+                capabilities=TOOL_CALLING_CAPABILITIES
+            ),
             model_adapter=model,
             tools=tools,
         )

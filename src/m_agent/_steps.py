@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
+from ._model import ModelPurpose
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -83,6 +84,8 @@ class StepAttempt(BaseModel):
     classification: FailureClassification | None = None
     #: 机器可读错误标识（如 ``"rate_limited"``）；失败 Attempt 必填。
     error_code: str | None = None
+    #: Model Attempt 使用的冻结 binding purpose；其他 Step 为 None。
+    model_purpose: ModelPurpose | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

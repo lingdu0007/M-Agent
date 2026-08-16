@@ -212,6 +212,7 @@ class InMemoryRunStore:
         output: str | None = None,
         waiting_reason: str | None = None,
         waiting_step_id: str | None = None,
+        error_code: str | None = None,
         lease_owner: str | None = None,
     ) -> RunRecord:
         current = self._runs.get(run_id)
@@ -248,6 +249,7 @@ class InMemoryRunStore:
             version=current.version + 1,
             waiting_reason=new_waiting_reason,
             waiting_step_id=new_waiting_step_id,
+            error_code=error_code,
             lease_owner=current.lease_owner,
             lease_expires_at=current.lease_expires_at,
             created_at=current.created_at,

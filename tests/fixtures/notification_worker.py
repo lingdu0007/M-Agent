@@ -44,6 +44,7 @@ from m_agent import (  # noqa: E402
     DeterministicTool,
     FakeClock,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -52,13 +53,14 @@ from m_agent import (  # noqa: E402
     Runner,
     SQLiteRunStore,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     allowed_resolutions,
 )
 
 _CRASH_EXIT_CODE = 17
-_TOOL_CALLING = ModelCapabilities(tool_calling=True)
+_TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 
 def journal_count(path: str) -> int:
@@ -137,7 +139,7 @@ def build_registry(
             definition_id="support_agent",
             version="1.0",
             instructions="Notify the customer deterministically.",
-            required_capabilities=_TOOL_CALLING,
+            model_requirements=ModelRequirements(capabilities=_TOOL_CALLING),
             model_adapter=NotifyThenAnswerModel(model_journal_path),
             tools=(JournalNotifier(journal_path),),
         )

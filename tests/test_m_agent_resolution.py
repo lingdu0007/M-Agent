@@ -43,6 +43,7 @@ from m_agent import (
     InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -58,6 +59,7 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
@@ -65,7 +67,7 @@ from m_agent import (
     deserialize_tool_outcome,
 )
 
-_TOOL_CALLING = ModelCapabilities(tool_calling=True)
+_TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 _WORKER = Path(__file__).parent / "fixtures" / "notification_worker.py"
 _CRASH_EXIT_CODE = 17
@@ -160,7 +162,7 @@ def build_registry(
             definition_id="support_agent",
             version="1.0",
             instructions="Notify the customer deterministically.",
-            required_capabilities=_TOOL_CALLING,
+            model_requirements=ModelRequirements(capabilities=_TOOL_CALLING),
             model_adapter=model,
             tools=(tool,),
         )

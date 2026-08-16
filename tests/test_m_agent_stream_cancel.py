@@ -36,6 +36,7 @@ from m_agent import (
     InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
+    ModelRequirements,
     ModelDelta,
     ModelFailure,
     ModelRequest,
@@ -51,6 +52,7 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
@@ -161,7 +163,11 @@ class BlockingNonStreamingModel(DeterministicModelAdapter):
         super().__init__(
             responses=("unused",),
             capabilities=ModelCapabilities(
-                tool_calling=bool(response.tool_calls),
+                tool_calling=(
+                    ToolCallingMode.NATIVE
+                    if response.tool_calls
+                    else ToolCallingMode.NONE
+                ),
             ),
         )
         self._response = response
@@ -337,8 +343,9 @@ def make_runner(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
-            # required 与 adapter 声明一致（注册时校验 capabilities）。
-            required_capabilities=model.capabilities,
+            model_requirements=ModelRequirements(
+                capabilities=model.capabilities
+            ),
             model_adapter=model,
             tools=tools,
             retry_policy=retry_policy,
@@ -467,7 +474,7 @@ class StreamingRunUpdateTests(unittest.IsolatedAsyncioTestCase):
         # 第一个 delta 已发布、第二个 delta 前阻塞：权威记录无 checkpoint。
         inspection = await runner.inspect_run(created.run_id)
         self.assertEqual(model_checkpoints(inspection), [])
-        self.assertEqual(len(inspection.attempts), 0)
+        self.assertEqual(len(inspection.attempts), 1)
         gate.set()  # 释放流，允许完整响应 checkpoint。
         result = await task
         await collector
@@ -846,7 +853,9 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 super().__init__(
                     responses=("unused",),
-                    capabilities=ModelCapabilities(tool_calling=True),
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    ),
                 )
 
             async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -905,7 +914,9 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 super().__init__(
                     responses=("unused",),
-                    capabilities=ModelCapabilities(tool_calling=True),
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    ),
                 )
 
             async def generate(self, request: ModelRequest) -> ModelResponse:

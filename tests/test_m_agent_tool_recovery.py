@@ -34,6 +34,7 @@ from m_agent import (
     FakeClock,
     InMemoryRunStore,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -44,13 +45,16 @@ from m_agent import (
     StepStatus,
     StepType,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     deserialize_model_response,
     deserialize_tool_outcome,
 )
 
-TOOL_CALLING_CAPABILITIES = ModelCapabilities(tool_calling=True)
+TOOL_CALLING_CAPABILITIES = ModelCapabilities(
+    tool_calling=ToolCallingMode.NATIVE
+)
 
 
 class LookupTool(DeterministicTool):
@@ -170,7 +174,9 @@ def build_registry(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=TOOL_CALLING_CAPABILITIES,
+            model_requirements=ModelRequirements(
+                capabilities=TOOL_CALLING_CAPABILITIES
+            ),
             model_adapter=model,
             tools=tools,
             retry_policy=retry_policy,

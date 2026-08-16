@@ -32,7 +32,7 @@ adapter 都必须声明非空、稳定的 fingerprint，注册时会被校验。
 
 能力声明（`capabilities`）是**如实声明**（ADR 0030）：声明为支持的能力
 才有契约案例；未声明的能力（本版本两者均无）绝不做静默降级。Runner
-只在声明支持时调用对应路径（如 `streaming=True` 才走 `stream()`），
+只在声明支持时调用对应路径（如 `streaming=DELTA` 才走 `stream()`），
 定义注册在**发出任何网络请求前**校验 required capabilities
 （`DefinitionRegistry.register` 抛 `ModelCapabilityError`）。
 

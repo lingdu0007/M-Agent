@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS runs (
     version            INTEGER NOT NULL,
     waiting_reason     TEXT,
     waiting_step_id    TEXT,
+    error_code         TEXT,
     lease_owner        TEXT,
     lease_expires_at   TEXT,
     created_at         TEXT NOT NULL,
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS step_attempts (
     error      TEXT,
     classification TEXT,
     error_code TEXT,
+    model_purpose TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS step_checkpoints (
@@ -135,6 +137,7 @@ def _run_from_row(row: sqlite3.Row) -> _StoredRun:
         version=row["version"],
         waiting_reason=row["waiting_reason"],
         waiting_step_id=row["waiting_step_id"],
+        error_code=row["error_code"],
         lease_owner=row["lease_owner"],
         lease_expires_at=(
             datetime.fromisoformat(row["lease_expires_at"])
@@ -156,6 +159,7 @@ def _run_row(stored: _StoredRun) -> tuple:
         stored.version,
         stored.waiting_reason,
         stored.waiting_step_id,
+        stored.error_code,
         stored.lease_owner,
         (
             stored.lease_expires_at.isoformat()
@@ -206,6 +210,16 @@ class SQLiteRunStore:
         if "waiting_step_id" not in columns:
             self._conn.execute(
                 "ALTER TABLE runs ADD COLUMN waiting_step_id TEXT"
+            )
+        if "error_code" not in columns:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN error_code TEXT")
+        attempt_columns = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(step_attempts)")
+        }
+        if "model_purpose" not in attempt_columns:
+            self._conn.execute(
+                "ALTER TABLE step_attempts ADD COLUMN model_purpose TEXT"
             )
         # Ticket 02 旧版本把完整 DefinitionSnapshot 直接写进
         # ``snapshot_json``，Step Attempt 的诊断也落在 ``error`` 列。
@@ -454,8 +468,8 @@ class SQLiteRunStore:
         self._conn.execute(
             "INSERT INTO runs (run_id, definition_id, definition_version,"
             " status, snapshot_json, version, waiting_reason,"
-            " waiting_step_id, lease_owner, lease_expires_at, created_at,"
-            " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " waiting_step_id, error_code, lease_owner, lease_expires_at, created_at,"
+            " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             _run_row(stored),
         )
         for field, encoded in payloads.items():
@@ -502,6 +516,7 @@ class SQLiteRunStore:
         output: str | None = None,
         waiting_reason: str | None = None,
         waiting_step_id: str | None = None,
+        error_code: str | None = None,
         lease_owner: str | None = None,
     ) -> RunRecord:
         row = self._conn.execute(
@@ -538,6 +553,7 @@ class SQLiteRunStore:
             version=current.version + 1,
             waiting_reason=new_waiting_reason,
             waiting_step_id=new_waiting_step_id,
+            error_code=error_code,
             lease_owner=current.lease_owner,
             lease_expires_at=current.lease_expires_at,
             created_at=current.created_at,
@@ -554,7 +570,7 @@ class SQLiteRunStore:
         cursor = self._conn.execute(
             "UPDATE runs SET definition_id=?, definition_version=?, status=?,"
             " snapshot_json=?, version=?, waiting_reason=?, waiting_step_id=?,"
-            " created_at=?, updated_at=? WHERE run_id=? AND version=?"
+            " error_code=?, created_at=?, updated_at=? WHERE run_id=? AND version=?"
             + lease_clause,
             (
                 updated.definition_id,
@@ -564,6 +580,7 @@ class SQLiteRunStore:
                 updated.version,
                 updated.waiting_reason,
                 updated.waiting_step_id,
+                updated.error_code,
                 updated.created_at.isoformat(),
                 updated.updated_at.isoformat(),
                 run_id,
@@ -666,8 +683,8 @@ class SQLiteRunStore:
         lease_clause, lease_params = self._lease_condition(lease_owner)
         cursor = self._conn.execute(
             "INSERT OR REPLACE INTO step_attempts (attempt_id, step_id, run_id,"
-            " status, error, classification, error_code, created_at)"
-            " SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM runs"
+            " status, error, classification, error_code, model_purpose, created_at)"
+            " SELECT ?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM runs"
             " WHERE run_id=? AND version=?"
             + lease_clause
             + ")",
@@ -679,6 +696,7 @@ class SQLiteRunStore:
                 stored.error,
                 stored.classification,
                 stored.error_code,
+                stored.model_purpose,
                 stored.created_at.isoformat(),
                 stored.run_id,
                 expected_version,
@@ -782,6 +800,7 @@ class SQLiteRunStore:
                 error=row["error"],
                 classification=row["classification"],
                 error_code=row["error_code"],
+                model_purpose=row["model_purpose"],
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
             attempts.append(

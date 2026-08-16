@@ -7,11 +7,11 @@
 
 能力声明（ADR 0030，如实且完整）：
 
-- ``streaming=True``：SSE 流式（``stream`` + ``stream_options.include_usage``）；
-- ``tool_calling=True``：``tools`` + ``tool_choice: "auto"``；
-- ``structured_output=True``：``response_format``（json_schema /
+- ``streaming=DELTA``：SSE 流式（``stream`` + ``stream_options.include_usage``）；
+- ``tool_calling=NATIVE``：``tools`` + ``tool_choice: "auto"``；
+- ``structured_output=NATIVE``：``response_format``（json_schema /
   json_object）；
-- ``usage_reporting=True``：usage 从 provider 返回时映射为
+- ``usage_reporting=PROVIDER_REPORTED``：usage 从 provider 返回时映射为
   :class:`ModelUsage`，缺失时显式为 None（不伪造）。
 
 本 Adapter 是 live 实现（``deterministic=False``），构造不触网、不
@@ -44,15 +44,19 @@ from m_agent._model import (
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    StreamingMode,
+    StructuredOutputMode,
+    ToolCallingMode,
+    UsageReportingMode,
 )
 from m_agent._tools import ToolCall
 
 #: Chat Completions 兼容端点能力声明：四类语义全部如实支持。
 CHAT_COMPLETIONS_CAPABILITIES = ModelCapabilities(
-    streaming=True,
-    tool_calling=True,
-    structured_output=True,
-    usage_reporting=True,
+    streaming=StreamingMode.DELTA,
+    tool_calling=ToolCallingMode.NATIVE,
+    structured_output=StructuredOutputMode.NATIVE,
+    usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
 )
 
 

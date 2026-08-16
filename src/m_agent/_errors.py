@@ -15,6 +15,12 @@ class ModelCapabilityError(MAgentError):
     """Definition 要求的 Model Capabilities 未被所选 Model Adapter 声明。"""
 
 
+class ModelContractViolationError(MAgentError):
+    """Adapter response failed the frozen Model Contract at normalization."""
+
+    code = "MODEL_CONTRACT_VIOLATION"
+
+
 class DefinitionConflictError(MAgentError):
     """同一 definition_id + version 已被注册，不可变 Definition 禁止覆盖。"""
 

@@ -49,6 +49,7 @@ from m_agent import (
     TelemetryEvent,
     TelemetryEventType,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
@@ -119,7 +120,9 @@ class ToolThenAnswerAdapter(DeterministicModelAdapter):
     """第一次请求工具，第二次给出最终响应。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
@@ -306,7 +309,7 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(final.output, _ANSWER)
             inspection = await r_b.inspect_run(created.run_id)
             self.assertEqual(len(inspection.steps), 1)
-            self.assertEqual(len(inspection.attempts), 1)
+            self.assertEqual(len(inspection.attempts), 2)
             self.assertEqual(len(inspection.checkpoints), 1)
             # A 调用一次（迟到、被拒）+ B 调用一次 = 2 次模型调用，
             # 证明没有双重推进（不会出现 3+ 次或两套 Step 记录）。

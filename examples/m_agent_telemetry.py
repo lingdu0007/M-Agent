@@ -28,11 +28,13 @@ from m_agent import (
     InMemoryRunStore,
     JsonlTelemetrySink,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
     Runner,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
@@ -46,7 +48,9 @@ class LookupModel(DeterministicModelAdapter):
 
     def __init__(self) -> None:
         super().__init__(
-            capabilities=ModelCapabilities(tool_calling=True)
+            capabilities=ModelCapabilities(
+                tool_calling=ToolCallingMode.NATIVE
+            )
         )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -89,7 +93,11 @@ def main() -> None:
             definition_id="telemetry_demo",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=ModelCapabilities(tool_calling=True),
+            model_requirements=ModelRequirements(
+                capabilities=ModelCapabilities(
+                    tool_calling=ToolCallingMode.NATIVE
+                )
+            ),
             model_adapter=LookupModel(),
             context_provider=DeterministicContextProvider(
                 [

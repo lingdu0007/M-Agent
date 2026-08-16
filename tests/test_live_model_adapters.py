@@ -53,6 +53,8 @@ from m_agent import (
     ModelCapabilities,
     ModelCapabilityError,
     ModelFailure,
+    ModelPurpose,
+    ModelRequirements,
     PlaintextPayloadCodec,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     Runner,
@@ -62,12 +64,16 @@ from m_agent import (
     SQLiteRunStore,
     StepStatus,
     StepType,
+    StreamingMode,
+    StructuredOutputMode,
     TelemetryEventType,
     ToolEffect,
+    ToolCallingMode,
     ToolOutcome,
     deserialize_model_response,
+    UsageReportingMode,
 )
-from m_agent._model import ModelUsage
+from m_agent._model import ModelUsage, UsageProvenance
 from m_agent._run import RunRecord
 from m_agent._tools import DeterministicTool
 from m_agent.provider import (
@@ -167,7 +173,7 @@ async def run_to_terminal(
             definition_id="live-contract",
             version="1.0",
             instructions=instructions,
-            required_capabilities=required,
+            model_requirements=ModelRequirements(capabilities=required),
             model_adapter=adapter,
             tools=tools,
         )
@@ -477,14 +483,16 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             runner = Runner(registry=registry, store=store)
             try:
                 with self.assertRaisesRegex(
-                    RuntimeError, "adapter configuration"
+                    RuntimeError, "snapshot Model Contract"
                 ):
                     await runner.resume_run("frozen-adapter-contract-run")
                 restored = await runner.get_run("frozen-adapter-contract-run")
                 return (
                     calls,
                     changed.requests,
-                    restored.snapshot.adapter_contract_fingerprint,
+                    restored.snapshot.model_bindings.for_purpose(
+                        ModelPurpose.PRIMARY
+                    ).contract.fingerprint,
                     restored,
                 )
             finally:
@@ -562,7 +570,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             runner = Runner(registry=registry, store=store)
             try:
                 with self.assertRaisesRegex(
-                    RuntimeError, "adapter configuration"
+                RuntimeError, "snapshot Model Contract"
                 ):
                     await runner.resolve_run(
                         "frozen-resolution-contract-run",
@@ -645,10 +653,10 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                             adapter.structured_output_mode = "json_schema"
                         else:
                             adapter.capabilities = ModelCapabilities(
-                                streaming=True,
-                                tool_calling=True,
-                                structured_output=False,
-                                usage_reporting=True,
+                                streaming=StreamingMode.DELTA,
+                                tool_calling=ToolCallingMode.NATIVE,
+                                structured_output=StructuredOutputMode.NONE,
+                                usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
                             )
 
             registry = DefinitionRegistry()
@@ -791,7 +799,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         # 模拟“声明不完整”的 live adapter，验证注册拒绝发生在任何
         # 网络请求之前。
         class PartialLiveAdapter(ChatCompletionsModelAdapter):
-            capabilities = ModelCapabilities(streaming=True)
+            capabilities = ModelCapabilities(streaming=StreamingMode.DELTA)
 
         calls = 0
 
@@ -809,8 +817,10 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     definition_id="needs-tool-calling",
                     version="1.0",
                     instructions="i",
-                    required_capabilities=ModelCapabilities(
-                        tool_calling=True
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            tool_calling=ToolCallingMode.NATIVE
+                        )
                     ),
                     model_adapter=adapter,
                 )
@@ -834,7 +844,9 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     definition_id="assistant",
                     version="1.0",
                     instructions="i",
-                    required_capabilities=adapter.capabilities,
+                    model_requirements=ModelRequirements(
+                        capabilities=adapter.capabilities
+                    ),
                     model_adapter=adapter,
                 )
             )
@@ -1139,7 +1151,11 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 {"input_tokens": 0, "output_tokens": 0},
                 ModelUsage(input_tokens=0, output_tokens=0),
             ),
-            ("missing", None, None),
+            (
+                "missing",
+                None,
+                ModelUsage(provenance=UsageProvenance.UNAVAILABLE),
+            ),
         )
         with credential_environment():
             for adapter_cls in (
@@ -1415,7 +1431,11 @@ class _LiveAdapterContractMixin:
                 definition_id="live-contract",
                 version="1.0",
                 instructions="Say 'hello live streaming'.",
-                required_capabilities=ModelCapabilities(streaming=True),
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        streaming=StreamingMode.DELTA
+                    )
+                ),
                 model_adapter=self.adapter,
             )
         )
@@ -1476,7 +1496,7 @@ class _LiveAdapterContractMixin:
             self,
             self.adapter,
             instructions=TOOL_INSTRUCTIONS,
-            required=ModelCapabilities(tool_calling=True),
+            required=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE),
             tools=(tool,),
         )
         self.assertEqual(status, RunStatus.SUCCEEDED)
@@ -1505,7 +1525,9 @@ class _LiveAdapterContractMixin:
                     "Return a JSON object with an 'answer' string and a "
                     "'confidence' number between 0 and 1."
                 ),
-                required=ModelCapabilities(structured_output=True),
+                required=ModelCapabilities(
+                    structured_output=StructuredOutputMode.NATIVE
+                ),
             )
         finally:
             await adapter.aclose()

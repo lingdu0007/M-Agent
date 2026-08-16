@@ -20,9 +20,13 @@ from ._errors import (
     ModelCapabilityError,
 )
 from ._model import (
-    _CAPABILITY_FIELDS,
     ModelAdapter,
-    ModelCapabilities,
+    ModelBinding,
+    ModelBindingSet,
+    ModelContract,
+    ModelExecutionBudget,
+    ModelPurpose,
+    ModelRequirements,
 )
 from ._tools import Tool, ToolDeclaration, ToolEffect
 
@@ -55,12 +59,13 @@ class DefinitionSnapshot(BaseModel, frozen=True):
     definition_id: str
     version: str
     instructions: str
-    required_capabilities: ModelCapabilities
-    adapter_capabilities: ModelCapabilities
-    #: Adapter 的稳定、非敏感配置摘要。ADR 0022 要求同一 Run 恢复时
-    #: 不得因重新注册同一 definition/version 而改变模型语义；摘要只
-    #: 用于比较，不存储 adapter、凭证或配置正文。
-    adapter_contract_fingerprint: str = ""
+    #: 完整、已解析的用途绑定；省略用途在快照中显式 materialize 为
+    #: PRIMARY 复用，恢复无需重新选择模型。
+    model_bindings: ModelBindingSet
+    #: Run 级与用途级模型 dispatch 尝试硬上限。
+    model_execution_budget: ModelExecutionBudget = Field(
+        default_factory=ModelExecutionBudget
+    )
     #: 能力标识：该 Run 声明了 Context Provider（ADR 0014）。只记录
     #: 是否声明，不序列化 provider 本身（ADR 0023：不持久化 callable）。
     has_context_provider: bool = False
@@ -81,13 +86,15 @@ class AgentDefinition(BaseModel, frozen=True):
     （ADR 0023：Python callable 不进入 Run Store）。
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     definition_id: str
     version: str
     instructions: str
-    required_capabilities: ModelCapabilities = Field(
-        default_factory=ModelCapabilities
+    model_requirements: ModelRequirements = Field(default_factory=ModelRequirements)
+    model_bindings: ModelBindingSet | None = None
+    model_execution_budget: ModelExecutionBudget = Field(
+        default_factory=ModelExecutionBudget
     )
     model_adapter: ModelAdapter = Field(exclude=True)
     #: 应用选择的、在依赖的 Model Step 之前确定性执行的 Context
@@ -104,17 +111,50 @@ class AgentDefinition(BaseModel, frozen=True):
     #: 随 Snapshot 一起冻结、持久化（不 exclude），恢复决策只读快照。
     retry_policy: RetryPolicy | None = None
 
+    def effective_model_requirements(self) -> ModelRequirements:
+        """Return the explicit typed requirements frozen for this Run."""
+        return self.model_requirements
+
+    def effective_model_bindings(self) -> ModelBindingSet:
+        requirements = self.effective_model_requirements()
+        contract = self.model_adapter.model_contract
+        if self.model_bindings is None:
+            return ModelBindingSet(
+                bindings=(
+                    ModelBinding(
+                        purpose=ModelPurpose.PRIMARY,
+                        contract=contract,
+                        requirements=requirements,
+                    ),
+                )
+            ).resolved()
+        primary = self.model_bindings.for_purpose(ModelPurpose.PRIMARY)
+        if primary.contract != contract:
+            raise ModelCapabilityError(
+                "PRIMARY Model Binding contract does not match the adapter "
+                "instance contract"
+            )
+        return ModelBindingSet(
+            bindings=tuple(
+                binding.model_copy(
+                    update=(
+                        {"requirements": requirements}
+                        if binding.purpose is ModelPurpose.PRIMARY
+                        else {}
+                    )
+                )
+                for binding in self.model_bindings.bindings
+            )
+        ).resolved()
+
     def frozen_snapshot(self) -> DefinitionSnapshot:
         """冻结当前版本为 Run 使用的不可变 Definition Snapshot。"""
         return DefinitionSnapshot(
             definition_id=self.definition_id,
             version=self.version,
             instructions=self.instructions,
-            required_capabilities=self.required_capabilities,
-            adapter_capabilities=self.model_adapter.capabilities,
-            adapter_contract_fingerprint=(
-                self.model_adapter.definition_contract_fingerprint()
-            ),
+            model_bindings=self.effective_model_bindings(),
+            model_execution_budget=self.model_execution_budget,
             has_context_provider=self.context_provider is not None,
             tool_declarations=tuple(
                 ToolDeclaration(name=tool.name, effect=tool.effect)
@@ -147,25 +187,26 @@ class DefinitionRegistry:
                 "is already registered and immutable"
             )
         adapter = definition.model_adapter
-        fingerprint = adapter.definition_contract_fingerprint()
+        contract = adapter.model_contract
+        fingerprint = contract.fingerprint
         if not adapter.deterministic and not fingerprint:
             raise ValueError(
                 f"live adapter {type(adapter).__name__} must declare a "
                 "non-empty definition contract fingerprint"
             )
-        if not adapter.capabilities.supports(
-            definition.required_capabilities
-        ):
-            missing = [
-                name
-                for name in _CAPABILITY_FIELDS
-                if getattr(definition.required_capabilities, name)
-                and not getattr(adapter.capabilities, name)
-            ]
-            raise ModelCapabilityError(
-                f"definition {definition.definition_id}@{definition.version} "
-                f"requires capabilities {missing} not declared by adapter"
-            )
+        try:
+            bindings = definition.effective_model_bindings()
+        except ModelCapabilityError:
+            raise
+        for binding in bindings.bindings:
+            match = binding.requirements.match(binding.contract)
+            if not match.compatible:
+                missing = match.reason.value
+                raise ModelCapabilityError(
+                    f"definition {definition.definition_id}@{definition.version} "
+                    f"is incompatible with {binding.purpose.value} Model Contract: "
+                    f"reason_code={missing}"
+                )
         self._definitions[key] = definition
 
     def resolve(self, definition_id: str, version: str) -> AgentDefinition:

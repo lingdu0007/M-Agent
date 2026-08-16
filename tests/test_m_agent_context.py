@@ -35,7 +35,6 @@ from m_agent import (
     DeterministicModelAdapter,
     FakeClock,
     InMemoryRunStore,
-    ModelCapabilities,
     PlaintextPayloadCodec,
     Runner,
     RunStatus,
@@ -119,7 +118,6 @@ def make_context_definition(
         definition_id="assistant",
         version="1.0",
         instructions="Answer deterministically.",
-        required_capabilities=ModelCapabilities(),
         model_adapter=DeterministicModelAdapter(
             responses=("context-aware answer",)
         ),

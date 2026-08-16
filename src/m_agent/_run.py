@@ -31,6 +31,8 @@ class RunRecord(BaseModel):
     #: UNCERTAIN NON_IDEMPOTENT WAITING 指向等待处置的 Tool Step；
     #: DEFINITION_UNAVAILABLE WAITING 无目标 Step，为 None。
     waiting_step_id: str | None = None
+    #: 终态失败的稳定 machine-readable code，不携带 provider 文本。
+    error_code: str | None = None
     version: int = 1
     #: 当前租约 owner（ADR 0013）；无有效租约时为 None。
     lease_owner: str | None = None

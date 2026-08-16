@@ -14,6 +14,7 @@ from m_agent import (
     FailureClassification,
     InMemoryRunStore,
     ModelCapabilities,
+    ModelRequirements,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -22,6 +23,7 @@ from m_agent import (
     Runner,
     SyncRunner,
     ToolCall,
+    ToolCallingMode,
     ToolEffect,
     ToolFailure,
     ToolOutcome,
@@ -47,7 +49,9 @@ class UncertainTool(DeterministicTool):
 
 class ToolRequestingModel(DeterministicModelAdapter):
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
@@ -65,8 +69,12 @@ def make_sync(model, tools=()) -> SyncRunner:
             definition_id="assistant",
             version="1.0",
             instructions="be deterministic",
-            required_capabilities=(
-                ModelCapabilities(tool_calling=True) if tools else ModelCapabilities()
+            model_requirements=ModelRequirements(
+                capabilities=(
+                    ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+                    if tools
+                    else ModelCapabilities()
+                )
             ),
             model_adapter=model,
             tools=tuple(tools),

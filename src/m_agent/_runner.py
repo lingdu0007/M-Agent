@@ -80,6 +80,7 @@ from ._errors import (
     DefinitionNotFoundError,
     IllegalRunTransitionError,
     LeaseNotHeldError,
+    ModelContractViolationError,
     ResolutionNotAllowedError,
     RunNotFoundError,
     StaleRunVersionError,
@@ -88,9 +89,12 @@ from ._failure import ToolFailure, classify_exception
 from ._model import (
     ModelAdapter,
     ModelDelta,
+    ModelPurpose,
     ModelRequest,
     ModelResponse,
+    StreamingMode,
     deserialize_model_response,
+    normalize_model_response,
     serialize_model_response,
 )
 from ._resolution import (
@@ -139,6 +143,9 @@ REASON_UNCERTAIN_NON_IDEMPOTENT = "UNCERTAIN_NON_IDEMPOTENT"
 #: 与执行路径产生一致的机器可读证据。
 ERROR_EFFECT_UNCONFIRMED = "effect_unconfirmed"
 
+#: Frozen Model Execution Budget exhausted before a further provider call.
+ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED = "MODEL_EXECUTION_BUDGET_EXCEEDED"
+
 #: Run Snapshot 未提供唯一 Tool Effect 声明时的稳定错误标识。Runner 不得
 #: 使用恢复进程当前注册的 callable 来猜测该 Run 的重试安全性。
 ERROR_FROZEN_TOOL_DECLARATION_UNAVAILABLE = (
@@ -166,6 +173,8 @@ class CrashPoint(str, enum.Enum):
     AFTER_CONTEXT_CHECKPOINT = "after_context_checkpoint"
     #: 模型调用完成之后、任何 Step 记录落盘之前。
     BEFORE_MODEL_CHECKPOINT = "before_model_checkpoint"
+    #: Model Attempt 预算已持久化、provider dispatch 尚未开始。
+    AFTER_MODEL_ATTEMPT_RESERVATION = "after_model_attempt_reservation"
     #: Model Step Checkpoint 已持久化之后、Run 终态写入之前。
     AFTER_MODEL_CHECKPOINT = "after_model_checkpoint"
     #: 工具调用完成之后、任何 Tool Step 记录落盘之前。
@@ -913,6 +922,72 @@ class Runner:
             owner=lease.owner,
         )
 
+    async def _reserve_model_attempt(
+        self,
+        run: RunRecord,
+        lease: RunLease,
+        step_id: str,
+        attempt_id: str,
+        purpose: ModelPurpose,
+    ) -> bool:
+        """Persist one model dispatch reservation under the Run's lease.
+
+        The lease makes the count-and-write sequence exclusive for this Run;
+        the Store commit happens before the external call, so an interrupted
+        process consumes capacity conservatively on every later recovery.
+        """
+        assert run.snapshot is not None
+        attempts = await self._store.get_attempts(run.run_id)
+        steps = await self._store.get_steps(run.run_id)
+        model_step_ids = {
+            step.step_id for step in steps if step.step_type is StepType.MODEL
+        }
+        all_model_attempts = [
+            attempt
+            for attempt in attempts
+            if attempt.model_purpose is not None
+            or attempt.step_id in model_step_ids
+        ]
+        purpose_attempts = [
+            attempt
+            for attempt in attempts
+            if attempt.model_purpose is purpose
+            or (
+                purpose is ModelPurpose.PRIMARY
+                and attempt.model_purpose is None
+                and attempt.step_id in model_step_ids
+            )
+        ]
+        budget = run.snapshot.model_execution_budget
+        if (
+            len(all_model_attempts) >= budget.run_max_attempts
+            or len(purpose_attempts) >= budget.maximum_for(purpose)
+        ):
+            return False
+        await self._store.record_step(
+            StepRecord(
+                step_id=step_id,
+                run_id=run.run_id,
+                step_type=StepType.MODEL,
+                status=StepStatus.RUNNING,
+            ),
+            expected_version=run.version,
+            lease_owner=lease.owner,
+        )
+        await self._store.record_attempt(
+            StepAttempt(
+                attempt_id=attempt_id,
+                step_id=step_id,
+                run_id=run.run_id,
+                status=StepStatus.RUNNING,
+                model_purpose=purpose,
+            ),
+            expected_version=run.version,
+            lease_owner=lease.owner,
+        )
+        self._maybe_crash(CrashPoint.AFTER_MODEL_ATTEMPT_RESERVATION, run.run_id)
+        return True
+
     async def _stream_model(
         self,
         adapter: ModelAdapter,
@@ -1118,25 +1193,18 @@ class Runner:
     ) -> None:
         """Fail closed when an exact definition was re-registered differently.
 
-        Legacy Snapshots have no fingerprint and retain their existing
-        compatibility behavior. New Snapshots compare only non-secret digests
-        before any recovery side effect can be dispatched.
+        The complete, non-secret Contract is compared before any recovery side
+        effect can be dispatched.
         """
         snapshot = run.snapshot
-        if snapshot is None or not snapshot.adapter_contract_fingerprint:
+        if snapshot is None:
             return
-        if snapshot.adapter_capabilities != definition.model_adapter.capabilities:
+        expected = snapshot.model_bindings.for_purpose(
+            ModelPurpose.PRIMARY
+        ).contract
+        if expected != definition.model_adapter.model_contract:
             raise RuntimeError(
-                f"run {run.run_id} snapshot adapter configuration does not "
-                "match the resolved definition; refusing to silently change "
-                "recovery behavior"
-            )
-        if (
-            snapshot.adapter_contract_fingerprint
-            != definition.model_adapter.definition_contract_fingerprint()
-        ):
-            raise RuntimeError(
-                f"run {run.run_id} snapshot adapter configuration does not "
+                f"run {run.run_id} snapshot Model Contract does not "
                 "match the resolved definition; refusing to silently change "
                 "recovery behavior"
             )
@@ -1683,7 +1751,7 @@ class Runner:
         每个失败 Attempt 都保留 classification / error_code / error /
         created_at 证据。
 
-        Ticket 08 流式（ADR 0011）：Adapter 声明 ``streaming=True`` 时
+        Ticket 08 流式（ADR 0011）：Adapter 声明 ``streaming=DELTA`` 时
         通过 :meth:`_stream_model` 消费流——每个增量发布为带
         run_id / step_id / attempt_id 的 ``MODEL_DELTA`` Run Update
         （AC 2），增量**不写入 Run Store**（AC 3）；只有流结束的完整
@@ -1702,7 +1770,12 @@ class Runner:
         # 运行中修改 Agent Definition 不能改变已有 Run 的重试行为。
         policy = run.snapshot.retry_policy
         adapter = definition.model_adapter
-        streaming = adapter.capabilities.streaming
+        purpose = ModelPurpose.PRIMARY
+        binding = run.snapshot.model_bindings.for_purpose(purpose)
+        model_contract = binding.contract
+        streaming = (
+            model_contract.capabilities.streaming is StreamingMode.DELTA
+        )
         step_id = step_id if step_id is not None else new_id()
         persisted_attempts = [
             attempt
@@ -1763,6 +1836,7 @@ class Runner:
                 tools=tuple(tool.spec() for tool in definition.tools),
                 tool_outcomes=tuple(tool_outcomes),
             )
+            terminal_error_code: str | None = None
             try:
                 # STEP_STARTED telemetry 是应用回调；它返回后再次校验，
                 # 使 guard 紧贴真正的 Model dispatch。
@@ -1773,6 +1847,20 @@ class Runner:
                 self._assert_adapter_contract_matches_snapshot(
                     run, definition
                 )
+                if not await self._reserve_model_attempt(
+                    run, lease, step_id, attempt_id, purpose
+                ):
+                    await self._record_failed_step(
+                        run, lease, step_id, StepType.MODEL
+                    )
+                    return (
+                        await self._fail_run(
+                            run,
+                            lease,
+                            ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED,
+                        ),
+                        None,
+                    )
                 if streaming:
                     response = await self._stream_model(
                         adapter,
@@ -1787,25 +1875,20 @@ class Runner:
                         return await self._get_existing_run(run.run_id), None
                 else:
                     response = await adapter.generate(request)
+                response = normalize_model_response(model_contract, response)
             except (LeaseNotHeldError, StaleRunVersionError):
                 raise
             except Exception as exc:  # 模型失败：结构化分类 + 失败 Attempt
-                classification, code, message = classify_exception(exc)
+                if isinstance(exc, ModelContractViolationError):
+                    classification = FailureClassification.PERMANENT
+                    code = exc.code
+                    message = str(exc)
+                    terminal_error_code = code
+                else:
+                    classification, code, message = classify_exception(exc)
                 failure = (classification, code, message)
-                # 只有 adapter 实际返回失败后才创建 Model Step。这样租约
-                # 在 STEP_STARTED telemetry 后过期时，不会留下从未 dispatch
-                # 的 Step；失败后的重启仍可由此身份恢复剩余预算。
-                if attempt_count == 1:
-                    await self._store.record_step(
-                        StepRecord(
-                            step_id=step_id,
-                            run_id=run.run_id,
-                            step_type=StepType.MODEL,
-                            status=StepStatus.RUNNING,
-                        ),
-                        expected_version=run.version,
-                        lease_owner=lease.owner,
-                    )
+                # Reservation 已在外部 dispatch 前持久化；将同一 identity
+                # 更新为 FAILED，恢复时才能如实保留已消耗的预算。
                 await self._record_failed_attempt(
                     run,
                     lease,
@@ -1813,6 +1896,7 @@ class Runner:
                     failure,
                     StepType.MODEL,
                     attempt_id=attempt_id,
+                    model_purpose=purpose,
                 )
                 # 已 dispatch 的 Model 调用已经如实形成失败 Attempt；
                 # 取消请求到达时不启动 retry，也不以 FAILED 覆盖取消。
@@ -1835,7 +1919,7 @@ class Runner:
                 cancelled = await self._maybe_cancel(run, lease)
                 if cancelled is not None:
                     return cancelled, None
-                result = await self._fail_run(run, lease)
+                result = await self._fail_run(run, lease, terminal_error_code)
                 return result, None
 
             # 成功：Step + Attempt + 完成的 Checkpoint 依次持久化（checkpoint
@@ -1861,6 +1945,7 @@ class Runner:
                 run_id=run.run_id,
                 status=StepStatus.SUCCEEDED,
                 output=payload,
+                model_purpose=purpose,
             )
             await self._store.record_attempt(
                 attempt,
@@ -2236,6 +2321,7 @@ class Runner:
         failure: tuple[FailureClassification, str, str],
         step_type: StepType,
         attempt_id: str | None = None,
+        model_purpose: ModelPurpose | None = None,
     ) -> None:
         """记录一次失败 Step Attempt，保留分类 / 错误标识 / 时间证据。
 
@@ -2259,6 +2345,7 @@ class Runner:
                 error=message,
                 classification=classification,
                 error_code=code,
+                model_purpose=model_purpose,
             ),
             expected_version=run.version,
             lease_owner=lease.owner,
@@ -2348,12 +2435,15 @@ class Runner:
         if total > 0:
             await asyncio.sleep(total)
 
-    async def _fail_run(self, run: RunRecord, lease: RunLease) -> RunRecord:
+    async def _fail_run(
+        self, run: RunRecord, lease: RunLease, error_code: str | None = None
+    ) -> RunRecord:
         """把 Run 转换到终态 FAILED 并释放租约（不再重试后的统一路径）。"""
         result = await self._store.transition_run(
             run.run_id,
             expected_version=run.version,
             status=RunStatus.FAILED,
+            error_code=error_code,
             lease_owner=lease.owner,
         )
         await self._store.release_lease(

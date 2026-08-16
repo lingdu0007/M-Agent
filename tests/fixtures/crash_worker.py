@@ -38,6 +38,7 @@ from m_agent import (  # noqa: E402
     DefinitionRegistry,
     DeterministicContextProvider,
     DeterministicModelAdapter,
+    ModelExecutionBudget,
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
@@ -119,6 +120,14 @@ def main() -> None:
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
+            model_execution_budget=ModelExecutionBudget(
+                run_max_attempts=int(os.environ.get("M_AGENT_TEST_MODEL_BUDGET", "8")),
+                primary_max_attempts=int(
+                    os.environ.get("M_AGENT_TEST_MODEL_BUDGET", "8")
+                ),
+                context_compression_max_attempts=0,
+                output_repair_max_attempts=0,
+            ),
             model_adapter=LoggingModelAdapter(
                 log_path=log_path,
                 responses=("crash-safe answer",),
