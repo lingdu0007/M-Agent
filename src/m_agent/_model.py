@@ -782,11 +782,9 @@ class ModelAdapter(ABC):
     def definition_contract_fingerprint(self) -> str:
         """Return the current non-secret provider configuration identity.
 
-        Adapters whose behavior depends on configuration beyond capabilities
-        must override this method. The default deliberately has no fingerprint:
-        arbitrary application adapters may be imported under different module
-        names across processes, so only adapters with a stable configuration
-        representation can opt into recovery comparison.
+        Live adapters must override this method with a stable, non-empty
+        fingerprint. The empty default is reserved for deterministic test
+        doubles, whose behavior is not a provider deployment contract.
         """
         return ""
 

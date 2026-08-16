@@ -314,6 +314,7 @@ class Runner:
         definition = self._registry.resolve(
             run.definition_id, run.definition_version
         )
+        self._assert_adapter_contract_matches_snapshot(run, definition)
         # 登记本实例为活跃推进者：``cancel_run`` 据此区分"同 owner 的
         # 活跃推进者"与"无推进者的遗留 RUNNING"，只对前者登记协作取消
         # （ADR 0012），绝不因同 owner 续约而直接终结并释放租约。
@@ -337,12 +338,16 @@ class Runner:
     ) -> RunRecord:
         """在已持有租约的前提下从 CREATED 启动（start/resume 共用）。"""
         snapshot = run.snapshot
-        if snapshot is None:
-            # Backward-compatible migration for CREATED records persisted
-            # before Model Bindings became a create-time requirement.
-            snapshot = definition.frozen_snapshot()
-        else:
-            self._assert_adapter_contract_matches_snapshot(run, definition)
+        try:
+            if snapshot is None:
+                # Backward-compatible migration for CREATED records persisted
+                # before Model Bindings became a create-time requirement.
+                snapshot = definition.frozen_snapshot()
+            else:
+                self._assert_adapter_contract_matches_snapshot(run, definition)
+        except Exception:
+            await self._release_quietly(run.run_id, lease.owner)
+            raise
         running = await self._store.transition_run(
             run.run_id,
             expected_version=run.version,
@@ -1192,18 +1197,20 @@ class Runner:
                 "match the resolved definition; refusing to silently change "
                 "recovery behavior"
             )
-        configuration_fingerprint = (
-            definition.model_adapter.definition_contract_fingerprint()
-        )
-        if (
-            configuration_fingerprint
-            and configuration_fingerprint != expected.configuration_fingerprint
-        ):
-            raise RuntimeError(
-                f"run {run.run_id} snapshot Model Contract does not "
-                "match the resolved adapter configuration; refusing to "
-                "silently change recovery behavior"
-            )
+        adapter = definition.model_adapter
+        configuration_fingerprint = adapter.definition_contract_fingerprint()
+        if not adapter.deterministic:
+            if not configuration_fingerprint:
+                raise RuntimeError(
+                    f"run {run.run_id} resolved live adapter has no verifiable "
+                    "current configuration fingerprint"
+                )
+            if configuration_fingerprint != expected.configuration_fingerprint:
+                raise RuntimeError(
+                    f"run {run.run_id} snapshot Model Contract does not "
+                    "match the resolved adapter configuration; refusing to "
+                    "silently change recovery behavior"
+                )
 
     async def _resume_running(
         self, run: RunRecord, lease: RunLease
@@ -1930,6 +1937,12 @@ class Runner:
                     cancelled = await self._maybe_cancel(run, lease)
                     if cancelled is not None:
                         return cancelled, None
+                self._assert_adapter_contract_matches_snapshot(
+                    run, definition
+                )
+                assert_model_request_compatible(
+                    model_contract, request, streaming=streaming
+                )
                 if streaming:
                     response = await self._stream_model(
                         adapter,

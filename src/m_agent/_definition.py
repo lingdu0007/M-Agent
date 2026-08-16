@@ -218,14 +218,17 @@ class DefinitionRegistry:
         current_configuration_fingerprint = (
             adapter.definition_contract_fingerprint()
         )
-        if (
-            current_configuration_fingerprint
-            and current_configuration_fingerprint != configuration_fingerprint
-        ):
-            raise ValueError(
-                f"adapter {type(adapter).__name__} configuration fingerprint "
-                "does not match its ModelContract fingerprint"
-            )
+        if not adapter.deterministic:
+            if not current_configuration_fingerprint:
+                raise ValueError(
+                    f"live adapter {type(adapter).__name__} must provide a "
+                    "non-empty current configuration fingerprint"
+                )
+            if current_configuration_fingerprint != configuration_fingerprint:
+                raise ValueError(
+                    f"adapter {type(adapter).__name__} configuration fingerprint "
+                    "does not match its ModelContract fingerprint"
+                )
         try:
             bindings = definition.effective_model_bindings()
         except ModelCapabilityError:

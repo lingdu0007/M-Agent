@@ -1014,6 +1014,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ModelLimits,
             RevisionStability,
             Runner,
+            RunStatus,
         )
 
         def contract(revision: str) -> ModelContract:
@@ -1061,6 +1062,138 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "snapshot Model Contract"):
             await Runner(changed_registry, store).start_run(created.run_id)
         self.assertEqual(changed.call_count, 0)
+        self.assertIsNone(await store.get_lease(created.run_id))
+
+        terminal = await Runner(initial_registry, store).start_run(created.run_id)
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(original.call_count, 1)
+
+    async def test_model_contract_is_rechecked_after_reservation(self) -> None:
+        from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelAdapter,
+            ModelContract,
+            ModelLimits,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+            RunStatus,
+        )
+
+        def contract(revision: str) -> ModelContract:
+            return ModelContract(
+                contract_id="mutable-live-contract",
+                version="1",
+                revision_stability=RevisionStability.PINNED,
+                model_identity=f"live:{revision}",
+                limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+                input_sizer_id="live-sizer-v1",
+                serialization_id="live-wire-v1",
+                configuration_fingerprint=f"deployment-{revision}",
+            )
+
+        class MutableLiveAdapter(ModelAdapter):
+            capabilities = contract("a").capabilities
+
+            def __init__(self) -> None:
+                self.current_contract = contract("a")
+                self.dispatched_contracts: list[str] = []
+
+            @property
+            def model_contract(self) -> ModelContract:
+                return self.current_contract
+
+            def definition_contract_fingerprint(self) -> str:
+                return self.current_contract.configuration_fingerprint or ""
+
+            async def generate(self, request) -> ModelResponse:
+                self.dispatched_contracts.append(
+                    self.current_contract.model_identity
+                )
+                return ModelResponse(
+                    content=f"used:{self.current_contract.model_identity}"
+                )
+
+        class ContractSwitchingStore(InMemoryRunStore):
+            def __init__(self, adapter: MutableLiveAdapter) -> None:
+                super().__init__(payload_codec=PlaintextPayloadCodec())
+                self._adapter = adapter
+
+            async def reserve_model_attempt(self, *args, **kwargs) -> bool:
+                reserved = await super().reserve_model_attempt(*args, **kwargs)
+                if reserved:
+                    self._adapter.current_contract = contract("b")
+                return reserved
+
+        adapter = MutableLiveAdapter()
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="reservation-contract",
+                version="1",
+                instructions="Do not dispatch after contract drift.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(registry, ContractSwitchingStore(adapter))
+        created = await runner.create_run("reservation-contract", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(adapter.dispatched_contracts, [])
+
+    def test_live_adapter_requires_verifiable_current_configuration(self) -> None:
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelAdapter,
+            ModelContract,
+            ModelLimits,
+            ModelResponse,
+            RevisionStability,
+        )
+
+        class UnverifiableLiveAdapter(ModelAdapter):
+            capabilities = ModelContract(
+                contract_id="unverifiable",
+                version="1",
+                revision_stability=RevisionStability.PINNED,
+                model_identity="live:unverifiable",
+                limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+                input_sizer_id="live-sizer-v1",
+                serialization_id="live-wire-v1",
+                configuration_fingerprint="claimed-deployment",
+            ).capabilities
+
+            @property
+            def model_contract(self) -> ModelContract:
+                return ModelContract(
+                    contract_id="unverifiable",
+                    version="1",
+                    revision_stability=RevisionStability.PINNED,
+                    model_identity="live:unverifiable",
+                    limits=ModelLimits(
+                        context_window_tokens=128, max_output_tokens=32
+                    ),
+                    input_sizer_id="live-sizer-v1",
+                    serialization_id="live-wire-v1",
+                    configuration_fingerprint="claimed-deployment",
+                )
+
+            async def generate(self, request) -> ModelResponse:
+                raise AssertionError("must not dispatch")
+
+        with self.assertRaisesRegex(ValueError, "current configuration"):
+            DefinitionRegistry().register(
+                AgentDefinition.for_adapter(
+                    definition_id="unverifiable-live",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_adapter=UnverifiableLiveAdapter(),
+                )
+            )
 
     async def test_tool_bearing_request_fails_before_dispatch_when_unsupported(
         self,
