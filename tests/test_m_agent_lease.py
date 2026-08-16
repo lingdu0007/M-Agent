@@ -272,9 +272,9 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_lease_takeover_and_stale_owner_rejected(
         self,
     ) -> None:
-        # AC4/AC6：租约过期（FakeClock advance）后 B 接管并完成；
-        # 旧 owner A 的迟到提交被拒，最终记录只反映 B 的推进，
-        # 模型调用次数 = A 1 次（被浪费）+ B 1 次 = 2。
+        # AC4/AC6：租约过期（FakeClock advance）后 B 接管。A 已持久化
+        # Model reservation 但没有 checkpoint，B 必须 fail-closed，而不是
+        # 再次调用 provider；旧 owner A 的迟到提交仍被拒绝。
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "run.db")
             log = os.path.join(tmp, "model_calls.log")
@@ -290,10 +290,12 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             # 确定性推进时钟：A 的租约过期。
             clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
 
-            # B 接管并推进到 SUCCEEDED（A 尚无 checkpoint，B 重新执行）。
+            # B 接管并终结未确认的 Model Attempt，不重新执行。
             terminal_b = await r_b.resume_run(created.run_id)
-            self.assertEqual(terminal_b.status, RunStatus.SUCCEEDED)
-            self.assertEqual(terminal_b.output, _ANSWER)
+            self.assertEqual(terminal_b.status, RunStatus.FAILED)
+            self.assertEqual(
+                terminal_b.error_code, "model_checkpoint_unconfirmed"
+            )
 
             # A 恢复：所有迟到写入（Step / Attempt / Checkpoint /
             # 终态提交）都被租约检查拒绝。
@@ -303,17 +305,15 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await task
 
-            # 最终权威记录：Run 与 Step 只反映 B 的推进。
+            # 最终权威记录：Run 与 Step 只反映 B 的 fail-closed 处置。
             final = await r_b.get_run(created.run_id)
-            self.assertEqual(final.status, RunStatus.SUCCEEDED)
-            self.assertEqual(final.output, _ANSWER)
+            self.assertEqual(final.status, RunStatus.FAILED)
+            self.assertEqual(final.output, None)
             inspection = await r_b.inspect_run(created.run_id)
             self.assertEqual(len(inspection.steps), 1)
-            self.assertEqual(len(inspection.attempts), 2)
-            self.assertEqual(len(inspection.checkpoints), 1)
-            # A 调用一次（迟到、被拒）+ B 调用一次 = 2 次模型调用，
-            # 证明没有双重推进（不会出现 3+ 次或两套 Step 记录）。
-            self.assertEqual(count_model_calls(log), 2)
+            self.assertEqual(len(inspection.attempts), 1)
+            self.assertEqual(len(inspection.checkpoints), 0)
+            self.assertEqual(count_model_calls(log), 1)
             s_a.close()
             s_b.close()
 
@@ -377,23 +377,18 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             r_a, r_b, s_a, s_b, entered, gate = self.make_contenders(
                 db, clock, log
             )
-            # B 在 checkpoint 落盘前中断（模拟 B 也在推进中）：
-            # 租约归 B，Run 保持 RUNNING。
-            def crash_hook_b(point: CrashPoint, run_id: str) -> None:
-                if point is CrashPoint.BEFORE_MODEL_CHECKPOINT:
-                    raise RuntimeError("b interrupted")
-
-            reg_b = make_registry(log)
-            r_b = Runner(
-                registry=reg_b, store=s_b, crash_hook=crash_hook_b
-            )
-
             created = await r_a.create_run("assistant", "1.0", input="hi")
             task = asyncio.create_task(r_a.start_run(created.run_id))
             await entered.wait()
             clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
-            with self.assertRaises(RuntimeError):
-                await r_b.resume_run(created.run_id)
+            before_takeover = await s_b.get_run(created.run_id)
+            assert before_takeover is not None
+            await s_b.acquire_lease(
+                created.run_id,
+                r_b.owner,
+                DEFAULT_LEASE_TTL,
+                expected_version=before_takeover.version,
+            )
 
             # 当前权威状态：RUNNING、version=2、租约归 B。
             current = await s_a.get_run(created.run_id)

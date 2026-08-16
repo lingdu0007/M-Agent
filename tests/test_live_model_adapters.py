@@ -415,7 +415,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 contract_id="same-deployment",
                 version="1",
                 revision_stability=RevisionStability.PINNED,
-                model_identity="provider:model",
+                model_identity=adapter.model,
                 capabilities=adapter.capabilities,
                 limits=ModelLimits(
                     context_window_tokens=128,
@@ -487,6 +487,40 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             asyncio.run(second_probe.aclose())
             asyncio.run(first.aclose())
             asyncio.run(second.aclose())
+
+    def test_provider_contract_model_identity_matches_configured_model(self) -> None:
+        probe = ChatCompletionsModelAdapter(
+            model="actual-model", base_url="https://contract.invalid/v1"
+        )
+        contract = ModelContract(
+            contract_id="wrong-model",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="claimed-model",
+            capabilities=probe.capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="provider-sizer-v1",
+            serialization_id="provider-wire-v1",
+            configuration_fingerprint=probe.definition_contract_fingerprint(),
+        )
+        adapter = ChatCompletionsModelAdapter(
+            model="actual-model",
+            base_url="https://contract.invalid/v1",
+            model_contract=contract,
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "model_identity"):
+                DefinitionRegistry().register(
+                    AgentDefinition.for_adapter(
+                        definition_id="wrong-model",
+                        version="1",
+                        instructions="Never dispatch.",
+                        model_adapter=adapter,
+                    )
+                )
+        finally:
+            asyncio.run(probe.aclose())
+            asyncio.run(adapter.aclose())
 
     def test_live_adapters_visibly_distinct_from_fake(self) -> None:
         # AC：确定性 fake 的成功不可能被误认为 live 兼容性验证。
@@ -1030,7 +1064,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             contract_id="chat-text-only",
             version="1",
             revision_stability=RevisionStability.PINNED,
-            model_identity="chat:text-only",
+            model_identity=adapter.model,
             capabilities=ModelCapabilities(),
             limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
             input_sizer_id="mock-provider-sizer-v1",
@@ -1061,7 +1095,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         )
         configure_mock_contract(original)
         changed = ChatCompletionsModelAdapter(
-            model="model-changed",
+            model="model-original",
             base_url="https://changed.invalid/v1",
             model_contract=original.model_contract,
         )

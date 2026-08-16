@@ -156,6 +156,21 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ).match(strict).compatible
         )
 
+    def test_usage_value_cannot_claim_unavailable_provenance(self) -> None:
+        from pydantic import ValidationError
+
+        from m_agent.runtime import ModelUsage, UsageProvenance
+
+        with self.assertRaises(ValidationError):
+            ModelUsage(
+                input_tokens=5,
+                input_tokens_provenance=UsageProvenance.UNAVAILABLE,
+            )
+        with self.assertRaises(ValidationError):
+            ModelUsage(
+                input_tokens_provenance=UsageProvenance.PROVIDER_REPORTED,
+            )
+
     def test_binding_reuse_and_capability_combinations_are_explicit(self) -> None:
         """Binding reuse and multi-mode protocols need durable declarations."""
         from pydantic import ValidationError
@@ -301,7 +316,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             serialization_id="deterministic-text-v1",
         )
         adapter = DeterministicModelAdapter(
-            ("structured response",), model_contract=contract
+            ('{"answer":"structured"}',), model_contract=contract
         )
         registry = DefinitionRegistry()
         registry.register(
@@ -332,6 +347,236 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             adapter.last_request.structured_output,
             StructuredOutputMode.JSON_SCHEMA_STRICT,
         )
+
+    async def test_strict_structured_response_rejects_non_json_output(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StructuredOutputMode,
+        )
+
+        contract = ModelContract(
+            contract_id="strict-output",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:strict-output",
+            capabilities=ModelCapabilities(
+                structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
+            ),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+        adapter = DeterministicModelAdapter(("not-json",), model_contract=contract)
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="strict-output",
+                version="1",
+                instructions="Return strict JSON.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
+                    )
+                ),
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("strict-output", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 1)
+
+    async def test_streaming_response_tool_call_requires_declared_combination(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelCapabilityCombination,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            ModelResponse,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StreamingMode,
+            ToolCall,
+            ToolCallingMode,
+        )
+
+        capabilities = ModelCapabilities(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            supported_combinations=(
+                ModelCapabilityCombination(streaming=StreamingMode.DELTA),
+                ModelCapabilityCombination(tool_calling=ToolCallingMode.NATIVE),
+            ),
+        )
+        contract = ModelContract(
+            contract_id="stream-tool-split",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:stream-tool-split",
+            capabilities=capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+        )
+
+        class UnexpectedToolStream(DeterministicModelAdapter):
+            async def stream(self, request):
+                self.call_count += 1
+                self._last_request = request
+                yield ModelResponse(
+                    tool_calls=(
+                        ToolCall(
+                            call_id="unexpected-tool",
+                            tool_name="lookup",
+                            arguments="{}",
+                        ),
+                    )
+                )
+
+        adapter = UnexpectedToolStream(("unused",), model_contract=contract)
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="stream-tool-split",
+                version="1",
+                instructions="Never accept the undeclared response mode.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(streaming=StreamingMode.DELTA)
+                ),
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("stream-tool-split", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 1)
+
+    async def test_streaming_usage_combination_rejects_before_dispatch(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelCapabilityCombination,
+            ModelContract,
+            ModelLimits,
+            ModelRequirements,
+            ModelResponse,
+            ModelUsage,
+            ModelUsageGuarantees,
+            RevisionStability,
+            Runner,
+            RunStatus,
+            StreamingMode,
+            UsageFieldGuarantee,
+            UsageProvenance,
+            UsageReportingMode,
+        )
+
+        capabilities = ModelCapabilities(
+            streaming=StreamingMode.DELTA,
+            usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+            supported_combinations=(
+                ModelCapabilityCombination(streaming=StreamingMode.DELTA),
+                ModelCapabilityCombination(
+                    usage_reporting=UsageReportingMode.PROVIDER_REPORTED
+                ),
+            ),
+        )
+        contract = ModelContract(
+            contract_id="stream-usage-split",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic:stream-usage-split",
+            capabilities=capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+            usage_guarantees=ModelUsageGuarantees(
+                input_tokens=UsageFieldGuarantee.REQUIRED
+            ),
+        )
+
+        class UsageStream(DeterministicModelAdapter):
+            async def stream(self, request):
+                self.call_count += 1
+                self._last_request = request
+                yield ModelResponse(
+                    content="accepted",
+                    usage=ModelUsage(
+                        input_tokens=1,
+                        provenance=UsageProvenance.PROVIDER_REPORTED,
+                        raw_unit="tokens",
+                        normalization_source="deterministic-usage-v1",
+                    ),
+                )
+
+        adapter = UsageStream(("unused",), model_contract=contract)
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="stream-usage-split",
+                version="1",
+                instructions="Never dispatch incompatible modes.",
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(streaming=StreamingMode.DELTA)
+                ),
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run("stream-usage-split", "1", "hello")
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        self.assertEqual(adapter.call_count, 0)
 
     async def test_malformed_model_response_is_contract_violation(self) -> None:
         from m_agent.adapters import (
@@ -1431,12 +1676,11 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                         if close is not None:
                             close()
 
-    async def test_sqlite_recovery_consumes_crashed_pre_dispatch_reservation(
+    async def test_sqlite_recovery_does_not_replay_uncheckpointed_model(
         self,
     ) -> None:
         from m_agent import FakeClock
         from m_agent.adapters import (
-            InMemoryRunStore,
             PlaintextPayloadCodec,
             SQLiteRunStore,
         )
@@ -1446,6 +1690,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ModelExecutionBudget,
             Runner,
             RunStatus,
+            StepStatus,
         )
         from fixtures.crash_worker import LoggingModelAdapter
 
@@ -1454,7 +1699,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             model_log = os.path.join(tmp, "model-calls.log")
             environment = {
                 **os.environ,
-                "M_AGENT_TEST_MODEL_BUDGET": "1",
+                "M_AGENT_TEST_MODEL_BUDGET": "2",
             }
             proc = subprocess.run(
                 [
@@ -1499,8 +1744,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     version="1.0",
                     instructions="Answer deterministically.",
                     model_execution_budget=ModelExecutionBudget(
-                        run_max_attempts=1,
-                        primary_max_attempts=1,
+                        run_max_attempts=2,
+                        primary_max_attempts=2,
                         context_compression_max_attempts=0,
                         output_repair_max_attempts=0,
                     ),
@@ -1524,10 +1769,11 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIs(terminal.status, RunStatus.FAILED)
             self.assertEqual(
-                terminal.error_code, "MODEL_EXECUTION_BUDGET_EXCEEDED"
+                terminal.error_code, "model_checkpoint_unconfirmed"
             )
             self.assertEqual(adapter.call_count, 0)
             self.assertFalse(os.path.exists(model_log))
+            self.assertEqual(inspection.attempts[0].status, StepStatus.FAILED)
             self.assertEqual(
                 len(
                     [

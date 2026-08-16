@@ -443,6 +443,11 @@ class ProviderModelAdapter(ModelAdapter):
             raise ValueError(
                 "provider instance ModelContract exceeds class capability ceiling"
             )
+        if self._model_contract.model_identity != self.model:
+            raise ValueError(
+                "provider instance ModelContract model_identity does not match "
+                "the configured model"
+            )
         declared_structured_output = (
             self._model_contract.capabilities.structured_output
         )

@@ -7,9 +7,10 @@ RunStore、排队或接管租约；进程部署与任务调度完全由上层应
 
 Ticket 02 恢复语义（ADR 0003 / PRD）：
 
-- 恢复是 at-least-once：已确认持久化的 Checkpoint 被复用、不重复
-  调用模型；在 Checkpoint 落盘前中断的执行会在恢复时重新执行，
-  因此模型调用可能发生不止一次，绝不宣称 exactly-once。
+- 恢复复用已确认的 Checkpoint；Context 与可安全重放的 Tool 在
+  Checkpoint 前中断时保持 at-least-once。Model Attempt 已在 dispatch
+  前持久化 reservation，若该 reservation 没有 Model checkpoint，调用
+  是否发生不可确认，恢复 fail-closed，绝不自动重放或宣称 exactly-once。
 - 恢复只读取 Run Store 与精确 `definition_id + version` 解析的
   Definition（ADR 0023）；原版本不可用时 Run 进入 WAITING，reason
   为机器可读的 ``DEFINITION_UNAVAILABLE``，绝不回退到最新版本。
@@ -147,6 +148,10 @@ ERROR_EFFECT_UNCONFIRMED = "effect_unconfirmed"
 
 #: Frozen Model Execution Budget exhausted before a further provider call.
 ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED = "MODEL_EXECUTION_BUDGET_EXCEEDED"
+
+#: A durable Model Attempt reservation has no corresponding checkpoint after
+#: recovery. The provider call may have happened, so it is never replayed.
+ERROR_MODEL_CHECKPOINT_UNCONFIRMED = "model_checkpoint_unconfirmed"
 
 #: Run Snapshot 未提供唯一 Tool Effect 声明时的稳定错误标识。Runner 不得
 #: 使用恢复进程当前注册的 callable 来猜测该 Run 的重试安全性。
@@ -1218,9 +1223,10 @@ class Runner:
           不确定，Run 进入 WAITING 等待应用显式处置（ADR 0007）。
         - 已确认的 Context Step 直接复用其 Items，不重新查询外部
           数据源（外部数据即使变化也不重写 Run 的上下文）。
-        - 无任何 Model Step checkpoint 时，从 Context Step（如有）
-          与模型循环重新开始（at-least-once：checkpoint 落盘前的
-          步骤重新执行，绝不宣称 exactly-once）。
+        - 任一已持久化的 Model Attempt reservation 没有对应 checkpoint
+          时，provider dispatch 是否发生不可确认，Run fail-closed，绝不
+          自动重放；否则无 Model checkpoint 时从 Context Step（如有）与
+          模型循环重新开始。
         """
         try:
             definition = self._registry.resolve(
@@ -1271,6 +1277,39 @@ class Runner:
             ),
             None,
         )
+        inflight_model_attempt = (
+            next(
+                (
+                    attempt
+                    for attempt in reversed(persisted_attempts)
+                    if attempt.step_id == inflight_model_step.step_id
+                    and attempt.status is StepStatus.RUNNING
+                ),
+                None,
+            )
+            if inflight_model_step is not None
+            else None
+        )
+        if inflight_model_attempt is not None:
+            await self._record_failed_attempt(
+                run,
+                lease,
+                inflight_model_step.step_id,
+                (
+                    FailureClassification.UNCERTAIN,
+                    ERROR_MODEL_CHECKPOINT_UNCONFIRMED,
+                    "model attempt reservation has no checkpoint",
+                ),
+                StepType.MODEL,
+                attempt_id=inflight_model_attempt.attempt_id,
+                model_purpose=inflight_model_attempt.model_purpose,
+            )
+            await self._record_failed_step(
+                run, lease, inflight_model_step.step_id, StepType.MODEL
+            )
+            return await self._fail_run(
+                run, lease, ERROR_MODEL_CHECKPOINT_UNCONFIRMED
+            )
         # 是否注入外部上下文以冻结 Snapshot 的 has_context_provider 为准
         # （ADR 0022/0023：恢复行为由 Run 启动时冻结的定义决定，后续注册
         # 的同 id+version 定义不能改变恢复行为）。已确认的 Context Step
@@ -1812,6 +1851,7 @@ class Runner:
                     is not StructuredOutputMode.NONE
                     else StructuredOutputMode.NONE
                 ),
+                usage_reporting=model_contract.capabilities.usage_reporting,
             )
             try:
                 assert_model_request_compatible(
@@ -1872,6 +1912,24 @@ class Runner:
                         ),
                         None,
                     )
+                await self._assert_step_dispatch(run, lease)
+                if self._cancel_requested(run.run_id):
+                    await self._record_failed_attempt(
+                        run,
+                        lease,
+                        step_id,
+                        (
+                            FailureClassification.PERMANENT,
+                            "cancelled_before_model_dispatch",
+                            "model dispatch cancelled after reservation",
+                        ),
+                        StepType.MODEL,
+                        attempt_id=attempt_id,
+                        model_purpose=purpose,
+                    )
+                    cancelled = await self._maybe_cancel(run, lease)
+                    if cancelled is not None:
+                        return cancelled, None
                 if streaming:
                     response = await self._stream_model(
                         adapter,
@@ -1886,7 +1944,12 @@ class Runner:
                         return await self._get_existing_run(run.run_id), None
                 else:
                     response = await adapter.generate(request)
-                response = normalize_model_response(model_contract, response)
+                response = normalize_model_response(
+                    model_contract,
+                    response,
+                    request=request,
+                    streaming=streaming,
+                )
             except (LeaseNotHeldError, StaleRunVersionError):
                 raise
             except Exception as exc:  # 模型失败：结构化分类 + 失败 Attempt

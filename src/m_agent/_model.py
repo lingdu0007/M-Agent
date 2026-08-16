@@ -554,6 +554,17 @@ class ModelUsage(BaseModel, frozen=True):
         ):
             value = getattr(self, field)
             source = getattr(self, f"{field}_provenance")
+            if value is None and source not in (
+                None,
+                UsageProvenance.UNAVAILABLE,
+            ):
+                raise ValueError(
+                    f"missing {field} must have unavailable provenance"
+                )
+            if value is not None and source is UsageProvenance.UNAVAILABLE:
+                raise ValueError(
+                    f"reported {field} cannot have unavailable provenance"
+                )
             object.__setattr__(
                 self,
                 f"{field}_provenance",
@@ -584,6 +595,8 @@ class ModelRequest(BaseModel, frozen=True):
     #: Native structured-output mode selected by the frozen Model Binding.
     #: A configured provider schema is only sent when this request requires it.
     structured_output: StructuredOutputMode = StructuredOutputMode.NONE
+    #: Usage reporting selected by the frozen Model Binding.
+    usage_reporting: UsageReportingMode = UsageReportingMode.NONE
 
 
 class ModelDelta(BaseModel, frozen=True):
@@ -618,7 +631,11 @@ class ModelResponse(BaseModel, frozen=True):
 
 
 def normalize_model_response(
-    contract: ModelContract, response: ModelResponse
+    contract: ModelContract,
+    response: ModelResponse,
+    *,
+    request: ModelRequest,
+    streaming: bool,
 ) -> ModelResponse:
     """Apply field guarantees without inventing missing provider usage."""
     if not isinstance(response, ModelResponse):
@@ -632,6 +649,38 @@ def normalize_model_response(
         raise ModelContractViolationError(
             "Model Contract does not declare native tool calling"
         )
+    values = {
+        "streaming": StreamingMode.DELTA if streaming else StreamingMode.NONE,
+        "tool_calling": (
+            ToolCallingMode.NATIVE
+            if response.tool_calls
+            else ToolCallingMode.NONE
+        ),
+        "structured_output": request.structured_output,
+        "usage_reporting": request.usage_reporting,
+    }
+    active = sum(mode.value != "NONE" for mode in values.values())
+    response_modes = ModelCapabilities(
+        **values,
+        supported_combinations=(
+            (ModelCapabilityCombination(**values),) if active > 1 else ()
+        ),
+    )
+    if not contract.capabilities.supports(response_modes):
+        raise ModelContractViolationError(
+            "Model Contract does not declare the response capability combination"
+        )
+    if request.structured_output is StructuredOutputMode.JSON_SCHEMA_STRICT:
+        try:
+            structured = json.loads(response.content or "")
+        except json.JSONDecodeError as exc:
+            raise ModelContractViolationError(
+                "strict structured response is not valid JSON"
+            ) from exc
+        if not isinstance(structured, dict):
+            raise ModelContractViolationError(
+                "strict structured response must be a JSON object"
+            )
     usage = response.usage
     guarantees = contract.usage_guarantees
     fields = (
@@ -697,6 +746,7 @@ def assert_model_request_compatible(
         "streaming": streaming_mode,
         "tool_calling": tool_mode,
         "structured_output": request.structured_output,
+        "usage_reporting": request.usage_reporting,
     }
     active = sum(mode.value != "NONE" for mode in values.values())
     required = ModelCapabilities(

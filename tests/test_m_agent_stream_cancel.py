@@ -314,6 +314,22 @@ class DispatchGateStore(InMemoryRunStore):
             await self.release_dispatch_guard.wait()
 
 
+class ReservationGateStore(InMemoryRunStore):
+    """Pause immediately after the durable model reservation is recorded."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(payload_codec=PlaintextPayloadCodec(), **kwargs)
+        self.reserved = asyncio.Event()
+        self.release_reservation = asyncio.Event()
+
+    async def reserve_model_attempt(self, *args, **kwargs) -> bool:
+        result = await super().reserve_model_attempt(*args, **kwargs)
+        if result:
+            self.reserved.set()
+            await self.release_reservation.wait()
+        return result
+
+
 def instant_tool(name: str = "lookup") -> DeterministicTool:
     tool = DeterministicTool(
         name=name,
@@ -985,6 +1001,49 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inspection.steps, [])
         self.assertEqual(inspection.attempts, [])
         self.assertEqual(inspection.checkpoints, [])
+
+    async def test_cancel_after_model_reservation_prevents_provider_call(
+        self,
+    ) -> None:
+        store = ReservationGateStore()
+        model = DeterministicModelAdapter(responses=("never",))
+        runner, _, _ = make_runner(model, store=store)
+        created = await runner.create_run("assistant", "1.0", input="hi")
+
+        advancing = asyncio.create_task(runner.start_run(created.run_id))
+        await store.reserved.wait()
+        requested = await runner.cancel_run(created.run_id)
+        self.assertEqual(requested.status, RunStatus.RUNNING)
+        store.release_reservation.set()
+        result = await advancing
+
+        self.assertEqual(result.status, RunStatus.CANCELLED)
+        self.assertEqual(model.call_count, 0)
+        inspection = await runner.inspect_run(created.run_id)
+        self.assertEqual(len(inspection.attempts), 1)
+        self.assertEqual(inspection.attempts[0].status, StepStatus.FAILED)
+
+    async def test_lease_expiry_after_model_reservation_prevents_provider_call(
+        self,
+    ) -> None:
+        from datetime import timedelta
+
+        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+
+        clock = FakeClock()
+        store = ReservationGateStore(clock=clock)
+        model = DeterministicModelAdapter(responses=("never",))
+        runner, _, _ = make_runner(model, store=store)
+        created = await runner.create_run("assistant", "1.0", input="hi")
+
+        advancing = asyncio.create_task(runner.start_run(created.run_id))
+        await store.reserved.wait()
+        clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+        store.release_reservation.set()
+        with self.assertRaises(LeaseNotHeldError):
+            await advancing
+
+        self.assertEqual(model.call_count, 0)
 
     async def test_cancel_during_inflight_streaming_adapter(self) -> None:
         # AC 9/10：adapter in-flight 时请求取消——流式调用在 delta 之间

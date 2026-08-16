@@ -11,7 +11,8 @@ Ticket 02 验收要求：
 - 模型实际调用次数以跨进程日志文件为硬证据；
 - 精确 Definition 缺失 -> WAITING / DEFINITION_UNAVAILABLE，绝不使用
   最新版本；
-- 恢复语义记录并验证为 at-least-once（checkpoint 前崩溃会重新执行）。
+- Context 与可安全重放 Tool 的 checkpoint 前中断保持 at-least-once；
+  Model reservation 没有 checkpoint 时 fail-closed，绝不自动重放。
 
 Ticket 04 追加验收（:class:`ContextCrossProcessResumeTests`）：
 
@@ -211,11 +212,11 @@ class CrashAfterCheckpointResumeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
-    async def test_crash_before_checkpoint_reinvokes_model_at_least_once(
+    async def test_crash_before_checkpoint_marks_model_unconfirmed(
         self,
     ) -> None:
-        # at-least-once：模型结果落盘前崩溃 -> 恢复时重新执行模型。
-        # 绝不宣称 exactly-once。
+        # Model reservation 已落盘但 checkpoint 缺失：恢复绝不重放可能
+        # 已发生的 provider 调用，而是以 machine-readable evidence 失败。
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "run.db")
             log = os.path.join(tmp, "model_calls.log")
@@ -231,10 +232,15 @@ class CrashAfterCheckpointResumeTests(unittest.IsolatedAsyncioTestCase):
             try:
                 runner = Runner(registry=registry, store=store)
                 terminal = await runner.resume_run(run_id)
-                self.assertEqual(terminal.status, RunStatus.SUCCEEDED)
-                # 第一次执行无 checkpoint 可复用 -> 重新执行（第二次调用）。
-                self.assertEqual(adapter.call_count, 1)
-                self.assertEqual(count_model_calls(log), 2)
+                self.assertEqual(terminal.status, RunStatus.FAILED)
+                self.assertEqual(
+                    terminal.error_code, "model_checkpoint_unconfirmed"
+                )
+                self.assertEqual(adapter.call_count, 0)
+                self.assertEqual(count_model_calls(log), 1)
+                inspection = await runner.inspect_run(run_id)
+                self.assertEqual(len(inspection.attempts), 1)
+                self.assertEqual(len(inspection.checkpoints), 0)
             finally:
                 store.close()
 
