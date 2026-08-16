@@ -753,7 +753,7 @@ class ToolExceptionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_unknown_tool_name_fails_closed(self) -> None:
-        # 模型请求未注册的工具名：fail-closed，形成失败 Attempt，
+        # 模型请求未注册的工具名：Model Contract 在 Tool Step 前拒绝它，
         # Run FAILED，模型不被再次调用。
         model = UnknownToolModel()
         runner, _, _ = make_runner(model, (FakeLookupTool(),))
@@ -761,14 +761,17 @@ class ToolExceptionTests(unittest.IsolatedAsyncioTestCase):
         terminal = await runner.start_run(created.run_id)
 
         self.assertEqual(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
         self.assertEqual(model.call_count, 1)
         inspection = await runner.inspect_run(created.run_id)
-        tool_step = inspection.steps[1]
-        self.assertEqual(tool_step.step_type, StepType.TOOL)
-        self.assertEqual(tool_step.status, StepStatus.FAILED)
         self.assertEqual(
-            inspection.attempts[1].error,
-            "unclassified adapter exception: RuntimeError",
+            [step.step_type for step in inspection.steps], [StepType.MODEL]
+        )
+        self.assertEqual(
+            [step.status for step in inspection.steps], [StepStatus.FAILED]
+        )
+        self.assertEqual(
+            inspection.attempts[0].error_code, "MODEL_CONTRACT_VIOLATION"
         )
 
     async def test_tool_returning_non_outcome_is_a_failed_attempt(self) -> None:

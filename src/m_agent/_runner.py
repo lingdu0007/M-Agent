@@ -152,7 +152,8 @@ ERROR_EFFECT_UNCONFIRMED = "effect_unconfirmed"
 ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED = "MODEL_EXECUTION_BUDGET_EXCEEDED"
 
 #: A durable Model Attempt reservation has no corresponding checkpoint after
-#: recovery. The provider call may have happened, so it is never replayed.
+#: recovery. The provider call may have happened; its failed record retains
+#: this evidence before a bounded at-least-once replay gets a new identity.
 ERROR_MODEL_CHECKPOINT_UNCONFIRMED = "model_checkpoint_unconfirmed"
 
 #: Run Snapshot 未提供唯一 Tool Effect 声明时的稳定错误标识。Runner 不得
@@ -1256,9 +1257,9 @@ class Runner:
         - 已确认的 Context Step 直接复用其 Items，不重新查询外部
           数据源（外部数据即使变化也不重写 Run 的上下文）。
         - 任一已持久化的 Model Attempt reservation 没有对应 checkpoint
-          时，provider dispatch 是否发生不可确认，Run fail-closed，绝不
-          自动重放；否则无 Model checkpoint 时从 Context Step（如有）与
-          模型循环重新开始。
+          时，provider dispatch 是否发生不可确认；该 Attempt 保留为
+          UNCERTAIN 的预算消耗，并在预算允许时以新的 Attempt identity
+          按 at-least-once 语义重放。
         """
         try:
             definition = self._registry.resolve(
@@ -1338,6 +1339,7 @@ class Runner:
             ),
             None,
         )
+        recovery_model_step_id: str | None = None
         if inflight_model_attempt is not None:
             inflight_model_step = model_steps[inflight_model_attempt.step_id]
             if inflight_model_attempt.status is not StepStatus.FAILED:
@@ -1355,19 +1357,11 @@ class Runner:
                     model_purpose=inflight_model_attempt.model_purpose,
                     usage=inflight_model_attempt.usage,
                 )
-            await self._record_failed_step(
-                run,
-                lease,
-                inflight_model_step.step_id,
-                StepType.MODEL,
-                error_code=ERROR_MODEL_CHECKPOINT_UNCONFIRMED,
-            )
-            return await self._fail_run(
-                run, lease, ERROR_MODEL_CHECKPOINT_UNCONFIRMED
-            )
+            recovery_model_step_id = inflight_model_step.step_id
         if (
             last_model_step is not None
             and last_model_step.status is StepStatus.FAILED
+            and last_model_step.step_id != recovery_model_step_id
         ):
             # A terminal Model Step was already durable when process loss
             # interrupted the Run transition. Its frozen retry decision was
@@ -1405,6 +1399,19 @@ class Runner:
                 )
                 if run.status is not RunStatus.RUNNING:
                     return run
+        if recovery_model_step_id is not None:
+            return await self._run_agent_loop(
+                run,
+                definition,
+                lease,
+                context_items=context_items,
+                prior_tool_outcomes=tuple(
+                    deserialize_tool_outcome(checkpoint.output)
+                    for checkpoint in tool_checkpoints
+                ),
+                resumed_model_step_id=recovery_model_step_id,
+                recovery_replay=True,
+            )
         if not model_checkpoints:
             # 上次执行在模型结果持久化前中断（at-least-once：重新执行
             # 模型循环）。
@@ -1745,6 +1752,7 @@ class Runner:
         context_items: Sequence[ContextItem] = (),
         prior_tool_outcomes: Sequence[ToolOutcome] = (),
         resumed_model_step_id: str | None = None,
+        recovery_replay: bool = False,
     ) -> RunRecord:
         """模型-工具循环：推进一个 RUNNING Run 直到最终响应（Ticket 05）。
 
@@ -1780,8 +1788,10 @@ class Runner:
                 context_items,
                 tool_outcomes,
                 step_id=model_step_id,
+                recovery_replay=recovery_replay,
             )
             model_step_id = None
+            recovery_replay = False
             if response is None:  # 模型失败 -> Run FAILED
                 return run
             # 完整 Model response 已按 _run_single_model_step 的语义
@@ -1828,6 +1838,7 @@ class Runner:
         context_items: Sequence[ContextItem],
         tool_outcomes: Sequence[ToolOutcome],
         step_id: str | None = None,
+        recovery_replay: bool = False,
     ) -> tuple[RunRecord, ModelResponse | None]:
         """执行一次模型调用并记录 Model Step / Attempt / Checkpoint。
 
@@ -1883,6 +1894,7 @@ class Runner:
             last_attempt = persisted_attempts[-1]
             if (
                 last_attempt.status is StepStatus.FAILED
+                and not recovery_replay
                 and not self._should_retry(
                     last_attempt.classification
                     if last_attempt.classification is not None
@@ -2028,6 +2040,9 @@ class Runner:
                 assert_model_request_compatible(
                     model_contract, request, streaming=streaming
                 )
+                # The synchronous contract hooks above may take long enough
+                # for the lease to expire, so guard immediately before dispatch.
+                await self._assert_step_dispatch(run, lease)
                 if streaming:
                     response = await self._stream_model(
                         adapter,
@@ -2043,11 +2058,11 @@ class Runner:
                 else:
                     response = await adapter.generate(request)
                 self._assert_adapter_contract_matches_snapshot(run, definition)
-                response = adapter.validate_response(request, response)
                 if isinstance(response, ModelResponse) and isinstance(
                     response.usage, ModelUsage
                 ):
                     observed_usage = response.usage
+                response = adapter.validate_response(request, response)
                 response = normalize_model_response(
                     model_contract,
                     response,

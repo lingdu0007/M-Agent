@@ -840,6 +840,7 @@ def normalize_model_response(
             "Model Contract does not declare native tool calling"
         )
     seen_call_ids: set[str] = set()
+    declared_tool_names = {tool.name for tool in request.tools}
     for call in response.tool_calls:
         if not call.call_id.strip():
             raise ModelContractViolationError("tool call id must be non-empty")
@@ -848,6 +849,10 @@ def normalize_model_response(
         seen_call_ids.add(call.call_id)
         if not call.tool_name.strip():
             raise ModelContractViolationError("tool call name must be non-empty")
+        if call.tool_name not in declared_tool_names:
+            raise ModelContractViolationError(
+                f"model response requested undeclared tool: {call.tool_name}"
+            )
         try:
             arguments = json.loads(call.arguments)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -1083,6 +1088,41 @@ def _deterministic_adapter_type_identity(adapter_type: type[object]) -> str:
     return f"{module_identity}.{adapter_type.__qualname__}"
 
 
+_UNFINGERPRINTABLE_CONFIGURATION = object()
+_FINGERPRINT_EXCLUDED_STATE = {
+    "_last_request",
+    "_model_contract",
+    "_responses",
+    "call_count",
+    "capabilities",
+}
+_SENSITIVE_CONFIGURATION_NAMES = (
+    "credential",
+    "key",
+    "password",
+    "secret",
+    "token",
+)
+
+
+def _deterministic_configuration_value(value: object) -> object:
+    """Return immutable configuration suitable for a deterministic fingerprint."""
+    if value is None:
+        return _UNFINGERPRINTABLE_CONFIGURATION
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, tuple):
+        values = tuple(_deterministic_configuration_value(item) for item in value)
+        if any(item is _UNFINGERPRINTABLE_CONFIGURATION for item in values):
+            return _UNFINGERPRINTABLE_CONFIGURATION
+        return values
+    return _UNFINGERPRINTABLE_CONFIGURATION
+
+
 class DeterministicModelAdapter(ModelAdapter):
     """确定性 fake Model Adapter，用于测试、演示与离线示例。
 
@@ -1122,10 +1162,26 @@ class DeterministicModelAdapter(ModelAdapter):
 
     def _configuration_fingerprint_payload(self) -> dict[str, Any]:
         """Stable behavior identity, excluding mutable test observation state."""
-        return {
+        payload: dict[str, Any] = {
             "capabilities": self.capabilities.model_dump(mode="json"),
             "responses": self._responses,
         }
+        instance_configuration: dict[str, object] = {}
+        for name, value in vars(self).items():
+            if (
+                name in _FINGERPRINT_EXCLUDED_STATE
+                or any(
+                    fragment in name.lower()
+                    for fragment in _SENSITIVE_CONFIGURATION_NAMES
+                )
+            ):
+                continue
+            normalized = _deterministic_configuration_value(value)
+            if normalized is not _UNFINGERPRINTABLE_CONFIGURATION:
+                instance_configuration[name] = normalized
+        if instance_configuration:
+            payload["instance_configuration"] = instance_configuration
+        return payload
 
     def definition_contract_fingerprint(self) -> str:
         payload = self._configuration_fingerprint_payload()

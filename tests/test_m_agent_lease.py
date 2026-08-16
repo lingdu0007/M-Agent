@@ -273,8 +273,9 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         # AC4/AC6：租约过期（FakeClock advance）后 B 接管。A 已持久化
-        # Model reservation 但没有 checkpoint，B 必须 fail-closed，而不是
-        # 再次调用 provider；旧 owner A 的迟到提交仍被拒绝。
+        # Model reservation 但没有 checkpoint，B 将原 Attempt 标为
+        # UNCERTAIN 并以新的受预算 Attempt 重放；旧 owner A 的迟到提交
+        # 仍被拒绝。
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "run.db")
             log = os.path.join(tmp, "model_calls.log")
@@ -290,12 +291,10 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             # 确定性推进时钟：A 的租约过期。
             clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
 
-            # B 接管并终结未确认的 Model Attempt，不重新执行。
+            # B 接管，保留 A 的未确认 Attempt 后重新执行。
             terminal_b = await r_b.resume_run(created.run_id)
-            self.assertEqual(terminal_b.status, RunStatus.FAILED)
-            self.assertEqual(
-                terminal_b.error_code, "model_checkpoint_unconfirmed"
-            )
+            self.assertEqual(terminal_b.status, RunStatus.SUCCEEDED)
+            self.assertEqual(terminal_b.output, _ANSWER)
 
             # A 恢复：所有迟到写入（Step / Attempt / Checkpoint /
             # 终态提交）都被租约检查拒绝。
@@ -305,15 +304,15 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await task
 
-            # 最终权威记录：Run 与 Step 只反映 B 的 fail-closed 处置。
+            # 最终权威记录：Run 与 Step 只反映 B 的重放结果。
             final = await r_b.get_run(created.run_id)
-            self.assertEqual(final.status, RunStatus.FAILED)
-            self.assertEqual(final.output, None)
+            self.assertEqual(final.status, RunStatus.SUCCEEDED)
+            self.assertEqual(final.output, _ANSWER)
             inspection = await r_b.inspect_run(created.run_id)
             self.assertEqual(len(inspection.steps), 1)
-            self.assertEqual(len(inspection.attempts), 1)
-            self.assertEqual(len(inspection.checkpoints), 0)
-            self.assertEqual(count_model_calls(log), 1)
+            self.assertEqual(len(inspection.attempts), 2)
+            self.assertEqual(len(inspection.checkpoints), 1)
+            self.assertEqual(count_model_calls(log), 2)
             s_a.close()
             s_b.close()
 

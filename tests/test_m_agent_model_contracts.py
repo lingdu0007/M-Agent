@@ -1789,6 +1789,70 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             await runner.create_run("unfingerprinted-deterministic", "1", "hello")
         self.assertEqual(adapter.call_count, 0)
 
+    async def test_deterministic_subclass_state_is_frozen_in_binding(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelResponse,
+            Runner,
+        )
+
+        class ConfiguredAnswerAdapter(DeterministicModelAdapter):
+            def __init__(self, answer: str) -> None:
+                super().__init__(("unused",))
+                self.answer = answer
+
+            async def generate(self, request) -> ModelResponse:
+                self.call_count += 1
+                self._last_request = request
+                return ModelResponse(content=self.answer)
+
+        def registry(answer: str) -> tuple[DefinitionRegistry, ConfiguredAnswerAdapter]:
+            adapter = ConfiguredAnswerAdapter(answer)
+            result = DefinitionRegistry()
+            result.register(
+                AgentDefinition.for_adapter(
+                    definition_id="configured-deterministic",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                )
+            )
+            return result, adapter
+
+        async def assert_drift_rejected(store) -> None:
+            original_registry, _ = registry("OLD")
+            created = await Runner(original_registry, store).create_run(
+                "configured-deterministic", "1", "hello"
+            )
+            changed_registry, changed_adapter = registry("NEW")
+
+            with self.assertRaisesRegex(RuntimeError, "snapshot Model Contract"):
+                await Runner(changed_registry, store).start_run(created.run_id)
+
+            self.assertEqual(changed_adapter.call_count, 0)
+
+        await assert_drift_rejected(
+            InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteRunStore(
+                os.path.join(tmp, "configured-deterministic.db"),
+                payload_codec=PlaintextPayloadCodec(),
+            )
+            try:
+                await assert_drift_rejected(store)
+            finally:
+                store.close()
+
     async def test_streaming_response_tool_call_requires_declared_combination(
         self,
     ) -> None:
@@ -1978,6 +2042,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ToolCallingMode,
             ToolEffect,
             ToolOutcome,
+            StepType,
         )
 
         class InvalidToolCalls(DeterministicModelAdapter):
@@ -2005,6 +2070,16 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             (
                 "empty",
                 (ToolCall(call_id="", tool_name="lookup", arguments="{}"),),
+            ),
+            (
+                "undeclared",
+                (
+                    ToolCall(
+                        call_id="missing",
+                        tool_name="not-offered",
+                        arguments="{}",
+                    ),
+                ),
             ),
         ):
             with self.subTest(label=label):
@@ -2044,11 +2119,15 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     f"invalid-tool-call-{label}", "1", "hello"
                 )
                 terminal = await runner.start_run(created.run_id)
+                inspection = await runner.inspect_run(created.run_id)
 
                 self.assertIs(terminal.status, RunStatus.FAILED)
                 self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
                 self.assertEqual(adapter.call_count, 1)
                 self.assertEqual(effects, 0)
+                self.assertEqual(
+                    [step.step_type for step in inspection.steps], [StepType.MODEL]
+                )
 
     async def test_unsupported_tool_definition_has_capability_error_code(
         self,
@@ -2407,6 +2486,77 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         assert usage is not None
         self.assertEqual(usage.input_tokens, 3)
         self.assertEqual(usage.output_tokens, 2)
+
+    async def test_validation_failure_preserves_observed_provider_usage(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelContractViolationError,
+            ModelResponse,
+            ModelUsage,
+            Runner,
+            RunStatus,
+            UsageProvenance,
+            UsageReportingMode,
+        )
+
+        class UsageThenValidationFailureAdapter(DeterministicModelAdapter):
+            async def generate(self, request):
+                self.call_count += 1
+                self._last_request = request
+                return ModelResponse(
+                    content="answer",
+                    usage=ModelUsage(
+                        input_tokens=7,
+                        output_tokens=3,
+                        provenance=UsageProvenance.PROVIDER_REPORTED,
+                        raw_unit="tokens",
+                        normalization_source="test-provider-usage-v1",
+                    ),
+                )
+
+            def validate_response(self, request, response):
+                raise ModelContractViolationError("provider response rejected")
+
+        adapter = UsageThenValidationFailureAdapter(
+            ("unused",),
+            capabilities=ModelCapabilities(
+                usage_reporting=UsageReportingMode.PROVIDER_REPORTED
+            ),
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="usage-before-validation-failure",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry,
+            InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run(
+            "usage-before-validation-failure", "1", "hello"
+        )
+        terminal = await runner.start_run(created.run_id)
+        inspection = await runner.inspect_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_CONTRACT_VIOLATION")
+        usage = inspection.attempts[0].usage
+        assert usage is not None
+        self.assertEqual((usage.input_tokens, usage.output_tokens), (7, 3))
 
     async def test_actual_provider_revision_is_persisted_with_response(self) -> None:
         from m_agent import deserialize_model_response
@@ -3290,6 +3440,75 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(adapter.call_count, 0)
 
+    async def test_model_dispatch_rechecks_lease_after_contract_hooks(
+        self,
+    ) -> None:
+        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            LeaseNotHeldError,
+            Runner,
+        )
+
+        clock = FakeClock()
+
+        class LeaseExpiringAdapter(DeterministicModelAdapter):
+            def __init__(self) -> None:
+                super().__init__(("must not dispatch",))
+                self.expire_on_contract_read = False
+
+            @property
+            def model_contract(self):
+                if self.expire_on_contract_read:
+                    self.expire_on_contract_read = False
+                    clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+                return super().model_contract
+
+        class PostGuardExpiringStore(InMemoryRunStore):
+            def __init__(self, adapter: LeaseExpiringAdapter) -> None:
+                super().__init__(
+                    payload_codec=PlaintextPayloadCodec(), clock=clock
+                )
+                self._adapter = adapter
+                self._armed = False
+
+            async def reserve_model_attempt(self, *args, **kwargs) -> bool:
+                reserved = await super().reserve_model_attempt(*args, **kwargs)
+                self._armed = reserved
+                return reserved
+
+            async def assert_lease(self, *args, **kwargs) -> None:
+                await super().assert_lease(*args, **kwargs)
+                if self._armed:
+                    self._armed = False
+                    self._adapter.expire_on_contract_read = True
+
+        adapter = LeaseExpiringAdapter()
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="post-contract-lease-guard",
+                version="1",
+                instructions="Never dispatch after lease expiry.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(registry, PostGuardExpiringStore(adapter))
+        created = await runner.create_run(
+            "post-contract-lease-guard", "1", "hi"
+        )
+
+        with self.assertRaises(LeaseNotHeldError):
+            await runner.start_run(created.run_id)
+
+        self.assertEqual(adapter.call_count, 0)
+
     def test_live_adapter_requires_verifiable_current_configuration(self) -> None:
         from m_agent.runtime import (
             AgentDefinition,
@@ -4018,7 +4237,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                         if close is not None:
                             close()
 
-    async def test_sqlite_recovery_does_not_replay_uncheckpointed_model(
+    async def test_sqlite_recovery_replays_uncheckpointed_model_with_budget(
         self,
     ) -> None:
         from m_agent import FakeClock
@@ -4109,16 +4328,13 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
-            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+            self.assertEqual(adapter.call_count, 1)
+            with open(model_log, encoding="utf-8") as fh:
+                self.assertEqual(fh.read().splitlines(), ["hi"])
             self.assertEqual(
-                terminal.error_code, "model_checkpoint_unconfirmed"
-            )
-            self.assertEqual(adapter.call_count, 0)
-            self.assertFalse(os.path.exists(model_log))
-            self.assertEqual(inspection.attempts[0].status, StepStatus.FAILED)
-            self.assertEqual(
-                inspection.attempts[0].error_code,
-                "model_checkpoint_unconfirmed",
+                [attempt.status for attempt in inspection.attempts],
+                [StepStatus.FAILED, StepStatus.SUCCEEDED],
             )
             self.assertEqual(
                 len(
@@ -4128,13 +4344,13 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                         if attempt.model_purpose is not None
                     ]
                 ),
-                1,
+                2,
             )
 
-    async def test_recovery_fails_closed_when_success_attempt_persistence_fails(
+    async def test_recovery_replays_after_success_attempt_persistence_fails(
         self,
     ) -> None:
-        """A successful Step without a successful Attempt is never replayed."""
+        """An uncheckpointed Model Attempt consumes budget then replays."""
         from m_agent import DEFAULT_LEASE_TTL, FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
@@ -4202,15 +4418,14 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         inspection = await Runner(registry, memory_store).inspect_run(
             created.run_id
         )
-        self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "model_checkpoint_unconfirmed")
-        self.assertEqual(adapter.call_count, 1)
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(adapter.call_count, 2)
         self.assertEqual(
-            [step.status for step in inspection.steps], [StepStatus.FAILED]
+            [step.status for step in inspection.steps], [StepStatus.SUCCEEDED]
         )
         self.assertEqual(
             [attempt.status for attempt in inspection.attempts],
-            [StepStatus.FAILED],
+            [StepStatus.FAILED, StepStatus.SUCCEEDED],
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -4252,23 +4467,20 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 )
             finally:
                 reopened.close()
-            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+            self.assertEqual(adapter.call_count, 2)
             self.assertEqual(
-                terminal.error_code, "model_checkpoint_unconfirmed"
-            )
-            self.assertEqual(adapter.call_count, 1)
-            self.assertEqual(
-                [step.status for step in inspection.steps], [StepStatus.FAILED]
+                [step.status for step in inspection.steps], [StepStatus.SUCCEEDED]
             )
             self.assertEqual(
                 [attempt.status for attempt in inspection.attempts],
-                [StepStatus.FAILED],
+                [StepStatus.FAILED, StepStatus.SUCCEEDED],
             )
 
-    async def test_recovery_fails_closed_when_success_checkpoint_persistence_fails(
+    async def test_recovery_replays_after_success_checkpoint_persistence_fails(
         self,
     ) -> None:
-        """A successful model attempt without its checkpoint is never replayed."""
+        """A failed checkpoint retains usage before bounded replay."""
         from m_agent import DEFAULT_LEASE_TTL, FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
@@ -4352,15 +4564,17 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         inspection = await Runner(registry, memory_store).inspect_run(
             created.run_id
         )
-        self.assertIs(terminal.status, RunStatus.FAILED)
-        self.assertEqual(terminal.error_code, "model_checkpoint_unconfirmed")
-        self.assertEqual(adapter.call_count, 1)
-        self.assertEqual([step.status for step in inspection.steps], [StepStatus.FAILED])
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(adapter.call_count, 2)
+        self.assertEqual(
+            [step.status for step in inspection.steps], [StepStatus.SUCCEEDED]
+        )
         self.assertEqual(
             [attempt.status for attempt in inspection.attempts],
-            [StepStatus.FAILED],
+            [StepStatus.FAILED, StepStatus.SUCCEEDED],
         )
         self.assertEqual(inspection.attempts[0].usage, usage)
+        self.assertEqual(inspection.attempts[1].usage, usage)
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "run.db")
@@ -4405,21 +4619,19 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 )
             finally:
                 reopened.close()
-            self.assertIs(terminal.status, RunStatus.FAILED)
+            self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+            self.assertEqual(adapter.call_count, 2)
             self.assertEqual(
-                terminal.error_code, "model_checkpoint_unconfirmed"
-            )
-            self.assertEqual(adapter.call_count, 1)
-            self.assertEqual(
-                [step.status for step in inspection.steps], [StepStatus.FAILED]
+                [step.status for step in inspection.steps], [StepStatus.SUCCEEDED]
             )
             self.assertEqual(
                 [attempt.status for attempt in inspection.attempts],
-                [StepStatus.FAILED],
+                [StepStatus.FAILED, StepStatus.SUCCEEDED],
             )
             self.assertEqual(inspection.attempts[0].usage, usage)
+            self.assertEqual(inspection.attempts[1].usage, usage)
 
-    async def test_recovery_never_replays_checkpoint_unconfirmed_attempt(
+    async def test_recovery_replays_checkpoint_unconfirmed_attempt_with_budget(
         self,
     ) -> None:
         from m_agent import DEFAULT_LEASE_TTL, CrashPoint, FakeClock
@@ -4458,7 +4670,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         class FailingSQLiteStore(FailingCheckpointStore, SQLiteRunStore):
             pass
 
-        async def assert_no_replay(store, clock) -> None:
+        async def assert_replay(store, clock) -> None:
             adapter = DeterministicModelAdapter(("first", "must not dispatch"))
             registry = DefinitionRegistry()
             registry.register(
@@ -4498,17 +4710,14 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
             terminal = await Runner(registry, store).resume_run(created.run_id)
 
-            self.assertIs(terminal.status, RunStatus.FAILED)
-            self.assertEqual(
-                terminal.error_code, "model_checkpoint_unconfirmed"
-            )
-            self.assertEqual(adapter.call_count, 1)
+            self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+            self.assertEqual(adapter.call_count, 2)
 
         memory_clock = FakeClock()
         memory_store = FailingInMemoryStore(
             payload_codec=PlaintextPayloadCodec(), clock=memory_clock
         )
-        await assert_no_replay(memory_store, memory_clock)
+        await assert_replay(memory_store, memory_clock)
 
         with tempfile.TemporaryDirectory() as tmp:
             sqlite_clock = FakeClock()
@@ -4518,7 +4727,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 clock=sqlite_clock,
             )
             try:
-                await assert_no_replay(sqlite_store, sqlite_clock)
+                await assert_replay(sqlite_store, sqlite_clock)
             finally:
                 sqlite_store.close()
 

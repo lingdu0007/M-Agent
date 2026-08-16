@@ -881,7 +881,10 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             try:
-                recovered_model = TransientThenSuccessModel(transient_failures=0)
+                recovered_model = TransientThenSuccessModel(transient_failures=1)
+                # The fake's configured behavior is frozen; only its
+                # test-observation counter reflects the prior process call.
+                recovered_model.call_count = 1
                 recovered_runner, _, _ = make_runner(
                     recovered_model,
                     retry_policy=RetryPolicy(max_attempts=2),
@@ -890,7 +893,7 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 terminal = await recovered_runner.resume_run(created.run_id)
 
                 self.assertEqual(terminal.status, RunStatus.SUCCEEDED)
-                self.assertEqual(first_model.call_count + recovered_model.call_count, 2)
+                self.assertEqual(len(recovered_model.requests), 1)
                 recovered = await recovered_runner.inspect_run(created.run_id)
                 recovered_steps = [
                     step for step in recovered.steps if step.step_type is StepType.MODEL
@@ -1025,7 +1028,7 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 clock=FakeClock(start=lease_expires_at + timedelta(seconds=1)),
             )
             try:
-                recovered_model = TransientThenSuccessModel(transient_failures=0)
+                recovered_model = TransientThenSuccessModel(transient_failures=1)
                 runner, _, _ = make_runner(
                     recovered_model,
                     # 第二进程试图放宽策略也不能影响原 Run。
@@ -1060,7 +1063,10 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 clock=FakeClock(start=lease_expires_at + timedelta(seconds=1)),
             )
             try:
-                recovered_model = TransientThenSuccessModel(transient_failures=0)
+                recovered_model = TransientThenSuccessModel(transient_failures=1)
+                # Preserve the fake's first-process observation without
+                # changing its frozen behavior configuration.
+                recovered_model.call_count = 1
                 runner, _, _ = make_runner(
                     recovered_model,
                     retry_policy=RetryPolicy(max_attempts=1),
@@ -1069,7 +1075,7 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 terminal = await runner.resume_run(run_id)
 
                 self.assertEqual(terminal.status, RunStatus.SUCCEEDED)
-                self.assertEqual(recovered_model.call_count, 1)
+                self.assertEqual(len(recovered_model.requests), 1)
                 inspection = await runner.inspect_run(run_id)
                 attempts = [
                     attempt
