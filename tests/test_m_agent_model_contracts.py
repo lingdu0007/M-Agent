@@ -47,6 +47,20 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(
+            json.loads(
+                ModelCapabilities(streaming=True).model_dump_json(
+                    include={"streaming"}
+                )
+            ),
+            {"streaming": True},
+        )
+        self.assertIs(
+            ModelCapabilities.model_validate(
+                {"streaming": True, "legacy_extension": "ignored"}
+            ).streaming,
+            True,
+        )
+        self.assertEqual(
             len(
                 ModelCapabilities(
                     streaming=True, tool_calling=True
@@ -81,6 +95,53 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             ).requirements.capabilities.tool_calling,
             ToolCallingMode.NATIVE,
         )
+
+    async def test_legacy_model_adapter_can_construct_and_run(self) -> None:
+        from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelAdapter,
+            ModelCapabilities,
+            ModelResponse,
+            Runner,
+            RunStatus,
+        )
+
+        class LegacyAdapter(ModelAdapter):
+            capabilities = ModelCapabilities()
+
+            async def generate(self, request) -> ModelResponse:
+                return ModelResponse(content="legacy answer")
+
+        unconfigured = AgentDefinition(
+            definition_id="legacy-adapter-unconfigured",
+            version="1",
+            instructions="Reply.",
+            model_adapter=LegacyAdapter(),
+        )
+        self.assertIsNotNone(unconfigured.model_bindings)
+
+        class RegisteredLegacyAdapter(LegacyAdapter):
+            def definition_contract_fingerprint(self) -> str:
+                return "legacy-configuration-v1"
+
+        definition = AgentDefinition(
+            definition_id="legacy-adapter",
+            version="1",
+            instructions="Reply.",
+            model_adapter=RegisteredLegacyAdapter(),
+        )
+        self.assertIsNotNone(definition.model_bindings)
+        registry = DefinitionRegistry()
+        registry.register(definition)
+        runner = Runner(
+            registry, InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        )
+        created = await runner.create_run("legacy-adapter", "1", input="hello")
+        terminal = await runner.start_run(created.run_id)
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(terminal.output, "legacy answer")
 
     async def test_legacy_sqlite_snapshot_is_migrated_and_runs(self) -> None:
         import json
@@ -936,6 +997,63 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         for value in (-1, True, 1.0, "1"):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 ModelUsage(input_tokens=value)
+        empty = ModelUsage()
+        self.assertIs(empty.provenance, UsageProvenance.UNAVAILABLE)
+        self.assertTrue(
+            all(
+                getattr(empty, f"{field}_provenance")
+                is UsageProvenance.UNAVAILABLE
+                for field in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "reasoning_tokens",
+                )
+            )
+        )
+
+    async def test_contract_violation_failure_message_is_redacted(self) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelContractViolationError,
+            Runner,
+            RunStatus,
+        )
+
+        class InvalidatingAdapter(DeterministicModelAdapter):
+            def validate_response(self, request, response):
+                raise ModelContractViolationError("credential-canary-G27")
+
+        adapter = InvalidatingAdapter(("answer",))
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="redacted-contract-error",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry, InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        )
+        created = await runner.create_run(
+            "redacted-contract-error", "1", input="hello"
+        )
+        terminal = await runner.start_run(created.run_id)
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        inspection = await runner.inspect_run(created.run_id)
+        self.assertEqual(
+            inspection.attempts[0].error,
+            "adapter failure diagnostic redacted",
+        )
+        self.assertNotIn("credential-canary-G27", inspection.attempts[0].error)
 
     def test_quantitative_model_contract_values_reject_booleans(self) -> None:
         from pydantic import ValidationError
@@ -1000,7 +1118,9 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         bindings = ModelBindingSet.reuse_primary(contract)
         invalid_constructors = (
             lambda: ModelCapabilityCombination(future_mode="NATIVE"),
-            lambda: ModelCapabilities(future_mode="NATIVE"),
+            lambda: ModelCapabilities(
+                streaming="DELTA", future_mode="NATIVE"
+            ),
             lambda: ModelLimits(
                 context_window_tokens=128,
                 max_output_tokens=32,

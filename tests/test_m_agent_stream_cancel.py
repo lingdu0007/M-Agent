@@ -100,6 +100,18 @@ class StreamToolThenFinal(DeterministicStreamingModelAdapter):
             yield ModelResponse(content="final answer")
 
 
+class StreamResponseThenDelta(DeterministicStreamingModelAdapter):
+    """Malformed stream: a delta follows the terminal complete response."""
+
+    async def stream(
+        self, request: ModelRequest,
+    ) -> "asyncio.AsyncIterator[ModelDelta | ModelResponse]":
+        self.call_count += 1
+        self._last_request = request
+        yield ModelResponse(content="complete")
+        yield ModelDelta(content="late")
+
+
 class StreamFailsThenSucceeds(DeterministicStreamingModelAdapter):
     """第一次尝试发出 ``fail_after_delta`` 个 delta 后抛 TRANSIENT，
     第二次尝试完整成功（模拟部分输出后失败并重试）。"""
@@ -529,6 +541,20 @@ class StreamingRunUpdateTests(unittest.IsolatedAsyncioTestCase):
         restored = deserialize_model_response(checkpoints[0].output)
         self.assertEqual(restored.content, "Hello world")
         self.assertEqual(restored.tool_calls, ())
+
+    async def test_stream_rejects_data_after_complete_response(self) -> None:
+        model = StreamResponseThenDelta()
+        runner, _, _ = make_runner(model)
+        created = await runner.create_run("assistant", "1.0", input="hi")
+        result = await runner.start_run(created.run_id)
+
+        self.assertIs(result.status, RunStatus.FAILED)
+        self.assertEqual(result.error_code, "MODEL_CONTRACT_VIOLATION")
+        inspection = await runner.inspect_run(created.run_id)
+        self.assertEqual(len(model_checkpoints(inspection)), 0)
+        self.assertEqual(
+            inspection.attempts[0].error_code, "MODEL_CONTRACT_VIOLATION"
+        )
 
     async def test_full_response_checkpointed_before_dependent_work(
         self,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import timedelta
+import hashlib
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -27,8 +28,10 @@ from ._model import (
     ModelCapabilities,
     ModelContract,
     ModelExecutionBudget,
+    ModelLimits,
     ModelPurpose,
     ModelRequirements,
+    RevisionStability,
     ToolCallingMode,
 )
 from ._tools import Tool, ToolDeclaration, ToolEffect
@@ -166,7 +169,7 @@ class AgentDefinition(BaseModel, frozen=True):
             adapter = values.get("model_adapter")
             if isinstance(adapter, ModelAdapter):
                 values["model_bindings"] = ModelBindingSet.reuse_primary(
-                    adapter.model_contract, requirements
+                    cls._model_contract_for(adapter), requirements
                 )
         elif values.get("model_execution_budget") is None:
             # Supplying the complete Binding Set is the new typed construction
@@ -210,10 +213,39 @@ class AgentDefinition(BaseModel, frozen=True):
         )
 
     @staticmethod
+    def _model_contract_for(adapter: ModelAdapter) -> ModelContract:
+        """Resolve a typed Contract or synthesize the 0.2 direct-adapter view."""
+        try:
+            return adapter.model_contract
+        except ValueError:
+            if (
+                getattr(type(adapter), "model_contract", None)
+                is not ModelAdapter.model_contract
+            ):
+                raise
+        identity = f"{type(adapter).__module__}.{type(adapter).__qualname__}"
+        contract_identity = hashlib.sha256(identity.encode()).hexdigest()[:16]
+        configuration_fingerprint = adapter.definition_contract_fingerprint()
+        return ModelContract(
+            contract_id=f"legacy-{contract_identity}",
+            version="0.2",
+            revision_stability=RevisionStability.PROVIDER_ALIAS,
+            model_identity=f"legacy:{identity}",
+            capabilities=adapter.capabilities,
+            limits=ModelLimits(
+                context_window_tokens=1_000_000,
+                max_output_tokens=1_000_000,
+            ),
+            input_sizer_id="legacy-0.2",
+            serialization_id="legacy-0.2",
+            configuration_fingerprint=configuration_fingerprint or None,
+        )
+
+    @staticmethod
     def _adapter_configuration_fingerprint(
         adapter: ModelAdapter, contract: ModelContract
     ) -> str:
-        if adapter.model_contract != contract:
+        if AgentDefinition._model_contract_for(adapter) != contract:
             raise ModelCapabilityError(
                 "Model Binding Adapter owner does not match its Model Contract"
             )
@@ -241,7 +273,7 @@ class AgentDefinition(BaseModel, frozen=True):
 
     def effective_model_bindings(self) -> ModelBindingSet:
         requirements = self.effective_model_requirements()
-        contract = self.model_adapter.model_contract
+        contract = self._model_contract_for(self.model_adapter)
         bindings = self.model_bindings.resolved()
         primary = bindings.for_purpose(ModelPurpose.PRIMARY)
         if primary.contract != contract:
@@ -361,7 +393,7 @@ class DefinitionRegistry:
             adapter_key = id(adapter)
             adapter_contract = adapter_contracts.get(adapter_key)
             if adapter_contract is None:
-                adapter_contract = adapter.model_contract
+                adapter_contract = definition._model_contract_for(adapter)
                 ceiling_match = adapter.capabilities.capability_ceiling_match(
                     adapter_contract.capabilities
                 )

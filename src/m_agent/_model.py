@@ -181,6 +181,26 @@ class ModelCapabilities(_FrozenModelValue):
         default_factory=tuple
     )
 
+    # Keep direct 0.2 capability declarations tolerant of extension fields.
+    # Typed Contract values below remain closed once a protocol mode is named.
+    model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unknown_typed_fields(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        values = dict(value)
+        known = set(_CAPABILITY_MODE_TYPES) | {"supported_combinations"}
+        unknown = set(values) - known
+        typed = any(
+            field in values and not isinstance(values[field], bool)
+            for field in _CAPABILITY_MODE_TYPES
+        )
+        if unknown and typed:
+            raise ValueError("typed model capabilities reject unknown fields")
+        return values
+
     @property
     def _uses_legacy_boolean_surface(self) -> bool:
         return not any(
@@ -214,8 +234,11 @@ class ModelCapabilities(_FrozenModelValue):
     def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
         if not self._uses_legacy_boolean_surface:
             return super().model_dump_json(*args, **kwargs)
+        payload = json.loads(super().model_dump_json(*args, **kwargs))
+        if isinstance(payload, dict):
+            payload.pop("supported_combinations", None)
         return json.dumps(
-            self.model_dump(mode="json"),
+            payload,
             ensure_ascii=kwargs.get("ensure_ascii", False),
             indent=kwargs.get("indent"),
             separators=(",", ":") if kwargs.get("indent") is None else None,
@@ -807,6 +830,18 @@ class ModelUsage(_FrozenModelValue):
                 UsageProvenance.UNAVAILABLE
                 if value is None
                 else source or self.provenance
+            )
+        if all(
+            getattr(self, field) is None
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "reasoning_tokens",
+            )
+        ):
+            object.__setattr__(
+                self, "provenance", UsageProvenance.UNAVAILABLE
             )
         return self
 

@@ -87,7 +87,7 @@ from ._errors import (
     RunNotFoundError,
     StaleRunVersionError,
 )
-from ._failure import ToolFailure, classify_exception
+from ._failure import ToolFailure, classify_exception, redact_failure_message
 from ._model import (
     ModelAdapter,
     ModelBindingSet,
@@ -1011,9 +1011,14 @@ class Runner:
           CANCELLED，不把不完整的输出当作 checkpoint。
         """
         generator = adapter.stream(request)
+        response: ModelResponse | None = None
         try:
             async for event in generator:
                 if isinstance(event, ModelDelta):
+                    if response is not None:
+                        raise ModelContractViolationError(
+                            "stream adapter yielded data after complete ModelResponse"
+                        )
                     self._publish(
                         RunUpdate(
                             run_id=run.run_id,
@@ -1027,7 +1032,11 @@ class Runner:
                     if self._cancel_requested(run.run_id):
                         return None
                 elif isinstance(event, ModelResponse):
-                    return event
+                    if response is not None:
+                        raise ModelContractViolationError(
+                            "stream adapter yielded multiple complete ModelResponses"
+                        )
+                    response = event
                 else:
                     raise ModelContractViolationError(
                         f"stream adapter {type(adapter).__name__} yielded "
@@ -1041,6 +1050,8 @@ class Runner:
                 await generator.aclose()
             except (RuntimeError, StopAsyncIteration):
                 pass
+        if response is not None:
+            return response
         raise ModelContractViolationError(
             f"stream adapter {type(adapter).__name__} ended without "
             "yielding a complete ModelResponse"
@@ -2180,12 +2191,12 @@ class Runner:
                 if isinstance(exc, ModelCapabilityError):
                     classification = FailureClassification.PERMANENT
                     code = exc.code
-                    message = str(exc)
+                    message = redact_failure_message("")
                     terminal_error_code = code
                 elif isinstance(exc, ModelContractViolationError):
                     classification = FailureClassification.PERMANENT
                     code = exc.code
-                    message = str(exc)
+                    message = redact_failure_message("")
                     terminal_error_code = code
                 else:
                     classification, code, message = classify_exception(exc)
