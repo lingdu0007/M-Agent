@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
 
@@ -149,6 +150,27 @@ class InMemoryRunStore:
                 f"{expected_version}, authoritative version is "
                 f"{current.version}; no step was started"
             )
+        self._check_lease(current, owner)
+
+    async def prepare_model_dispatch(
+        self,
+        run_id: str,
+        expected_version: int,
+        owner: str,
+        *,
+        guard: Callable[[], None],
+    ) -> None:
+        """Validate a Model binding, then its lease, without an await gap."""
+        current = self._runs.get(run_id)
+        if current is None:
+            raise RunNotFoundError(f"run {run_id} not found")
+        if current.version != expected_version:
+            raise StaleRunVersionError(
+                f"stale dispatch for run {run_id}: expected version "
+                f"{expected_version}, authoritative version is "
+                f"{current.version}; no step was started"
+            )
+        guard()
         self._check_lease(current, owner)
 
     def _check_lease(self, stored: _StoredRun, owner: str) -> None:

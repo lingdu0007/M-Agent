@@ -23,6 +23,7 @@ Step Attempt、Checkpoint、乐观版本号、Run Lease（owner / 期限）与
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import sqlite3
 from datetime import datetime, timedelta
@@ -419,6 +420,41 @@ class SQLiteRunStore:
                 f"{expected_version}, authoritative version is "
                 f"{row['version']}; no step was started"
             )
+        expires_at = (
+            datetime.fromisoformat(row["lease_expires_at"])
+            if row["lease_expires_at"] is not None
+            else None
+        )
+        now = self._clock.now()
+        if row["lease_owner"] != owner or expires_at is None or expires_at <= now:
+            raise LeaseNotHeldError(
+                f"run {run_id} lease is not held by {owner!r} "
+                f"(owner={row['lease_owner']!r}, expires={expires_at}, now={now})"
+            )
+
+    async def prepare_model_dispatch(
+        self,
+        run_id: str,
+        expected_version: int,
+        owner: str,
+        *,
+        guard: Callable[[], None],
+    ) -> None:
+        """Validate a Model binding, then its lease, without an await gap."""
+        row = self._conn.execute(
+            "SELECT version, lease_owner, lease_expires_at FROM runs"
+            " WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise RunNotFoundError(f"run {run_id} not found")
+        if row["version"] != expected_version:
+            raise StaleRunVersionError(
+                f"stale dispatch for run {run_id}: expected version "
+                f"{expected_version}, authoritative version is "
+                f"{row['version']}; no step was started"
+            )
+        guard()
         expires_at = (
             datetime.fromisoformat(row["lease_expires_at"])
             if row["lease_expires_at"] is not None

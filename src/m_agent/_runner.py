@@ -2027,22 +2027,21 @@ class Runner:
                     cancelled = await self._maybe_cancel(run, lease)
                     if cancelled is not None:
                         return cancelled, None
-                self._assert_adapter_contract_matches_snapshot(
-                    run, definition
+
+                def assert_final_model_dispatch() -> None:
+                    self._assert_adapter_contract_matches_snapshot(
+                        run, definition
+                    )
+                    assert_model_request_compatible(
+                        model_contract, request, streaming=streaming
+                    )
+
+                await self._store.prepare_model_dispatch(
+                    run.run_id,
+                    expected_version=run.version,
+                    owner=lease.owner,
+                    guard=assert_final_model_dispatch,
                 )
-                assert_model_request_compatible(
-                    model_contract, request, streaming=streaming
-                )
-                # The lease assertion awaits. Recheck the frozen binding only
-                # after it returns so configuration cannot drift in that window.
-                await self._assert_step_dispatch(run, lease)
-                self._assert_adapter_contract_matches_snapshot(run, definition)
-                assert_model_request_compatible(
-                    model_contract, request, streaming=streaming
-                )
-                # The synchronous contract hooks above may take long enough
-                # for the lease to expire, so guard immediately before dispatch.
-                await self._assert_step_dispatch(run, lease)
                 if streaming:
                     response = await self._stream_model(
                         adapter,
@@ -2063,6 +2062,7 @@ class Runner:
                 ):
                     observed_usage = response.usage
                 response = adapter.validate_response(request, response)
+                self._assert_adapter_contract_matches_snapshot(run, definition)
                 response = normalize_model_response(
                     model_contract,
                     response,

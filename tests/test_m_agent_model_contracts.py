@@ -1853,6 +1853,72 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
+    async def test_deterministic_container_state_is_frozen_in_binding(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelResponse,
+            Runner,
+        )
+
+        class ListConfiguredAdapter(DeterministicModelAdapter):
+            def __init__(self, answers: list[str]) -> None:
+                super().__init__(("unused",))
+                self.answers = answers
+
+            async def generate(self, request) -> ModelResponse:
+                self.call_count += 1
+                self._last_request = request
+                return ModelResponse(content=self.answers[0])
+
+        def registry(
+            answer: str,
+        ) -> tuple[DefinitionRegistry, ListConfiguredAdapter]:
+            adapter = ListConfiguredAdapter([answer])
+            result = DefinitionRegistry()
+            result.register(
+                AgentDefinition.for_adapter(
+                    definition_id="list-configured-deterministic",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                )
+            )
+            return result, adapter
+
+        async def assert_drift_rejected(store) -> None:
+            original_registry, _ = registry("ORIGINAL")
+            created = await Runner(original_registry, store).create_run(
+                "list-configured-deterministic", "1", "hello"
+            )
+            changed_registry, changed_adapter = registry("DRIFTED")
+
+            with self.assertRaisesRegex(RuntimeError, "snapshot Model Contract"):
+                await Runner(changed_registry, store).start_run(created.run_id)
+
+            self.assertEqual(changed_adapter.call_count, 0)
+
+        await assert_drift_rejected(
+            InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteRunStore(
+                os.path.join(tmp, "list-configured-deterministic.db"),
+                payload_codec=PlaintextPayloadCodec(),
+            )
+            try:
+                await assert_drift_rejected(store)
+            finally:
+                store.close()
+
     async def test_streaming_response_tool_call_requires_declared_combination(
         self,
     ) -> None:
@@ -2181,6 +2247,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
+            ModelResponse,
             Runner,
             RunStatus,
         )
@@ -2557,6 +2624,55 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         usage = inspection.attempts[0].usage
         assert usage is not None
         self.assertEqual((usage.input_tokens, usage.output_tokens), (7, 3))
+
+    async def test_validation_policy_drift_fails_without_checkpoint(
+        self,
+    ) -> None:
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+        )
+
+        class PolicyChangingAdapter(DeterministicModelAdapter):
+            def __init__(self) -> None:
+                super().__init__(("accepted",))
+                self.validation_policy = "policy-a"
+
+            def validate_response(self, request, response):
+                self.validation_policy = "policy-b"
+                return response
+
+        adapter = PolicyChangingAdapter()
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="validation-policy-drift",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        runner = Runner(
+            registry,
+            InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+
+        created = await runner.create_run(
+            "validation-policy-drift", "1", "hi"
+        )
+        terminal = await runner.start_run(created.run_id)
+        inspection = await runner.inspect_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(inspection.checkpoints, [])
 
     async def test_actual_provider_revision_is_persisted_with_response(self) -> None:
         from m_agent import deserialize_model_response
@@ -3483,11 +3599,11 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self._armed = reserved
                 return reserved
 
-            async def assert_lease(self, *args, **kwargs) -> None:
-                await super().assert_lease(*args, **kwargs)
+            async def prepare_model_dispatch(self, *args, **kwargs) -> None:
                 if self._armed:
                     self._armed = False
                     self._adapter.expire_on_contract_read = True
+                await super().prepare_model_dispatch(*args, **kwargs)
 
         adapter = LeaseExpiringAdapter()
         registry = DefinitionRegistry()
@@ -4780,21 +4896,13 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         class YieldingFinalLeaseStore(InMemoryRunStore):
             def __init__(self) -> None:
                 super().__init__(payload_codec=PlaintextPayloadCodec())
-                self._reserved_model_attempt = False
                 self.final_lease_guard_entered = asyncio.Event()
                 self.allow_final_lease_guard = asyncio.Event()
 
-            async def reserve_model_attempt(self, *args, **kwargs) -> bool:
-                reserved = await super().reserve_model_attempt(*args, **kwargs)
-                self._reserved_model_attempt = reserved
-                return reserved
-
-            async def assert_lease(self, *args, **kwargs) -> None:
-                await super().assert_lease(*args, **kwargs)
-                if self._reserved_model_attempt:
-                    self.final_lease_guard_entered.set()
-                    await self.allow_final_lease_guard.wait()
-                    self._reserved_model_attempt = False
+            async def prepare_model_dispatch(self, *args, **kwargs) -> None:
+                self.final_lease_guard_entered.set()
+                await self.allow_final_lease_guard.wait()
+                await super().prepare_model_dispatch(*args, **kwargs)
 
         adapter = MutableFingerprintAdapter()
         registry = DefinitionRegistry()

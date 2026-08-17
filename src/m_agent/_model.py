@@ -1095,6 +1095,7 @@ _FINGERPRINT_EXCLUDED_STATE = {
     "_responses",
     "call_count",
     "capabilities",
+    "requests",
 }
 _SENSITIVE_CONFIGURATION_NAMES = (
     "credential",
@@ -1115,11 +1116,40 @@ def _deterministic_configuration_value(value: object) -> object:
         return value.value
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
-    if isinstance(value, tuple):
-        values = tuple(_deterministic_configuration_value(item) for item in value)
+    if isinstance(value, (tuple, list)):
+        values = tuple(
+            _deterministic_configuration_value(item) for item in value
+        )
         if any(item is _UNFINGERPRINTABLE_CONFIGURATION for item in values):
             return _UNFINGERPRINTABLE_CONFIGURATION
         return values
+    if isinstance(value, Mapping):
+        values: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                return _UNFINGERPRINTABLE_CONFIGURATION
+            normalized = _deterministic_configuration_value(item)
+            if normalized is _UNFINGERPRINTABLE_CONFIGURATION:
+                return _UNFINGERPRINTABLE_CONFIGURATION
+            values[key] = normalized
+        return values
+    if isinstance(value, (set, frozenset)):
+        values = tuple(
+            _deterministic_configuration_value(item) for item in value
+        )
+        if any(item is _UNFINGERPRINTABLE_CONFIGURATION for item in values):
+            return _UNFINGERPRINTABLE_CONFIGURATION
+        return tuple(
+            sorted(
+                values,
+                key=lambda item: json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        )
     return _UNFINGERPRINTABLE_CONFIGURATION
 
 
