@@ -70,10 +70,9 @@ class DefinitionSnapshot(BaseModel, frozen=True):
     required_capabilities: ModelCapabilities | None = None
     adapter_capabilities: ModelCapabilities | None = None
     adapter_contract_fingerprint: str = ""
-    #: Run 级与用途级模型 dispatch 尝试硬上限。
-    model_execution_budget: ModelExecutionBudget = Field(
-        default_factory=ModelExecutionBudget
-    )
+    #: Run 级与用途级模型 dispatch 尝试硬上限。None 保留 0.2 快照未声明
+    #: 该新契约时的不设限语义；新 typed helper 总会写入显式预算。
+    model_execution_budget: ModelExecutionBudget | None = None
     #: 能力标识：该 Run 声明了 Context Provider（ADR 0014）。只记录
     #: 是否声明，不序列化 provider 本身（ADR 0023：不持久化 callable）。
     has_context_provider: bool = False
@@ -120,9 +119,10 @@ class AgentDefinition(BaseModel, frozen=True):
     #: omitted value is normalized to PRIMARY reuse; new callers can make that
     #: choice visible with :meth:`for_adapter`.
     model_bindings: ModelBindingSet
-    model_execution_budget: ModelExecutionBudget = Field(
-        default_factory=ModelExecutionBudget
-    )
+    #: Direct 0.2 construction without this field remains unbounded during
+    #: the documented expand window. New typed construction uses for_adapter,
+    #: which freezes the default budget explicitly.
+    model_execution_budget: ModelExecutionBudget | None = None
     model_adapter: ModelAdapter = Field(exclude=True)
     #: Direct non-primary bindings must retain the Adapter instance that owns
     #: their selected Contract. PRIMARY reuse deliberately resolves through
@@ -187,6 +187,8 @@ class AgentDefinition(BaseModel, frozen=True):
             values["model_bindings"] = ModelBindingSet.reuse_primary(
                 adapter.model_contract, requirements
             )
+        if "model_execution_budget" not in values:
+            values["model_execution_budget"] = ModelExecutionBudget()
         return cls(**values)
 
     def effective_model_requirements(self) -> ModelRequirements:

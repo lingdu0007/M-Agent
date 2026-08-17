@@ -1106,37 +1106,56 @@ _SENSITIVE_CONFIGURATION_NAMES = (
 )
 
 
-def _deterministic_configuration_value(value: object) -> object:
-    """Return immutable configuration suitable for a deterministic fingerprint."""
+def _is_sensitive_configuration_name(name: str) -> bool:
+    return any(
+        fragment in name.lower() for fragment in _SENSITIVE_CONFIGURATION_NAMES
+    )
+
+
+def _deterministic_configuration_value(
+    value: object, seen: set[int] | None = None
+) -> object:
+    """Return immutable behavior state suitable for a deterministic fingerprint."""
     if value is None:
-        return _UNFINGERPRINTABLE_CONFIGURATION
+        return None
     if isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, enum.Enum):
         return value.value
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
+    seen = seen if seen is not None else set()
+    value_id = id(value)
+    if value_id in seen:
+        return _UNFINGERPRINTABLE_CONFIGURATION
     if isinstance(value, (tuple, list)):
-        values = tuple(
-            _deterministic_configuration_value(item) for item in value
-        )
+        seen.add(value_id)
+        values = tuple(_deterministic_configuration_value(item, seen) for item in value)
+        seen.remove(value_id)
         if any(item is _UNFINGERPRINTABLE_CONFIGURATION for item in values):
             return _UNFINGERPRINTABLE_CONFIGURATION
         return values
     if isinstance(value, Mapping):
+        seen.add(value_id)
         values: dict[str, object] = {}
         for key, item in value.items():
             if not isinstance(key, str):
+                seen.remove(value_id)
                 return _UNFINGERPRINTABLE_CONFIGURATION
-            normalized = _deterministic_configuration_value(item)
+            if _is_sensitive_configuration_name(key):
+                seen.remove(value_id)
+                return _UNFINGERPRINTABLE_CONFIGURATION
+            normalized = _deterministic_configuration_value(item, seen)
             if normalized is _UNFINGERPRINTABLE_CONFIGURATION:
+                seen.remove(value_id)
                 return _UNFINGERPRINTABLE_CONFIGURATION
             values[key] = normalized
+        seen.remove(value_id)
         return values
     if isinstance(value, (set, frozenset)):
-        values = tuple(
-            _deterministic_configuration_value(item) for item in value
-        )
+        seen.add(value_id)
+        values = tuple(_deterministic_configuration_value(item, seen) for item in value)
+        seen.remove(value_id)
         if any(item is _UNFINGERPRINTABLE_CONFIGURATION for item in values):
             return _UNFINGERPRINTABLE_CONFIGURATION
         return tuple(
@@ -1150,7 +1169,26 @@ def _deterministic_configuration_value(value: object) -> object:
                 ),
             )
         )
-    return _UNFINGERPRINTABLE_CONFIGURATION
+    try:
+        attributes = vars(value)
+    except TypeError:
+        return _UNFINGERPRINTABLE_CONFIGURATION
+    seen.add(value_id)
+    state: dict[str, object] = {}
+    for name, item in attributes.items():
+        if _is_sensitive_configuration_name(name):
+            seen.remove(value_id)
+            return _UNFINGERPRINTABLE_CONFIGURATION
+        normalized = _deterministic_configuration_value(item, seen)
+        if normalized is _UNFINGERPRINTABLE_CONFIGURATION:
+            seen.remove(value_id)
+            return _UNFINGERPRINTABLE_CONFIGURATION
+        state[name] = normalized
+    seen.remove(value_id)
+    return {
+        "type": _deterministic_adapter_type_identity(type(value)),
+        "state": state,
+    }
 
 
 class DeterministicModelAdapter(ModelAdapter):
@@ -1191,27 +1229,37 @@ class DeterministicModelAdapter(ModelAdapter):
         return self._last_request
 
     def _configuration_fingerprint_payload(self) -> dict[str, Any]:
-        """Stable behavior identity, excluding mutable test observation state."""
+        """Stable behavior identity, rejecting unaccounted configuration."""
         payload: dict[str, Any] = {
             "capabilities": self.capabilities.model_dump(mode="json"),
             "responses": self._responses,
         }
         instance_configuration: dict[str, object] = {}
         for name, value in vars(self).items():
-            if (
-                name in _FINGERPRINT_EXCLUDED_STATE
-                or any(
-                    fragment in name.lower()
-                    for fragment in _SENSITIVE_CONFIGURATION_NAMES
-                )
-            ):
+            if name in self._fingerprint_excluded_state():
                 continue
+            if _is_sensitive_configuration_name(name):
+                raise ValueError(
+                    "deterministic adapter state "
+                    f"{name!r} is sensitive and must be explicitly excluded "
+                    "or represented by a custom non-secret fingerprint"
+                )
             normalized = _deterministic_configuration_value(value)
-            if normalized is not _UNFINGERPRINTABLE_CONFIGURATION:
-                instance_configuration[name] = normalized
+            if normalized is _UNFINGERPRINTABLE_CONFIGURATION:
+                raise ValueError(
+                    "deterministic adapter state "
+                    f"{name!r} cannot be fingerprinted; explicitly exclude "
+                    "non-behavioral observation state or provide a custom "
+                    "configuration fingerprint"
+                )
+            instance_configuration[name] = normalized
         if instance_configuration:
             payload["instance_configuration"] = instance_configuration
         return payload
+
+    def _fingerprint_excluded_state(self) -> frozenset[str]:
+        """Explicitly declare mutable observation state outside model behavior."""
+        return frozenset(_FINGERPRINT_EXCLUDED_STATE)
 
     def definition_contract_fingerprint(self) -> str:
         payload = self._configuration_fingerprint_payload()
@@ -1299,14 +1347,7 @@ class DeterministicStreamingModelAdapter(DeterministicModelAdapter):
         self.requests: list[ModelRequest] = []
 
     def _configuration_fingerprint_payload(self) -> dict[str, Any]:
-        return {
-            "capabilities": self.capabilities.model_dump(mode="json"),
-            "chunks": getattr(self, "_chunks", ()),
-            "tool_calls": [
-                call.model_dump(mode="json")
-                for call in getattr(self, "_tool_calls", ())
-            ],
-        }
+        return super()._configuration_fingerprint_payload()
 
     async def stream(
         self, request: ModelRequest,

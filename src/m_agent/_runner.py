@@ -90,6 +90,7 @@ from ._errors import (
 from ._failure import ToolFailure, classify_exception
 from ._model import (
     ModelAdapter,
+    ModelBindingSet,
     ModelDelta,
     ModelPurpose,
     ModelRequest,
@@ -155,6 +156,11 @@ ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED = "MODEL_EXECUTION_BUDGET_EXCEEDED"
 #: recovery. The provider call may have happened; its failed record retains
 #: this evidence before a bounded at-least-once replay gets a new identity.
 ERROR_MODEL_CHECKPOINT_UNCONFIRMED = "model_checkpoint_unconfirmed"
+
+#: A streaming Model dispatch observed a cooperative cancellation before it
+#: produced a checkpointable response. The Run is CANCELLED, while its durable
+#: Model Step and Attempt retain a terminal failure record.
+ERROR_MODEL_DISPATCH_CANCELLED = "MODEL_DISPATCH_CANCELLED"
 
 #: Run Snapshot 未提供唯一 Tool Effect 声明时的稳定错误标识。Runner 不得
 #: 使用恢复进程当前注册的 callable 来猜测该 Run 的重试安全性。
@@ -962,8 +968,12 @@ class Runner:
                 status=StepStatus.RUNNING,
                 model_purpose=purpose,
             ),
-            run_max_attempts=budget.run_max_attempts,
-            purpose_max_attempts=budget.maximum_for(purpose),
+            run_max_attempts=(
+                budget.run_max_attempts if budget is not None else None
+            ),
+            purpose_max_attempts=(
+                budget.maximum_for(purpose) if budget is not None else None
+            ),
             expected_version=run.version,
             lease_owner=lease.owner,
         )
@@ -991,8 +1001,8 @@ class Runner:
         - 流的最后一个 :class:`ModelResponse` 返回给调用方，由调用方
           checkpoint（只有完整响应成为恢复点）；
         - 增量之间检查协作取消：若已请求取消，协作中断流（``aclose``）
-          并返回 None（Run 已由 :meth:`_maybe_cancel` 转 CANCELLED），
-          不把不完整的输出当作 checkpoint。
+          并返回 None；调用方先终结已预留的 Step / Attempt，再把 Run 转
+          CANCELLED，不把不完整的输出当作 checkpoint。
         """
         generator = adapter.stream(request)
         try:
@@ -1008,7 +1018,7 @@ class Runner:
                             content=event.content,
                         )
                     )
-                    if await self._maybe_cancel(run, lease) is not None:
+                    if self._cancel_requested(run.run_id):
                         return None
                 elif isinstance(event, ModelResponse):
                     return event
@@ -1212,7 +1222,9 @@ class Runner:
                     "silently change recovery behavior"
                 )
             return
-        if expected_bindings != definition.effective_model_bindings():
+        if not Runner._model_bindings_match(
+            expected_bindings, definition.effective_model_bindings()
+        ):
             raise RuntimeError(
                 f"run {run.run_id} snapshot Model Contract Binding set does not "
                 "match the resolved definition; refusing to silently change "
@@ -1237,6 +1249,16 @@ class Runner:
                     f"run {run.run_id} resolved live adapter has no verifiable "
                     "current configuration fingerprint"
                 )
+
+    @staticmethod
+    def _model_bindings_match(
+        expected: ModelBindingSet, current: ModelBindingSet
+    ) -> bool:
+        """Compare frozen bindings by purpose, not construction tuple order."""
+        return all(
+            expected.for_purpose(purpose) == current.for_purpose(purpose)
+            for purpose in ModelPurpose
+        )
 
     async def _resume_running(
         self, run: RunRecord, lease: RunLease
@@ -1357,7 +1379,26 @@ class Runner:
                     model_purpose=inflight_model_attempt.model_purpose,
                     usage=inflight_model_attempt.usage,
                 )
-            recovery_model_step_id = inflight_model_step.step_id
+            attempts_for_step = sum(
+                attempt.step_id == inflight_model_step.step_id
+                for attempt in persisted_attempts
+            )
+            if self._recovery_replay_allowed(
+                run.snapshot.retry_policy if run.snapshot is not None else None,
+                attempts_for_step,
+            ):
+                recovery_model_step_id = inflight_model_step.step_id
+            else:
+                await self._record_failed_step(
+                    run,
+                    lease,
+                    inflight_model_step.step_id,
+                    StepType.MODEL,
+                    error_code=ERROR_MODEL_CHECKPOINT_UNCONFIRMED,
+                )
+                return await self._fail_run(
+                    run, lease, ERROR_MODEL_CHECKPOINT_UNCONFIRMED
+                )
         if (
             last_model_step is not None
             and last_model_step.status is StepStatus.FAILED
@@ -2052,8 +2093,40 @@ class Runner:
                         attempt_id,
                     )
                     if response is None:
-                        # 流内安全边界已取消：Run 已转 CANCELLED。
-                        return await self._get_existing_run(run.run_id), None
+                        # The reservation is authoritative evidence that a
+                        # streaming dispatch started. Close both children
+                        # before transitioning the parent Run to CANCELLED.
+                        if not self._cancel_requested(run.run_id):
+                            raise ModelContractViolationError(
+                                "stream adapter ended without a complete "
+                                "ModelResponse"
+                            )
+                        await self._record_failed_attempt(
+                            run,
+                            lease,
+                            step_id,
+                            (
+                                FailureClassification.PERMANENT,
+                                ERROR_MODEL_DISPATCH_CANCELLED,
+                                "streaming model dispatch cancelled",
+                            ),
+                            StepType.MODEL,
+                            attempt_id=attempt_id,
+                            model_purpose=purpose,
+                        )
+                        await self._record_failed_step(
+                            run,
+                            lease,
+                            step_id,
+                            StepType.MODEL,
+                            error_code=ERROR_MODEL_DISPATCH_CANCELLED,
+                        )
+                        cancelled = await self._maybe_cancel(run, lease)
+                        if cancelled is not None:
+                            return cancelled, None
+                        raise RuntimeError(
+                            "streaming model cancellation was not finalized"
+                        )
                 else:
                     response = await adapter.generate(request)
                 self._assert_adapter_contract_matches_snapshot(run, definition)
@@ -2642,6 +2715,13 @@ class Runner:
         ):
             return False
         return attempt_count < policy.max_attempts
+
+    @staticmethod
+    def _recovery_replay_allowed(
+        policy: RetryPolicy | None, attempt_count: int
+    ) -> bool:
+        """Require explicit frozen retry authority for uncertain re-dispatch."""
+        return policy is not None and attempt_count < policy.max_attempts
 
     @staticmethod
     async def _sleep(delay: timedelta) -> None:

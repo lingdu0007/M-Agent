@@ -1919,6 +1919,81 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
+    async def test_deterministic_object_state_is_frozen_or_rejected(
+        self,
+    ) -> None:
+        """Custom behavior state must not disappear from a frozen binding."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelResponse,
+            Runner,
+        )
+
+        class Strategy:
+            def __init__(self, answer: str) -> None:
+                self.answer = answer
+
+        class StrategyAdapter(DeterministicModelAdapter):
+            def __init__(self, answer: str) -> None:
+                super().__init__(("unused",))
+                self.strategy = Strategy(answer)
+
+            async def generate(self, request) -> ModelResponse:
+                self.call_count += 1
+                self._last_request = request
+                return ModelResponse(content=self.strategy.answer)
+
+        original = StrategyAdapter("OLD")
+        initial_registry = DefinitionRegistry()
+        initial_registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="object-configured-deterministic",
+                version="1",
+                instructions="Reply.",
+                model_adapter=original,
+            )
+        )
+        store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        created = await Runner(initial_registry, store).create_run(
+            "object-configured-deterministic", "1", "hello"
+        )
+
+        changed = StrategyAdapter("NEW")
+        changed_registry = DefinitionRegistry()
+        changed_registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="object-configured-deterministic",
+                version="1",
+                instructions="Reply.",
+                model_adapter=changed,
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "snapshot Model Contract"):
+            await Runner(changed_registry, store).start_run(created.run_id)
+        self.assertEqual(changed.call_count, 0)
+
+        class SensitiveStateAdapter(DeterministicModelAdapter):
+            def __init__(self) -> None:
+                super().__init__(("unused",))
+                self.api_key = "must-not-be-ignored"
+
+        with self.assertRaisesRegex(ValueError, "api_key"):
+            DefinitionRegistry().register(
+                AgentDefinition.for_adapter(
+                    definition_id="sensitive-deterministic",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_adapter=SensitiveStateAdapter(),
+                )
+            )
+
     async def test_streaming_response_tool_call_requires_declared_combination(
         self,
     ) -> None:
@@ -3085,6 +3160,51 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original.call_count, 0)
         self.assertEqual(changed.call_count, 0)
 
+    async def test_reordered_binding_set_preserves_recovery_semantics(
+        self,
+    ) -> None:
+        """Bindings are a purpose mapping, not a construction-order contract."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelBindingSet,
+            Runner,
+            RunStatus,
+        )
+
+        adapter = DeterministicModelAdapter(("answer",))
+        bindings = ModelBindingSet.reuse_primary(adapter.model_contract)
+
+        def definition(model_bindings: ModelBindingSet) -> AgentDefinition:
+            return AgentDefinition.for_adapter(
+                definition_id="binding-order",
+                version="1",
+                instructions="Reply.",
+                model_bindings=model_bindings,
+                model_adapter=adapter,
+            )
+
+        initial_registry = DefinitionRegistry()
+        initial_registry.register(definition(bindings))
+        store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
+        created = await Runner(initial_registry, store).create_run(
+            "binding-order", "1", "hello"
+        )
+
+        reordered_registry = DefinitionRegistry()
+        reordered_registry.register(
+            definition(ModelBindingSet(bindings=tuple(reversed(bindings.bindings))))
+        )
+        result = await Runner(reordered_registry, store).start_run(created.run_id)
+
+        self.assertIs(result.status, RunStatus.SUCCEEDED)
+        self.assertEqual(adapter.call_count, 1)
+
     async def test_deterministic_adapter_type_is_frozen_before_dispatch(
         self,
     ) -> None:
@@ -3807,6 +3927,87 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
+    async def test_legacy_definition_does_not_gain_an_implicit_model_cap(
+        self,
+    ) -> None:
+        """The documented 0.2 construction path remains unbounded in 0.2.x."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelResponse,
+            Runner,
+            RunStatus,
+            ToolCall,
+            ToolCallingMode,
+            ToolEffect,
+            ToolOutcome,
+        )
+
+        class EightToolsThenAnswer(DeterministicModelAdapter):
+            def __init__(self) -> None:
+                super().__init__(
+                    ("unused",),
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    ),
+                )
+
+            async def generate(self, request) -> ModelResponse:
+                self.call_count += 1
+                self._last_request = request
+                if self.call_count <= 8:
+                    return ModelResponse(
+                        tool_calls=(
+                            ToolCall(
+                                call_id=f"lookup-{self.call_count}",
+                                tool_name="lookup",
+                                arguments="{}",
+                            ),
+                        )
+                    )
+                return ModelResponse(content="ninth model response")
+
+        adapter = EightToolsThenAnswer()
+        tool = DeterministicTool(
+            name="lookup",
+            effect=ToolEffect.READ_ONLY,
+            handler=lambda request: ToolOutcome.success(
+                request.call_id, request.tool_name, "found"
+            ),
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition(
+                definition_id="legacy-unbounded-model-loop",
+                version="1",
+                instructions="Use the tool until the answer is ready.",
+                model_adapter=adapter,
+                tools=(tool,),
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+        created = await runner.create_run(
+            "legacy-unbounded-model-loop", "1", "hello"
+        )
+        assert created.snapshot is not None
+        self.assertIsNone(created.snapshot.model_execution_budget)
+
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(terminal.output, "ninth model response")
+        self.assertEqual(adapter.call_count, 9)
+
     async def test_usage_keeps_unavailable_and_rejects_missing_required_fields(
         self,
     ) -> None:
@@ -4365,6 +4566,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             AgentDefinition,
             DefinitionRegistry,
             ModelExecutionBudget,
+            RetryPolicy,
             Runner,
             RunStatus,
             StepStatus,
@@ -4427,6 +4629,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                         output_repair_max_attempts=0,
                     ),
                     model_adapter=adapter,
+                    retry_policy=RetryPolicy(max_attempts=2),
                 )
             )
             store = SQLiteRunStore(
@@ -4477,6 +4680,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
+            RetryPolicy,
             Runner,
             RunStatus,
             StepStatus,
@@ -4515,6 +4719,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     version="1",
                     instructions="Reply.",
                     model_adapter=adapter,
+                    retry_policy=RetryPolicy(max_attempts=2),
                 )
             )
             return registry, adapter
@@ -4609,6 +4814,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             DefinitionRegistry,
             ModelResponse,
             ModelUsage,
+            RetryPolicy,
             Runner,
             RunStatus,
             StepStatus,
@@ -4657,6 +4863,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     version="1",
                     instructions="Reply.",
                     model_adapter=adapter,
+                    retry_policy=RetryPolicy(max_attempts=2),
                 )
             )
             return registry, adapter
@@ -4760,6 +4967,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
+            RetryPolicy,
             Runner,
             RunStatus,
             StepStatus,
@@ -4795,6 +5003,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                     version="1",
                     instructions="Reply.",
                     model_adapter=adapter,
+                    retry_policy=RetryPolicy(max_attempts=2),
                 )
             )
             created = await Runner(registry, store).create_run(
@@ -4846,6 +5055,66 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
                 await assert_replay(sqlite_store, sqlite_clock)
             finally:
                 sqlite_store.close()
+
+    async def test_recovery_does_not_replay_uncheckpointed_model_without_policy(
+        self,
+    ) -> None:
+        """A budget limit cannot authorize a second uncertain provider call."""
+        from m_agent import DEFAULT_LEASE_TTL, CrashPoint, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+            StepStatus,
+        )
+
+        adapter = DeterministicModelAdapter(("first", "must not dispatch"))
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="unconfirmed-no-retry",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+        clock = FakeClock()
+        store = InMemoryRunStore(
+            payload_codec=PlaintextPayloadCodec(), clock=clock
+        )
+        created = await Runner(registry, store).create_run(
+            "unconfirmed-no-retry", "1", "hello"
+        )
+
+        def crash_before_checkpoint(point: CrashPoint, run_id: str) -> None:
+            if point is CrashPoint.BEFORE_MODEL_CHECKPOINT:
+                raise RuntimeError("interrupt before checkpoint")
+
+        with self.assertRaisesRegex(RuntimeError, "before checkpoint"):
+            await Runner(
+                registry, store, crash_hook=crash_before_checkpoint
+            ).start_run(created.run_id)
+
+        clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+        terminal = await Runner(registry, store).resume_run(created.run_id)
+        inspection = await Runner(registry, store).inspect_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "model_checkpoint_unconfirmed")
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(
+            [attempt.status for attempt in inspection.attempts],
+            [StepStatus.FAILED],
+        )
+        self.assertEqual(
+            [step.status for step in inspection.steps], [StepStatus.FAILED]
+        )
 
     async def test_final_lease_guard_rechecks_binding_before_model_dispatch(
         self,

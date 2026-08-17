@@ -44,7 +44,7 @@ from m_agent import (  # noqa: E402
     Runner,
     SQLiteRunStore,
 )
-from m_agent.runtime import ModelExecutionBudget
+from m_agent.runtime import ModelExecutionBudget, RetryPolicy
 
 _CRASH_EXIT_CODE = 17
 
@@ -133,6 +133,7 @@ def main() -> None:
                 responses=("crash-safe answer",),
             ),
             context_provider=context_provider,
+            retry_policy=RetryPolicy(max_attempts=2),
         )
     )
 

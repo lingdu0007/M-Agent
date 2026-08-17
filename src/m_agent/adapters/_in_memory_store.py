@@ -360,8 +360,8 @@ class InMemoryRunStore:
         step: StepRecord,
         attempt: StepAttempt,
         *,
-        run_max_attempts: int,
-        purpose_max_attempts: int,
+        run_max_attempts: int | None,
+        purpose_max_attempts: int | None,
         expected_version: int,
         lease_owner: str,
     ) -> bool:
@@ -392,8 +392,11 @@ class InMemoryRunStore:
             if stored.model_purpose == attempt.model_purpose.value
         ]
         if (
-            len(model_attempts) >= run_max_attempts
-            or len(purpose_attempts) >= purpose_max_attempts
+            run_max_attempts is not None
+            and len(model_attempts) >= run_max_attempts
+        ) or (
+            purpose_max_attempts is not None
+            and len(purpose_attempts) >= purpose_max_attempts
         ):
             return False
         stored_step = step.model_copy(deep=True)

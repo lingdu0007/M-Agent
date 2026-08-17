@@ -118,6 +118,12 @@ class SyncRunnerTests(unittest.TestCase):
                 self.started = threading.Event()
                 self.release = threading.Event()
 
+            def _fingerprint_excluded_state(self) -> frozenset[str]:
+                return super()._fingerprint_excluded_state() | {
+                    "started",
+                    "release",
+                }
+
             async def generate(self, request: ModelRequest) -> ModelResponse:
                 self.call_count += 1
                 self.started.set()

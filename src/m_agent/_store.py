@@ -249,8 +249,8 @@ class RunStore(Protocol):
         step: StepRecord,
         attempt: StepAttempt,
         *,
-        run_max_attempts: int,
-        purpose_max_attempts: int,
+        run_max_attempts: int | None,
+        purpose_max_attempts: int | None,
         expected_version: int,
         lease_owner: str,
     ) -> bool: ...

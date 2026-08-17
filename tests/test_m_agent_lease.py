@@ -41,6 +41,7 @@ from m_agent import (
     ModelRequest,
     ModelResponse,
     PlaintextPayloadCodec,
+    RetryPolicy,
     Runner,
     RunStatus,
     SQLiteRunStore,
@@ -80,6 +81,10 @@ class GatedLoggingAdapter(DeterministicModelAdapter):
         self._entered = entered
         self._gate = gate
 
+    def _fingerprint_excluded_state(self) -> frozenset[str]:
+        """Lease coordination controls do not select model behavior."""
+        return super()._fingerprint_excluded_state() | {"_entered", "_gate"}
+
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
         with open(self._log_path, "a", encoding="utf-8") as fh:
@@ -104,6 +109,7 @@ def make_registry(
             model_adapter=GatedLoggingAdapter(
                 log_path=log_path, entered=entered, gate=gate
             ),
+            retry_policy=RetryPolicy(max_attempts=2),
         )
     )
     return registry

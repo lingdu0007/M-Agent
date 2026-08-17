@@ -62,6 +62,20 @@ from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 # -- fake 流式模型（确定性，可注入失败/阻塞） --------------------------
 
+
+class ObservationOnlyModelState:
+    """Explicitly exclude test synchronization probes from model behavior."""
+
+    def _fingerprint_excluded_state(self) -> frozenset[str]:
+        return super()._fingerprint_excluded_state() | {
+            "closed",
+            "gate",
+            "release",
+            "second_started",
+            "started",
+        }
+
+
 class StreamToolThenFinal(DeterministicStreamingModelAdapter):
     """第一次流式请求工具 lookup；第二次流式返回最终内容。"""
 
@@ -123,7 +137,7 @@ class StreamFailsThenSucceeds(DeterministicStreamingModelAdapter):
         yield ModelResponse(content="".join(self._chunks))
 
 
-class GatedDeltaStream(DeterministicStreamingModelAdapter):
+class GatedDeltaStream(ObservationOnlyModelState, DeterministicStreamingModelAdapter):
     """第一个 delta 立即发出；第二个 delta 前阻塞在 gate。
 
     用于"运行中检查 checkpoints 为空"与"in-flight adapter 调用时取消"。
@@ -150,7 +164,7 @@ class GatedDeltaStream(DeterministicStreamingModelAdapter):
             self.closed.set()
 
 
-class BlockingNonStreamingModel(DeterministicModelAdapter):
+class BlockingNonStreamingModel(ObservationOnlyModelState, DeterministicModelAdapter):
     """已 dispatch 后阻塞的非流式 Adapter。
 
     测试通过 ``started`` 观察 Adapter 已进入真实 ``generate`` 调用，再经
@@ -183,7 +197,9 @@ class BlockingNonStreamingModel(DeterministicModelAdapter):
         return ModelResponse(content="unexpected follow-up")
 
 
-class BlockingNonStreamingFailureModel(DeterministicModelAdapter):
+class BlockingNonStreamingFailureModel(
+    ObservationOnlyModelState, DeterministicModelAdapter
+):
     """已 dispatch 后阻塞，并返回结构化永久失败的非流式 Adapter。"""
 
     def __init__(self) -> None:
@@ -203,7 +219,9 @@ class BlockingNonStreamingFailureModel(DeterministicModelAdapter):
         )
 
 
-class ToolThenBlockedModel(DeterministicStreamingModelAdapter):
+class ToolThenBlockedModel(
+    ObservationOnlyModelState, DeterministicStreamingModelAdapter
+):
     """第一次流式请求工具；第二次流式阻塞在 gate（用于 Step 间取消：
     第二次模型调用必须被取消阻止，绝不开始）。"""
 
@@ -1081,9 +1099,17 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         # 不完整响应没有成为 checkpoint。
         inspection = await runner.inspect_run(created.run_id)
         self.assertEqual(model_checkpoints(inspection), [])
+        model_steps = [
+            step for step in inspection.steps if step.step_type is StepType.MODEL
+        ]
+        self.assertEqual([step.status for step in model_steps], [StepStatus.FAILED])
+        model_attempts = [
+            attempt
+            for attempt in inspection.attempts
+            if attempt.step_id == model_steps[0].step_id
+        ]
         self.assertEqual(
-            [a for a in inspection.attempts if a.status is StepStatus.SUCCEEDED],
-            [],
+            [attempt.status for attempt in model_attempts], [StepStatus.FAILED]
         )
 
     async def test_cancel_after_terminal_is_rejected(self) -> None:

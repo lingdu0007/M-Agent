@@ -782,8 +782,8 @@ class SQLiteRunStore:
         step: StepRecord,
         attempt: StepAttempt,
         *,
-        run_max_attempts: int,
-        purpose_max_attempts: int,
+        run_max_attempts: int | None,
+        purpose_max_attempts: int | None,
         expected_version: int,
         lease_owner: str,
     ) -> bool:
@@ -834,8 +834,11 @@ class SQLiteRunStore:
                 (attempt.run_id, attempt.model_purpose.value),
             ).fetchone()[0]
             if (
-                model_attempts >= run_max_attempts
-                or purpose_attempts >= purpose_max_attempts
+                run_max_attempts is not None
+                and model_attempts >= run_max_attempts
+            ) or (
+                purpose_max_attempts is not None
+                and purpose_attempts >= purpose_max_attempts
             ):
                 self._conn.rollback()
                 return False

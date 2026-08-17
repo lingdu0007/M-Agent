@@ -47,6 +47,10 @@ class KeyedAdapter(DeterministicModelAdapter):
         super().__init__(responses=responses)
         self.api_key = api_key
 
+    def _fingerprint_excluded_state(self) -> frozenset[str]:
+        """The credential is intentionally non-behavioral test state."""
+        return super()._fingerprint_excluded_state() | {"api_key"}
+
 
 class ExplodingKeyedAdapter(KeyedAdapter):
     """模拟错误 Adapter：把自身凭证误写入裸异常消息。"""
