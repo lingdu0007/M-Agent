@@ -77,6 +77,28 @@ def _capability_mode_supports(
     return available is required
 
 
+_CAPABILITY_MODE_TYPES: dict[str, type[_CapabilityMode]] = {
+    "streaming": StreamingMode,
+    "tool_calling": ToolCallingMode,
+    "structured_output": StructuredOutputMode,
+    "usage_reporting": UsageReportingMode,
+}
+
+
+def _typed_capability_mode(field: str, value: _CapabilityMode | bool) -> _CapabilityMode:
+    """Return the explicit mode behind either public capability representation."""
+    mode_type = _CAPABILITY_MODE_TYPES[field]
+    if type(value) is bool:
+        return (
+            next(mode for mode in mode_type if mode is not mode_type.NONE)
+            if value
+            else mode_type.NONE
+        )
+    if isinstance(value, mode_type):
+        return value
+    raise TypeError(f"invalid {field} capability mode: {value!r}")
+
+
 class RevisionStability(str, enum.Enum):
     PINNED = "PINNED"
     PROVIDER_ALIAS = "PROVIDER_ALIAS"
@@ -143,15 +165,15 @@ class ModelRequirementReason(str, enum.Enum):
 class ModelCapabilities(_FrozenModelValue):
     """Typed Model Contract capability modes.
 
-    Stored contracts and Runner decisions always contain the explicit modes
-    below. During the 0.2 expand window, legacy boolean inputs are normalized
-    at this boundary; the persisted value is always the typed representation.
+    New Contracts and Requirements use explicit modes. Direct 0.2 root calls
+    retain their historical boolean values and serialized shape until the 0.3
+    transition; typed consumers call :meth:`as_typed` at their boundary.
     """
 
-    streaming: StreamingMode = StreamingMode.NONE
-    tool_calling: ToolCallingMode = ToolCallingMode.NONE
-    structured_output: StructuredOutputMode = StructuredOutputMode.NONE
-    usage_reporting: UsageReportingMode = UsageReportingMode.NONE
+    streaming: StreamingMode | bool = False
+    tool_calling: ToolCallingMode | bool = False
+    structured_output: StructuredOutputMode | bool = False
+    usage_reporting: UsageReportingMode | bool = False
     #: Concurrent protocol modes that this Contract expressly permits.  A
     #: multi-mode Contract without this list is invalid rather than implying
     #: that every Cartesian-product pairing is available.
@@ -159,39 +181,45 @@ class ModelCapabilities(_FrozenModelValue):
         default_factory=tuple
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_legacy_boolean_modes(cls, value: object) -> object:
-        """Translate the temporary 0.2 boolean surface into typed modes."""
-        if not isinstance(value, Mapping):
-            return value
-        normalized = dict(value)
-        legacy_modes: tuple[tuple[str, _CapabilityMode], ...] = (
-            ("streaming", StreamingMode.DELTA),
-            ("tool_calling", ToolCallingMode.NATIVE),
-            ("structured_output", StructuredOutputMode.JSON_OBJECT),
-            ("usage_reporting", UsageReportingMode.PROVIDER_REPORTED),
+    @property
+    def _uses_legacy_boolean_surface(self) -> bool:
+        return not any(
+            isinstance(getattr(self, field), _CapabilityMode)
+            for field in _CAPABILITY_MODE_TYPES
         )
-        legacy_input = False
-        for field, enabled_mode in legacy_modes:
-            if type(normalized.get(field)) is bool:
-                normalized[field] = (
-                    enabled_mode if normalized[field] else type(enabled_mode).NONE
-                )
-                legacy_input = True
-        if legacy_input and "supported_combinations" not in normalized:
-            combination = ModelCapabilityCombination.model_validate(
-                {
-                    field: normalized.get(field, type(mode).NONE)
-                    for field, mode in legacy_modes
-                }
-            )
-            if sum(
-                getattr(combination, field).value != "NONE"
-                for field, _ in legacy_modes
-            ) > 1:
-                normalized["supported_combinations"] = (combination,)
-        return normalized
+
+    def _mode_for(self, field: str) -> _CapabilityMode:
+        return _typed_capability_mode(field, getattr(self, field))
+
+    def as_typed(self) -> "ModelCapabilities":
+        """Convert a 0.2 boolean declaration into explicit Contract modes."""
+        values = {
+            field: self._mode_for(field) for field in _CAPABILITY_MODE_TYPES
+        }
+        active = sum(mode.value != "NONE" for mode in values.values())
+        combinations = self.supported_combinations
+        if active > 1 and not combinations:
+            combinations = (ModelCapabilityCombination(**values),)
+        return ModelCapabilities(
+            **values,
+            supported_combinations=combinations,
+        )
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        dumped = super().model_dump(*args, **kwargs)
+        if self._uses_legacy_boolean_surface:
+            dumped.pop("supported_combinations", None)
+        return dumped
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        if not self._uses_legacy_boolean_surface:
+            return super().model_dump_json(*args, **kwargs)
+        return json.dumps(
+            self.model_dump(mode="json"),
+            ensure_ascii=kwargs.get("ensure_ascii", False),
+            indent=kwargs.get("indent"),
+            separators=(",", ":") if kwargs.get("indent") is None else None,
+        )
 
     @model_validator(mode="after")
     def _validate_supported_combinations(self) -> "ModelCapabilities":
@@ -201,8 +229,12 @@ class ModelCapabilities(_FrozenModelValue):
             "structured_output",
             "usage_reporting",
         )
-        active = [field for field in fields if getattr(self, field).value != "NONE"]
-        if len(active) > 1 and not self.supported_combinations:
+        active = [field for field in fields if self._mode_for(field).value != "NONE"]
+        if (
+            len(active) > 1
+            and not self.supported_combinations
+            and not self._uses_legacy_boolean_surface
+        ):
             raise ValueError(
                 "multiple capability modes require supported_combinations"
             )
@@ -214,7 +246,7 @@ class ModelCapabilities(_FrozenModelValue):
             seen.add(key)
             for field in fields:
                 mode = getattr(combination, field)
-                available = getattr(self, field)
+                available = self._mode_for(field)
                 if not _capability_mode_supports(field, available, mode):
                     raise ValueError(
                         "supported combination declares a mode absent from "
@@ -222,7 +254,7 @@ class ModelCapabilities(_FrozenModelValue):
                     )
         for field in active:
             if self.supported_combinations and not any(
-                getattr(combination, field) == getattr(self, field)
+                getattr(combination, field) == self._mode_for(field)
                 for combination in self.supported_combinations
             ):
                 raise ValueError(
@@ -233,7 +265,7 @@ class ModelCapabilities(_FrozenModelValue):
 
     def _supports_combination(self, required: "ModelCapabilities") -> bool:
         requested = sum(
-            getattr(required, field).value != "NONE"
+            required._mode_for(field).value != "NONE"
             for field in (
                 "streaming",
                 "tool_calling",
@@ -242,6 +274,8 @@ class ModelCapabilities(_FrozenModelValue):
             )
         )
         if requested <= 1:
+            return True
+        if self._uses_legacy_boolean_surface and not self.supported_combinations:
             return True
         return any(
             combination.supports(required)
@@ -252,7 +286,7 @@ class ModelCapabilities(_FrozenModelValue):
         """Return whether every requested non-NONE mode is available."""
         modes_match = all(
             _capability_mode_supports(
-                field, getattr(self, field), getattr(required, field)
+                field, self._mode_for(field), required._mode_for(field)
             )
             for field in (
                 "streaming",
@@ -269,10 +303,10 @@ class ModelCapabilities(_FrozenModelValue):
         """Check every protocol the instance Contract declares against this ceiling."""
         combinations = declared.supported_combinations or (
             ModelCapabilityCombination(
-                streaming=declared.streaming,
-                tool_calling=declared.tool_calling,
-                structured_output=declared.structured_output,
-                usage_reporting=declared.usage_reporting,
+                streaming=declared._mode_for("streaming"),
+                tool_calling=declared._mode_for("tool_calling"),
+                structured_output=declared._mode_for("structured_output"),
+                usage_reporting=declared._mode_for("usage_reporting"),
             ),
         )
         for combination in combinations:
@@ -295,9 +329,11 @@ class ModelCapabilities(_FrozenModelValue):
                 ),
             ):
                 if (
-                    getattr(required, field).value != "NONE"
+                    required._mode_for(field).value != "NONE"
                     and not _capability_mode_supports(
-                        field, getattr(self, field), getattr(required, field)
+                        field,
+                        self._mode_for(field),
+                        required._mode_for(field),
                     )
                 ):
                     return ModelRequirementMatch(compatible=False, reason=reason)
@@ -320,8 +356,8 @@ class ModelCapabilities(_FrozenModelValue):
             "usage_reporting",
         )
         for field in fields:
-            left = getattr(self, field)
-            right = getattr(other, field)
+            left = self._mode_for(field)
+            right = other._mode_for(field)
             if left.value == "NONE":
                 values[field] = right
             elif right.value == "NONE":
@@ -372,7 +408,9 @@ class ModelContract(_FrozenModelValue):
     version: str = Field(min_length=1)
     revision_stability: RevisionStability
     model_identity: str = Field(min_length=1)
-    capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
+    capabilities: ModelCapabilities = Field(
+        default_factory=lambda: ModelCapabilities().as_typed()
+    )
     limits: ModelLimits
     input_sizer_id: str = Field(min_length=1)
     serialization_id: str = Field(min_length=1)
@@ -386,10 +424,24 @@ class ModelContract(_FrozenModelValue):
     #: compare it before dispatch; deterministic adapters have no such state.
     configuration_fingerprint: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_contract_capabilities(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        values = dict(value)
+        capabilities = values.get("capabilities")
+        if capabilities is not None:
+            values["capabilities"] = ModelCapabilities.model_validate(
+                capabilities
+            ).as_typed()
+        return values
+
     @model_validator(mode="after")
     def _validate_usage_reporting(self) -> "ModelContract":
         if (
-            self.capabilities.usage_reporting is UsageReportingMode.NONE
+            self.capabilities._mode_for("usage_reporting")
+            is UsageReportingMode.NONE
             and any(
                 getattr(self.usage_guarantees, field)
                 is UsageFieldGuarantee.REQUIRED
@@ -463,9 +515,24 @@ class ModelRequirementMatch(_FrozenModelValue):
 class ModelRequirements(_FrozenModelValue):
     """Minimum semantic and numeric requirements for one model binding."""
 
-    capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
+    capabilities: ModelCapabilities = Field(
+        default_factory=lambda: ModelCapabilities().as_typed()
+    )
     min_context_window_tokens: int = Field(default=1, ge=1)
     min_output_tokens: int = Field(default=1, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_requirement_capabilities(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        values = dict(value)
+        capabilities = values.get("capabilities")
+        if capabilities is not None:
+            values["capabilities"] = ModelCapabilities.model_validate(
+                capabilities
+            ).as_typed()
+        return values
 
     @field_validator("min_context_window_tokens", "min_output_tokens", mode="before")
     @classmethod
@@ -1325,7 +1392,9 @@ class DeterministicStreamingModelAdapter(DeterministicModelAdapter):
     ) -> None:
         if not chunks:
             raise ValueError("chunks must contain at least one string")
-        caps = capabilities or ModelCapabilities(streaming=StreamingMode.DELTA)
+        caps = (
+            capabilities or ModelCapabilities(streaming=StreamingMode.DELTA)
+        ).as_typed()
         if tool_calls and caps.tool_calling is ToolCallingMode.NONE:
             caps = ModelCapabilities(
                 streaming=StreamingMode.DELTA,

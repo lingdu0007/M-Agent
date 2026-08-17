@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from ._codec import PayloadCodec
 from ._definition import DefinitionSnapshot
@@ -177,9 +177,10 @@ class RunStore(Protocol):
     Run transition 的每个权威 mutation 都必须携带 ``expected_version``；
     Runner 写入还会原子校验调用方仍持有**未过期**的租约。dispatch 前
     的 ``assert_lease`` 执行相同 guard，杜绝过期 owner 启动新 Step。
-    Model dispatch 的 ``prepare_model_dispatch`` 在同一无 await 间隙内
-    执行同步 binding guard 后再校验租约，避免配置漂移或同步 hook 改变
-    租约状态后仍启动 provider 调用。
+    ``prepare_model_dispatch`` 与 ``reserve_model_attempt`` 是 Ticket 08
+    typed Model Contract 的可选增强：内置 Store 实现它们以原子预留预算
+    并在无 await 间隙内执行最终 guard。0.2 自定义 Store 不需要实现它们；
+    只有仍使用旧 Definition 路径的 Run 可以走兼容 dispatch。
     """
 
     async def create_run(self, run: RunRecord) -> RunRecord: ...
@@ -203,15 +204,6 @@ class RunStore(Protocol):
 
     async def assert_lease(
         self, run_id: str, expected_version: int, owner: str
-    ) -> None: ...
-
-    async def prepare_model_dispatch(
-        self,
-        run_id: str,
-        expected_version: int,
-        owner: str,
-        *,
-        guard: Callable[[], None],
     ) -> None: ...
 
     async def transition_run(
@@ -243,17 +235,6 @@ class RunStore(Protocol):
         expected_version: int,
         lease_owner: str | None = None,
     ) -> StepAttempt: ...
-
-    async def reserve_model_attempt(
-        self,
-        step: StepRecord,
-        attempt: StepAttempt,
-        *,
-        run_max_attempts: int | None,
-        purpose_max_attempts: int | None,
-        expected_version: int,
-        lease_owner: str,
-    ) -> bool: ...
 
     async def record_checkpoint(
         self,

@@ -161,12 +161,18 @@ class AgentDefinition(BaseModel, frozen=True):
         )
         values["required_capabilities"] = required_capabilities
         values["model_requirements"] = requirements
-        if values.get("model_bindings") is None:
+        uses_legacy_primary_reuse = values.get("model_bindings") is None
+        if uses_legacy_primary_reuse:
             adapter = values.get("model_adapter")
             if isinstance(adapter, ModelAdapter):
                 values["model_bindings"] = ModelBindingSet.reuse_primary(
                     adapter.model_contract, requirements
                 )
+        elif values.get("model_execution_budget") is None:
+            # Supplying the complete Binding Set is the new typed construction
+            # path. It must freeze a hard budget even while the omitted-binding
+            # 0.2 construction path remains compatible and unbounded.
+            values["model_execution_budget"] = ModelExecutionBudget()
         return values
 
     @classmethod

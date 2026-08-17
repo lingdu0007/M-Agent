@@ -1039,6 +1039,14 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         inspection = await runner.inspect_run(created.run_id)
         self.assertEqual(len(inspection.attempts), 1)
         self.assertEqual(inspection.attempts[0].status, StepStatus.FAILED)
+        self.assertEqual(
+            inspection.attempts[0].error_code, "MODEL_DISPATCH_CANCELLED"
+        )
+        self.assertEqual(len(inspection.steps), 1)
+        self.assertEqual(inspection.steps[0].status, StepStatus.FAILED)
+        self.assertEqual(
+            inspection.steps[0].error_code, "MODEL_DISPATCH_CANCELLED"
+        )
 
     async def test_lease_expiry_after_model_reservation_prevents_provider_call(
         self,

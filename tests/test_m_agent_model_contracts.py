@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -34,15 +35,24 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         from m_agent.runtime import ModelPurpose, ToolCallingMode
 
         capabilities = ModelCapabilities(tool_calling=True)
-        self.assertIs(capabilities.tool_calling, ToolCallingMode.NATIVE)
-        self.assertFalse(bool(ModelCapabilities().tool_calling))
+        self.assertIs(capabilities.tool_calling, True)
+        self.assertIs(ModelCapabilities().tool_calling, False)
+        self.assertEqual(
+            json.loads(ModelCapabilities(streaming=True).model_dump_json()),
+            {
+                "streaming": True,
+                "tool_calling": False,
+                "structured_output": False,
+                "usage_reporting": False,
+            },
+        )
         self.assertEqual(
             len(
                 ModelCapabilities(
                     streaming=True, tool_calling=True
                 ).supported_combinations
             ),
-            1,
+            0,
         )
         adapter = DeterministicModelAdapter(
             ("answer",), capabilities=capabilities
@@ -164,7 +174,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(terminal.status, RunStatus.SUCCEEDED)
 
-    async def test_legacy_snapshot_without_fingerprint_refuses_dispatch(
+    async def test_legacy_snapshot_without_fingerprint_preserves_0_2_resume(
         self,
     ) -> None:
         from m_agent.adapters import (
@@ -213,12 +223,10 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         runner = Runner(registry, store)
 
-        with self.assertRaisesRegex(RuntimeError, "not verifiable"):
-            await runner.start_run(created.run_id)
+        terminal = await runner.start_run(created.run_id)
 
-        self.assertEqual(adapter.call_count, 0)
-        unchanged = await runner.get_run(created.run_id)
-        self.assertIs(unchanged.status, RunStatus.CREATED)
+        self.assertEqual(adapter.call_count, 1)
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
 
     async def test_recovery_does_not_replay_persisted_failed_model_step(
         self,
@@ -4008,6 +4016,136 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal.output, "ninth model response")
         self.assertEqual(adapter.call_count, 9)
 
+    async def test_explicit_typed_definition_freezes_default_model_budget(
+        self,
+    ) -> None:
+        """New explicit bindings cannot enter the 0.2 unbounded path."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelBindingSet,
+            ModelCapabilities,
+            ModelExecutionBudget,
+            ModelResponse,
+            Runner,
+            RunStatus,
+            ToolCall,
+            ToolCallingMode,
+            ToolEffect,
+            ToolOutcome,
+        )
+
+        class EightToolsThenAnswer(DeterministicModelAdapter):
+            def __init__(self) -> None:
+                super().__init__(
+                    ("unused",),
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    ),
+                )
+
+            async def generate(self, request) -> ModelResponse:
+                self.call_count += 1
+                self._last_request = request
+                if self.call_count <= 8:
+                    return ModelResponse(
+                        tool_calls=(
+                            ToolCall(
+                                call_id=f"lookup-{self.call_count}",
+                                tool_name="lookup",
+                                arguments="{}",
+                            ),
+                        )
+                    )
+                return ModelResponse(content="ninth model response")
+
+        adapter = EightToolsThenAnswer()
+        tool = DeterministicTool(
+            name="lookup",
+            effect=ToolEffect.READ_ONLY,
+            handler=lambda request: ToolOutcome.success(
+                request.call_id, request.tool_name, "found"
+            ),
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition(
+                definition_id="typed-default-model-budget",
+                version="1",
+                instructions="Use the tool until the answer is ready.",
+                model_bindings=ModelBindingSet.reuse_primary(
+                    adapter.model_contract
+                ),
+                model_adapter=adapter,
+                tools=(tool,),
+            )
+        )
+        runner = Runner(
+            registry=registry,
+            store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+        created = await runner.create_run(
+            "typed-default-model-budget", "1", "hello"
+        )
+        assert created.snapshot is not None
+        self.assertEqual(
+            created.snapshot.model_execution_budget, ModelExecutionBudget()
+        )
+
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.FAILED)
+        self.assertEqual(terminal.error_code, "MODEL_EXECUTION_BUDGET_EXCEEDED")
+        self.assertEqual(adapter.call_count, 8)
+
+    async def test_legacy_run_store_without_typed_dispatch_methods_runs(
+        self,
+    ) -> None:
+        """The 0.2 RunStore protocol remains usable by legacy Definitions."""
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
+            RunStatus,
+        )
+
+        class LegacyRunStore(InMemoryRunStore):
+            def __getattribute__(self, name):
+                if name in {"prepare_model_dispatch", "reserve_model_attempt"}:
+                    raise AttributeError(name)
+                return super().__getattribute__(name)
+
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition(
+                definition_id="legacy-store",
+                version="1",
+                instructions="Reply.",
+                model_adapter=DeterministicModelAdapter(("answer",)),
+            )
+        )
+        runner = Runner(
+            registry,
+            LegacyRunStore(payload_codec=PlaintextPayloadCodec()),
+        )
+        created = await runner.create_run("legacy-store", "1", "hello")
+
+        terminal = await runner.start_run(created.run_id)
+
+        self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+        self.assertEqual(terminal.output, "answer")
+
     async def test_usage_keeps_unavailable_and_rejects_missing_required_fields(
         self,
     ) -> None:
@@ -5053,6 +5191,100 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 await assert_replay(sqlite_store, sqlite_clock)
+            finally:
+                sqlite_store.close()
+
+    async def test_recovery_prefers_later_model_checkpoint_over_old_uncertainty(
+        self,
+    ) -> None:
+        """A later checkpoint closes an older failed reservation for that Step."""
+        from m_agent import DEFAULT_LEASE_TTL, CrashPoint, FakeClock
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            RetryPolicy,
+            Runner,
+            RunStatus,
+            StepType,
+        )
+
+        class FailingFirstCheckpoint:
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self._fail_first_model_checkpoint = True
+
+            async def record_checkpoint(self, checkpoint, **kwargs):
+                if (
+                    self._fail_first_model_checkpoint
+                    and checkpoint.step_type is StepType.MODEL
+                ):
+                    self._fail_first_model_checkpoint = False
+                    raise RuntimeError("first checkpoint persistence failure")
+                return await super().record_checkpoint(checkpoint, **kwargs)
+
+        class FailingInMemoryStore(FailingFirstCheckpoint, InMemoryRunStore):
+            pass
+
+        class FailingSQLiteStore(FailingFirstCheckpoint, SQLiteRunStore):
+            pass
+
+        async def assert_later_checkpoint_wins(store, clock) -> None:
+            adapter = DeterministicModelAdapter(("first", "second", "third"))
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="latest-checkpoint-wins",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                    retry_policy=RetryPolicy(max_attempts=2),
+                )
+            )
+            created = await Runner(registry, store).create_run(
+                "latest-checkpoint-wins", "1", "hello"
+            )
+            with self.assertRaisesRegex(RuntimeError, "first checkpoint"):
+                await Runner(registry, store).start_run(created.run_id)
+
+            clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+
+            def crash_after_later_checkpoint(point: CrashPoint, run_id: str) -> None:
+                if point is CrashPoint.AFTER_MODEL_CHECKPOINT:
+                    raise RuntimeError("interrupt after later checkpoint")
+
+            with self.assertRaisesRegex(RuntimeError, "later checkpoint"):
+                await Runner(
+                    registry, store, crash_hook=crash_after_later_checkpoint
+                ).resume_run(created.run_id)
+
+            clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+            terminal = await Runner(registry, store).resume_run(created.run_id)
+
+            self.assertIs(terminal.status, RunStatus.SUCCEEDED)
+            self.assertEqual(terminal.output, "second")
+            self.assertEqual(adapter.call_count, 2)
+
+        memory_clock = FakeClock()
+        memory_store = FailingInMemoryStore(
+            payload_codec=PlaintextPayloadCodec(), clock=memory_clock
+        )
+        await assert_later_checkpoint_wins(memory_store, memory_clock)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sqlite_clock = FakeClock()
+            sqlite_store = FailingSQLiteStore(
+                os.path.join(tmp, "latest-checkpoint-wins.db"),
+                payload_codec=PlaintextPayloadCodec(),
+                clock=sqlite_clock,
+            )
+            try:
+                await assert_later_checkpoint_wins(sqlite_store, sqlite_clock)
             finally:
                 sqlite_store.close()
 

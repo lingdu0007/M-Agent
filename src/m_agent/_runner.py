@@ -954,7 +954,13 @@ class Runner:
         """Persist one model dispatch reservation under the Run's lease."""
         assert run.snapshot is not None
         budget = run.snapshot.model_execution_budget
-        reserved = await self._store.reserve_model_attempt(
+        reserve = getattr(self._store, "reserve_model_attempt", None)
+        if reserve is None:
+            # A complete pre-Ticket-08 Store has no atomic reservation. Only
+            # preserve its old, unbounded Definition behavior; a new typed
+            # budget never silently downgrades to a non-atomic dispatch.
+            return budget is None
+        reserved = await reserve(
             StepRecord(
                 step_id=step_id,
                 run_id=run.run_id,
@@ -1199,13 +1205,9 @@ class Runner:
             )
         expected_bindings = snapshot.model_bindings
         if expected_bindings is None:
-            # 0.2 snapshots predate purpose bindings. Retain their original
-            # configuration check rather than inferring a new frozen binding.
-            if not snapshot.adapter_contract_fingerprint:
-                raise RuntimeError(
-                    f"run {run.run_id} legacy snapshot Model Contract is not "
-                    "verifiable; refusing to dispatch an unfrozen adapter"
-                )
+            # 0.2 snapshots predate purpose bindings and fingerprints. Retain
+            # their original capability-only resume check instead of making
+            # valid persisted Runs unrecoverable during the expand window.
             if snapshot.adapter_capabilities != definition.model_adapter.capabilities:
                 raise RuntimeError(
                     f"run {run.run_id} legacy snapshot Model Capabilities do not "
@@ -1213,8 +1215,11 @@ class Runner:
                     "recovery behavior"
                 )
             if (
-                definition.model_adapter.definition_contract_fingerprint()
-                != snapshot.adapter_contract_fingerprint
+                snapshot.adapter_contract_fingerprint
+                and (
+                    definition.model_adapter.definition_contract_fingerprint()
+                    != snapshot.adapter_contract_fingerprint
+                )
             ):
                 raise RuntimeError(
                     f"run {run.run_id} legacy snapshot Model Contract does not "
@@ -1348,12 +1353,22 @@ class Runner:
         checkpoint_attempt_ids = {
             checkpoint.attempt_id for checkpoint in model_checkpoints
         }
+        # A newer checkpoint for the same Model Step is authoritative recovery
+        # truth. Do not replay an older unconfirmed reservation after a later
+        # attempt already persisted a complete response for that Step.
         inflight_model_attempt = next(
             (
                 attempt
-                for attempt in reversed(persisted_attempts)
+                for attempt_index, attempt in reversed(
+                    tuple(enumerate(persisted_attempts))
+                )
                 if attempt.step_id in model_steps
                 and attempt.attempt_id not in checkpoint_attempt_ids
+                and not any(
+                    newer.step_id == attempt.step_id
+                    and newer.attempt_id in checkpoint_attempt_ids
+                    for newer in persisted_attempts[attempt_index + 1 :]
+                )
                 and (
                     attempt.status in (StepStatus.RUNNING, StepStatus.SUCCEEDED)
                     or attempt.error_code == ERROR_MODEL_CHECKPOINT_UNCONFIRMED
@@ -2058,12 +2073,19 @@ class Runner:
                         step_id,
                         (
                             FailureClassification.PERMANENT,
-                            "cancelled_before_model_dispatch",
+                            ERROR_MODEL_DISPATCH_CANCELLED,
                             "model dispatch cancelled after reservation",
                         ),
                         StepType.MODEL,
                         attempt_id=attempt_id,
                         model_purpose=purpose,
+                    )
+                    await self._record_failed_step(
+                        run,
+                        lease,
+                        step_id,
+                        StepType.MODEL,
+                        error_code=ERROR_MODEL_DISPATCH_CANCELLED,
                     )
                     cancelled = await self._maybe_cancel(run, lease)
                     if cancelled is not None:
@@ -2077,12 +2099,22 @@ class Runner:
                         model_contract, request, streaming=streaming
                     )
 
-                await self._store.prepare_model_dispatch(
-                    run.run_id,
-                    expected_version=run.version,
-                    owner=lease.owner,
-                    guard=assert_final_model_dispatch,
-                )
+                prepare = getattr(self._store, "prepare_model_dispatch", None)
+                if prepare is None:
+                    if run.snapshot.model_execution_budget is not None:
+                        raise RuntimeError(
+                            "typed Model Contract requires a Store with "
+                            "prepare_model_dispatch"
+                        )
+                    assert_final_model_dispatch()
+                    await self._assert_step_dispatch(run, lease)
+                else:
+                    await prepare(
+                        run.run_id,
+                        expected_version=run.version,
+                        owner=lease.owner,
+                        guard=assert_final_model_dispatch,
+                    )
                 if streaming:
                     response = await self._stream_model(
                         adapter,
