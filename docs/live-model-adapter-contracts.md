@@ -25,19 +25,23 @@ Completions 默认使用严格的 `json_schema`；仅支持原生 JSON object �
 `structured_output_mode`），它只满足 `JSON_OBJECT` Requirement，不能满足
 `JSON_SCHEMA_STRICT`，这不是静默降级。
 
-运行时集成者必须在构造 live Adapter 时显式传入实例级
-`model_contract=ModelContract(...)`，其中声明真实的 model/deployment
-identity、limits、Sizer、serialization、usage guarantee 和非敏感
-`configuration_fingerprint`；Adapter 类的 capability 常量只是协议上限，
-不能推导这些实例事实。`fingerprint` 是由 Contract identity/version、修订
-稳定性、能力组合、Limits、Sizer、serialization 与 usage guarantee 规范化
-计算的语义摘要，提供不相等的手写值会被拒绝。未传 Contract 的 Adapter
-可以无凭证地构造以配置 HTTP，但 `DefinitionRegistry.register` 会在任何网络
-或工具调用前拒绝它。Contract 能力必须是 Adapter 类协议上限的真实交集，可以
-比类的能力更窄；Adapter 的 model、净化后的 endpoint、timeout、structured-
-output schema 与 Chat mode 形成的非敏感 configuration fingerprint 必须等于
-实例 Contract 的 `configuration_fingerprint`。不匹配或之后变化都会在 dispatch
-前失败，不能静默改变既有 Run 的模型语义。
+每个官方 Adapter 实例必须由集成者在构造时传入准确的
+`model_contract=ModelContract(...)`；在缺少该实例事实时，读取
+`model_contract` 或注册 Definition 会失败且不会发出网络请求。类能力仅是
+协议上限，不能被伪装成 deployment 的事实。这样未知 deployment 的 limits、
+revision stability、能力组合、Sizer 与 usage guarantee 不会被硬编码猜测，
+也不做 endpoint 自动探测或 live 验证。
+
+Contract 声明 model/deployment identity、limits、Sizer、serialization、字段级
+usage guarantee 和非敏感 `configuration_fingerprint`；Adapter 类的 capability
+常量只是协议上限，不能替代实例事实。`fingerprint` 是由 Contract
+identity/version、修订稳定性、能力组合、Limits、Sizer、serialization 与 usage
+guarantee 规范化计算的语义摘要，提供不相等的手写值会被拒绝。Contract 能力必须
+是 Adapter 类协议上限的真实交集，可以比类的能力更窄；Adapter 的 model、净化后
+的 endpoint、timeout、structured-output schema 与 Chat mode 形成的非敏感
+configuration fingerprint 必须等于实例 Contract 的
+`configuration_fingerprint`。不匹配或之后变化都会在 dispatch 前失败，不能静默
+改变既有 Run 的模型语义。
 
 能力声明（`capabilities`）是**如实声明**（ADR 0030）：声明为支持的能力
 才有契约案例；未声明的能力（本版本两者均无）绝不做静默降级。Runner
@@ -105,6 +109,22 @@ uv pip install -e ".[dev,provider]"   # 或 pip install -e ".[dev,provider]"
 通过 `conftest.py` 排除 `@pytest.mark.live`；live TestCase 自身的
 `setUp` 还要求 `M_AGENT_RUN_LIVE_TESTS=1`，因此不依赖 pytest 才能保持
 安全。默认 CI 只运行离线测试。
+
+### 公共离线 fixture 与第三方 Adapter kit
+
+`m_agent.provider` 提供 `chat_completion_fixture`、`responses_fixture`、
+`chat_stream_fixture`、`responses_stream_fixture` 与
+`provider_error_fixture` / `malformed_response_fixture`。它们返回可显式注入 Adapter 构造器 `transport=` 的
+`OfflineProviderTransport`，覆盖正常、stream、provider error 和 malformed
+response 等确定性路径；fixture 本身不读取凭证、endpoint 或网络。其可观察
+request log 只保留 HTTP method，绝不保留 Authorization header、URL 或 request
+body，因此 credential/end-point/payload canary 的明文扫描能够检测回归。
+
+第三方 Adapter 可只依赖 `m_agent.runtime` 与
+`m_agent.testing.run_model_adapter_contract` 运行公共 Model Contract kit，
+不需要导入官方 provider Adapter 或其私有 HTTP 代码。该 kit 验证实例
+Contract/fingerprint 与一次可归一化响应，不把离线成功表述为 live provider
+验证。
 
 ### 显式运行 live 契约测试
 

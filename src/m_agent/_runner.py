@@ -2087,6 +2087,7 @@ class Runner:
                     step_id=step_id,
                     attempt_id=attempt_id,
                     step_type=StepType.MODEL,
+                    model_purpose=purpose,
                 )
             )
             self._telemetry_started(run.run_id, step_id, attempt_id)
@@ -2097,6 +2098,7 @@ class Runner:
                     step_id=step_id,
                     attempt_id=attempt_id,
                     step_type=StepType.MODEL,
+                    model_purpose=purpose,
                 )
             )
             terminal_error_code: str | None = None
@@ -2370,6 +2372,7 @@ class Runner:
                     step_id=step_id,
                     attempt_id=attempt_id,
                     step_type=StepType.MODEL,
+                    model_purpose=purpose,
                     step_status=StepStatus.SUCCEEDED,
                     duration_ms=self._telemetry_duration_ms(
                         run.run_id, step_id, attempt_id
@@ -2945,6 +2948,7 @@ class Runner:
                 step_id=step_id,
                 attempt_id=attempt_id,
                 step_type=step_type,
+                model_purpose=model_purpose,
                 step_status=StepStatus.FAILED,
                 classification=classification,
                 error_code=code,

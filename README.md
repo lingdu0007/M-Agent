@@ -10,8 +10,10 @@ python -m pip install "m-agent[provider]"
 The core data contract uses Pydantic. The focused `provider` extra installs
 `httpx`; `storage` and `telemetry` select the shipped standard-library SQLite
 and JSONL integrations without adding dependencies; `security` names the
-application-supplied `PayloadCodec` boundary. This release does not claim an
-official OpenTelemetry adapter or a bundled protected-payload implementation.
+application-supplied `PayloadCodec` boundary. The optional local
+`OpenTelemetryTelemetrySink` maps the public redacted Telemetry contract to a
+caller-owned exporter; it does not claim Collector, provider, or production
+observability verification.
 
 ## Runtime Foundation
 

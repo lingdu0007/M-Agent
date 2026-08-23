@@ -16,8 +16,9 @@ CONTEXT.md：Telemetry Sink 是接收带 Run、Step 和 Attempt 关联标识的
 
 Telemetry 只用于观测（ADR 0006 / 0010）：RunStore 仍是唯一权威。
 Sink 自身失败由 Runner 隔离（捕获并继续推进，绝不覆盖或伪造
-RunStore 状态），本模块不提供 OpenTelemetry adapter、Dashboard、
-集中日志服务、payload opt-in UI 或持久事件总线（PRD Out of Scope）。
+RunStore 状态）。官方 OpenTelemetry projection lives in the Adapter layer,
+not this Core module; no Dashboard、集中日志服务、payload opt-in UI 或
+持久事件总线（PRD Out of Scope）。
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, Field, field_validator
 
 from ._failure import sanitize_error_code
-from ._model import ModelUsage
+from ._model import ModelPurpose, ModelUsage
 from ._status import RunStatus
 from ._steps import (
     FailureClassification,
@@ -40,6 +41,11 @@ from ._steps import (
     StepType,
     utc_now,
 )
+
+try:  # Linux/macOS HOST evidence requires process-safe append serialization.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows is outside this roadmap.
+    fcntl = None  # type: ignore[assignment]
 
 
 class TelemetryEventType(str, enum.Enum):
@@ -79,6 +85,9 @@ class TelemetryEvent(BaseModel, frozen=True):
     #: ``ATTEMPT_FAILED`` 必填。
     attempt_id: str | None = None
     step_type: StepType | None = None
+    #: Model Step 的冻结用途；仅 Model Step 事件携带（PRIMARY /
+    #: CONTEXT_COMPRESSION / OUTPUT_REPAIR），用于与权威 Attempt 对账。
+    model_purpose: ModelPurpose | None = None
     #: ``RUN_STATUS_CHANGED`` 时的新 Run Status。
     run_status: RunStatus | None = None
     #: ``STEP_COMPLETED``（SUCCEEDED）与 ``ATTEMPT_FAILED``（FAILED）时
@@ -137,6 +146,7 @@ class JsonlTelemetrySink:
         self._path = Path(path)
         self._lock = threading.Lock()
         self._file = None
+        self._closed = False
 
     @property
     def path(self) -> Path:
@@ -145,17 +155,42 @@ class JsonlTelemetrySink:
 
     def emit(self, event: TelemetryEvent) -> None:
         with self._lock:
+            if self._closed:
+                raise RuntimeError("JsonlTelemetrySink is closed")
             if self._file is None:
                 self._file = self._path.open("a", encoding="utf-8")
-            self._file.write(event.model_dump_json() + "\n")
-            self._file.flush()
+            if fcntl is not None:
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_EX)
+            try:
+                self._file.write(event.model_dump_json() + "\n")
+                self._file.flush()
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+
+    def flush(self) -> None:
+        """Flush all writes accepted before this call.
+
+        The method shares the write lock, so a caller can use it as a
+        deterministic thread-level handoff point.  It deliberately does not
+        reopen a never-used sink and remains harmless after :meth:`close`.
+        """
+        with self._lock:
+            if self._file is not None:
+                self._file.flush()
 
     def close(self) -> None:
-        """关闭底层文件；幂等，未打开或已关闭时为空操作。"""
+        """Close the file permanently; repeated calls are safe.
+
+        A closed sink never reopens.  This lets owners distinguish a late
+        telemetry write (diagnostic failure, isolated by ``Runner``) from an
+        accepted event, while preserving the final JSONL prefix intact.
+        """
         with self._lock:
             if self._file is not None:
                 self._file.close()
                 self._file = None
+            self._closed = True
 
     def __enter__(self) -> "JsonlTelemetrySink":
         """Return this sink; the context owns one deterministic close."""

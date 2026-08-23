@@ -1,7 +1,7 @@
 # Acceptance Coverage Matrix
 
-This matrix is the frozen contract index for the Ticket 07
-`core-lifecycle` Foundation Pack. Its only profile is
+This matrix is the frozen contract index for the Ticket 07 foundation and
+Ticket 10 telemetry ownership of the `core-lifecycle` Foundation Pack. Its only profile is
 `core-lifecycle-foundation` at Pack version `foundation-v1`; it is not the
 later six-scenario `foundation-release` profile. Every row, including its
 owner, public seam, positive/negative assertion, evidence, milestone, and
@@ -18,12 +18,14 @@ therefore never attests to its own later verification or rendering.
 | Check ID | Owner | Scenario and public seam | Positive and negative check | Authority and independent evidence | Level / milestone | Non-claim |
 | --- | --- | --- | --- | --- | --- | --- |
 | `core.lifecycle` | Runtime Core | `core-lifecycle`; `m_agent.runtime.Runner` | Create, start, inspect one deterministic Run; a non-success terminal is `FAIL`. | Public `RunInspection` counts, packaged fixture digest, and isolated wheel-process observation. | CONTRACT / Foundation | Does not prove provider or production execution. |
+| `core.lifecycle.telemetry` | Telemetry Adapter | `core-lifecycle`; `m_agent.runtime.TelemetrySink`, `m_agent.adapters.JsonlTelemetrySink`, `OpenTelemetryTelemetrySink` | Ordered JSONL correlates Run/Step/Attempt, purpose/status/error/duration/usage and reconciles to public Inspection; the local exporter maps Run/Step/Attempt event spans, and the application-owned `Tracer.start_span` bridge preserves explicitly supplied upper trace context; payload/credential leakage or an unreconciled event is `FAIL`. | Public Inspection correlation and independent append-only JSONL digest. | CONTRACT / 0.3 | Does not prove provider endpoint, external Collector, or production observability. |
 | `core.lifecycle.unknown-definition` | Runtime Core | `core-lifecycle`; `m_agent.runtime.DefinitionRegistry` | An unknown Definition raises the public error; successful resolution is `FAIL`. | Public Registry result and isolated wheel-process observation digest. | CONTRACT / Foundation | Does not prove Definition persistence. |
 | `core.lifecycle.public-namespaces` | Distribution API | `core-lifecycle`; `m_agent.runtime`, `m_agent.adapters`, `m_agent.companion`, `m_agent.testing` | All four public namespaces import; a missing or wrong public binding is `FAIL`. | Installed wheel import view and isolated wheel-process observation digest. | CONTRACT / Foundation | Does not prove future Companion capabilities. |
 | `core.lifecycle.dependency-direction` | Runtime Core | `core-lifecycle`; `m_agent.testing.find_runtime_dependency_violations` | The installed Core has no reverse layer import; a forbidden import is `FAIL`. | Static installed-Core source scan and isolated wheel-process observation digest. | CONTRACT / Foundation | Does not prove dynamic behavior outside public Core files. |
 | `core.lifecycle.expand-compatibility` | Distribution API | `core-lifecycle`; `m_agent`, `m_agent.runtime` | Root `Runner` and `Clock` retain their semantic Runtime bindings; a changed binding is `FAIL`. | Public import identity and isolated wheel-process observation digest. | CONTRACT / 0.2 expand | Does not claim 0.3 root retention. |
 | `core.lifecycle.bundle-tamper` | Testing | `core-lifecycle`; `m_agent.testing.ScenarioEvidenceBundle` | A controlled changed Bundle must fail integrity verification; an undetected mutation is a Harness error. | Content digest and digest derived from the actual rejected mutation payload. | CONTRACT / Foundation | Does not prove external ledger integrity. |
 | `core.lifecycle.host-wheel` | Testing | Clean external venv; `python -I -m m_agent.testing` | Exact built wheel and sdist install without editable mode, source path injection, or private imports; the Pack itself rejects controlled source/artifact/sdist/fixture/environment identity mutations. | Wheel and sdist SHA-256, all installed wheel members, packaged fixture bytes, build-tool version, Testing dependency summary, source-subject summary, mutation rejection digest, and isolated SQLite restart observation. | HOST / Foundation | Does not prove live provider behavior. |
+| `core.lifecycle.telemetry-host` | Telemetry Adapter | Installed `m_agent.adapters.JsonlTelemetrySink`; `python -I -m m_agent.testing` | Wheel-installed JSONL survives close/reopen and reconciles with public SQLite Inspection; credential inheritance, plaintext, or process-integrity failure is `FAIL`. | Public installed-wheel Inspection and independent JSONL/process observation digest. | HOST / 0.3 | Does not prove external Collector or live provider behavior. |
 
 The 0.3 migration table is part of the `core.lifecycle.expand-compatibility`
 contract. Its complete 0.2 root-export mapping, including `Clock`, is kept in

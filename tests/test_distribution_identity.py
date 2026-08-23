@@ -378,7 +378,8 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         and check["status"] == "PASS"
         for check in bundle["checks"]
     )
-    assert all(not check["check_id"].startswith("core.lifecycle.telemetry") for check in bundle["checks"])
+    assert checks_by_id["core.lifecycle.telemetry"]["status"] == "PASS"
+    assert checks_by_id["core.lifecycle.telemetry-host"]["status"] == "PASS"
     assert bundle["independent_evidence"]["fixture_digest"] == identity["fixture_digest"]
     assert bundle["independent_evidence"]["host_observation_digest"].startswith("sha256:")
     assert (
@@ -407,8 +408,10 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert bundle["independent_evidence"]["bundle_tamper_independent_digest"].startswith(
         "sha256:"
     )
-    assert all(not key.startswith("telemetry_") for key in bundle["evidence_view"])
-    assert all(not key.startswith("telemetry_") for key in bundle["independent_evidence"])
+    assert bundle["evidence_view"]["telemetry_ordered"] is True
+    assert bundle["evidence_view"]["telemetry_inspection_reconciled"] is True
+    assert bundle["independent_evidence"]["telemetry_jsonl_digest"].startswith("sha256:")
+    assert bundle["independent_evidence"]["telemetry_host_independent_digest"].startswith("sha256:")
     host_observation = {
         key.removeprefix("host_"): value
         for key, value in bundle["independent_evidence"].items()

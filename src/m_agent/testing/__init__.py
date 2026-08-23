@@ -23,6 +23,8 @@ from ._pack import (
 )
 from ._dependencies import find_runtime_dependency_violations
 from ._identity import installed_identity
+from ._adapter_contracts import ModelAdapterContractReport, run_model_adapter_contract
+from ._subprocess import isolated_subprocess_environment
 
 __all__ = [
     "AcceptanceCheck",
@@ -42,8 +44,11 @@ __all__ = [
     "EXIT_SUCCESS",
     "find_runtime_dependency_violations",
     "installed_identity",
+    "isolated_subprocess_environment",
+    "ModelAdapterContractReport",
     "PackExecution",
     "PackExecutionStatus",
     "ScenarioEvidenceBundle",
     "core_lifecycle_manifest",
+    "run_model_adapter_contract",
 ]

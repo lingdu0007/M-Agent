@@ -377,10 +377,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertEqual(manifest.profile, "core-lifecycle-foundation")
         self.assertEqual(manifest.pack_version, "foundation-v1")
         self.assertEqual(manifest.scenarios, ("core-lifecycle",))
-        self.assertEqual(len(manifest.required_checks), 7)
+        self.assertEqual(len(manifest.required_checks), 9)
         required_ids = {check.check_id for check in manifest.required_checks}
-        self.assertNotIn("core.lifecycle.telemetry", required_ids)
-        self.assertNotIn("core.lifecycle.telemetry-host", required_ids)
+        self.assertIn("core.lifecycle.telemetry", required_ids)
+        self.assertIn("core.lifecycle.telemetry-host", required_ids)
         for check in manifest.required_checks:
             with self.subTest(check_id=check.check_id):
                 self.assertTrue(check.owner)

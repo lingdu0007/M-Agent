@@ -36,6 +36,7 @@ from ._base import (
     tool_spec_to_responses_schema,
     transport_error,
 )
+from ._base import httpx
 from m_agent._model import (
     ModelCapabilityCombination,
     ModelCapabilities,
@@ -96,6 +97,7 @@ class ResponsesModelAdapter(ProviderModelAdapter):
         base_url: str | None = None,
         timeout: float = 120.0,
         model_contract: ModelContract | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         responses_path: str | None = None,
         structured_output_schema: dict[str, Any] | None = None,
         structured_output_name: str = "result",
@@ -105,6 +107,7 @@ class ResponsesModelAdapter(ProviderModelAdapter):
             base_url=base_url,
             timeout=timeout,
             model_contract=model_contract,
+            transport=transport,
             structured_output_schema=structured_output_schema,
             structured_output_name=structured_output_name,
         )

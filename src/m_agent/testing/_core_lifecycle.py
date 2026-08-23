@@ -14,8 +14,12 @@ import tempfile
 
 from ..adapters import (
     DeterministicModelAdapter,
+    InMemorySpanExporter,
     InMemoryRunStore,
     JsonlTelemetrySink,
+    OpenTelemetrySpanScope,
+    OpenTelemetryTelemetrySink,
+    OpenTelemetryTraceContext,
     PlaintextPayloadCodec,
 )
 from ..runtime import (
@@ -73,6 +77,21 @@ class _FailingModel(DeterministicModelAdapter):
             "rate_limited",
             _TELEMETRY_CANARIES[2],
         )
+
+
+class _FanoutTelemetrySink:
+    """Local-only fanout used to prove JSONL and OpenTelemetry agree."""
+
+    def __init__(self, *sinks) -> None:
+        self._sinks = sinks
+
+    def emit(self, event) -> None:
+        for sink in self._sinks:
+            sink.emit(event)
+
+    def close(self) -> None:
+        for sink in self._sinks:
+            sink.close()
 
 
 _CROSS_PROCESS_TELEMETRY_PROBE = r'''
@@ -147,6 +166,7 @@ from ._pack import (
     AcceptanceCheckStatus,
     EvidenceLevel,
 )
+from ._subprocess import isolated_subprocess_environment
 
 
 _EXPAND_RUNTIME_EXPORTS = (
@@ -516,7 +536,19 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
     )
     with tempfile.TemporaryDirectory() as temporary_directory:
         telemetry_path = Path(temporary_directory) / "core-lifecycle.jsonl"
-        sink = JsonlTelemetrySink(telemetry_path)
+        jsonl_sink = JsonlTelemetrySink(telemetry_path)
+        span_exporter = InMemorySpanExporter()
+        trace_context = OpenTelemetryTraceContext(
+            trace_id="core-lifecycle-trace",
+            parent_span_id="core-lifecycle-parent",
+        )
+        sink = _FanoutTelemetrySink(
+            jsonl_sink,
+            OpenTelemetryTelemetrySink(
+                span_exporter,
+                trace_context=trace_context,
+            ),
+        )
         runner = Runner(
             registry=registry,
             store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
@@ -569,6 +601,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         cross_process_path = Path(temporary_directory) / "cross-process.jsonl"
         cross_process = subprocess.run(
             [sys.executable, "-c", _CROSS_PROCESS_TELEMETRY_PROBE, str(cross_process_path)],
+            env=isolated_subprocess_environment(),
             text=True,
             capture_output=True,
             check=False,
@@ -647,8 +680,15 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         for event in telemetry_events
         if event.get("event_type") == "STEP_COMPLETED"
     ]
+    model_events = [
+        event
+        for event in telemetry_events
+        if event.get("event_type") in {"STEP_STARTED", "STEP_COMPLETED"}
+        and event.get("step_type") == "MODEL"
+    ]
     telemetry_model_purpose_observed = (
-        len(completions) == 1 and completions[0].get("step_type") == "MODEL"
+        len(model_events) == 2
+        and all(event.get("model_purpose") == "PRIMARY" for event in model_events)
     )
     telemetry_duration_observed = (
         telemetry_model_purpose_observed
@@ -684,6 +724,24 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
             concurrent_bytes,
         )
     )
+    telemetry_opentelemetry = (
+        len(span_exporter.spans) == len(telemetry_events)
+        and all(
+            span.attributes.get("m_agent.run_id") == created.run_id
+            and span.trace_context == trace_context
+            and span.attributes.get("m_agent.trace_id") == "core-lifecycle-trace"
+            and not {"input", "output", "payload"}.intersection(span.attributes)
+            for span in span_exporter.spans
+        )
+        and {
+            span.scope for span in span_exporter.spans
+        }
+        == {
+            OpenTelemetrySpanScope.RUN,
+            OpenTelemetrySpanScope.STEP,
+            OpenTelemetrySpanScope.ATTEMPT,
+        }
+    )
     telemetry_jsonl_digest = _telemetry_digest(
         telemetry_bytes, failure_bytes, cross_process_bytes, concurrent_bytes
     )
@@ -701,6 +759,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         and telemetry_cross_process
         and telemetry_concurrent
         and telemetry_redacted
+        and telemetry_opentelemetry
     )
     evidence_view = {
         "run_succeeded": terminal.status is RunStatus.SUCCEEDED,
@@ -724,6 +783,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         "telemetry_cross_process": telemetry_cross_process,
         "telemetry_concurrent": telemetry_concurrent,
         "telemetry_redacted": telemetry_redacted,
+        "telemetry_opentelemetry": telemetry_opentelemetry,
         **expand_observation,
     }
     results = (
@@ -788,6 +848,9 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
                         "telemetry_concurrent"
                     ],
                     "telemetry_redacted": evidence_view["telemetry_redacted"],
+                    "telemetry_opentelemetry": evidence_view[
+                        "telemetry_opentelemetry"
+                    ],
                     "telemetry_jsonl_digest": telemetry_jsonl_digest,
                 }
             ),

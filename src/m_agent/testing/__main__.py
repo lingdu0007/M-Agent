@@ -34,6 +34,7 @@ from ._pack import (
     ScenarioEvidenceBundle,
     core_lifecycle_manifest,
 )
+from ._subprocess import isolated_subprocess_environment
 
 
 _ISOLATED_HOST_PROBE = """
@@ -74,12 +75,29 @@ from m_agent.adapters import SQLiteRunStore
 from m_agent.testing import find_runtime_dependency_violations
 
 
+def child_environment():
+    allowed = {"HOME", "LANG", "LC_ALL", "PATH", "SYSTEMROOT", "TMPDIR", "TEMP", "TMP", "M_AGENT_RUN_LIVE_TESTS"}
+    return {key: value for key, value in os.environ.items() if key in allowed}
+
+
 _EXPAND_ONLY_EXPORTS = {
     "CrashPoint",
     "deserialize_model_response",
     "deserialize_tool_outcome",
     "serialize_model_response",
     "serialize_tool_outcome",
+}
+_EXPAND_ADAPTER_EXPORTS = {
+    "DeterministicContextProvider",
+    "DeterministicModelAdapter",
+    "DeterministicStreamingModelAdapter",
+    "DeterministicTool",
+    "FakeClock",
+    "InMemoryRunStore",
+    "JsonlTelemetrySink",
+    "PlaintextPayloadCodec",
+    "SQLiteRunStore",
+    "SystemClock",
 }
 _ROOT_TYPED_MODEL_CONTRACT_EXPORTS = {
     "ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED",
@@ -369,6 +387,7 @@ async def observe():
             text=True,
             capture_output=True,
             check=False,
+            env=child_environment(),
         )
         try:
             reopened = json.loads(reopened_process.stdout)
@@ -384,8 +403,18 @@ async def observe():
             event for event in telemetry_events
             if event.get("event_type") == "STEP_COMPLETED"
         ]
+        model_events = [
+            event
+            for event in telemetry_events
+            if event.get("event_type") in {"STEP_STARTED", "STEP_COMPLETED"}
+            and event.get("step_type") == "MODEL"
+        ]
         telemetry_model_purpose = (
-            len(completions) == 1 and completions[0].get("step_type") == "MODEL"
+            len(model_events) == 2
+            and all(
+                event.get("model_purpose") == "PRIMARY"
+                for event in model_events
+            )
         )
         telemetry_duration = (
             telemetry_model_purpose
@@ -435,12 +464,15 @@ async def observe():
     root_expand_compatibility = (
         len(root_exports) == len(set(root_exports))
         and set(root_exports)
-        == root_runtime_exports | set(adapters.__all__) | _EXPAND_ONLY_EXPORTS
+        == root_runtime_exports | _EXPAND_ADAPTER_EXPORTS | _EXPAND_ONLY_EXPORTS
         and all(
             getattr(m_agent, name, None) is getattr(runtime, name)
             for name in root_runtime_exports
         )
-        and all(getattr(m_agent, name, None) is getattr(adapters, name) for name in adapters.__all__)
+        and all(
+            getattr(m_agent, name, None) is getattr(adapters, name)
+            for name in _EXPAND_ADAPTER_EXPORTS
+        )
         and all(name in m_agent.__all__ and hasattr(m_agent, name) for name in _EXPAND_ONLY_EXPORTS)
     )
     print(json.dumps({
@@ -479,6 +511,16 @@ async def observe():
         "telemetry_redacted": telemetry_redacted,
         "filesystem_permission_boundary_observed": filesystem_permission_boundary_observed,
         "telemetry_jsonl_digest": telemetry_jsonl_digest,
+        "credential_canary_absent": all(
+            name not in os.environ
+            for name in (
+                "M_AGENT_OPENAI_API_KEY",
+                "OPENAI_API_KEY",
+                "M_AGENT_OPENAI_BASE_URL",
+                "OPENAI_BASE_URL",
+                "AGENT_BASE_URL",
+            )
+        ),
     }, sort_keys=True))
 
 
@@ -643,7 +685,9 @@ def _attest_declared_evidence(
                 "telemetry_jsonl_digest"
             ]
         elif check.check_id == "core.lifecycle.telemetry-host":
-            independent[check.independent_evidence] = host_observation_digest
+            independent[check.independent_evidence] = independent[
+                "telemetry_host_observation_digest"
+            ]
         else:
             independent[check.independent_evidence] = host_observation_digest
     return authoritative, independent
@@ -839,14 +883,6 @@ def _run(arguments: argparse.Namespace) -> int:
     )
     required_ids = {check.check_id for check in manifest.required_checks}
     checks = tuple(check for check in checks if check.check_id in required_ids)
-    evidence_view = {
-        key: value for key, value in evidence_view.items() if not key.startswith("telemetry_")
-    }
-    independent_evidence = {
-        key: value
-        for key, value in independent_evidence.items()
-        if not key.startswith("telemetry_")
-    }
     host_results, host_evidence = _isolated_host_result()
     host_wheel_authoritative_digest = _evidence_digest(
         {
@@ -858,6 +894,7 @@ def _run(arguments: argparse.Namespace) -> int:
         host_results[0].model_copy(
             update={"evidence_digest": host_wheel_authoritative_digest}
         ),
+        host_results[1],
     )
     host_wheel_identity_mutation_digest = _controlled_identity_mutation_evidence(
         manifest, artifact=arguments.wheel, sdist=arguments.sdist
@@ -958,12 +995,7 @@ def _isolated_host_result() -> tuple[
     tuple[AcceptanceCheckResult, ...], dict[str, str | int | bool]
 ]:
     """Observe the installed wheel from a separate isolated Python process."""
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in {"PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "OPENAI_API_KEY", "M_AGENT_OPENAI_API_KEY"}
-    }
-    environment["M_AGENT_RUN_LIVE_TESTS"] = "0"
+    environment = isolated_subprocess_environment()
     completed = subprocess.run(
         [sys.executable, "-I", "-c", _ISOLATED_HOST_PROBE],
         env=environment,
@@ -979,14 +1011,24 @@ def _isolated_host_result() -> tuple[
             observed = None
         if isinstance(observed, dict):
             observation = observed
-    observation = {
+    core_observation = {
         key: value
         for key, value in observation.items()
         if not key.startswith("telemetry_")
         and key != "filesystem_permission_boundary_observed"
+        and key != "credential_canary_absent"
+    }
+    telemetry_observation = {
+        key: value
+        for key, value in observation.items()
+        if key.startswith("telemetry_")
+        or key in {"filesystem_permission_boundary_observed", "credential_canary_absent"}
     }
     digest = "sha256:" + hashlib.sha256(
-        json.dumps(observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(core_observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    telemetry_digest = "sha256:" + hashlib.sha256(
+        json.dumps(telemetry_observation, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     expected_observation = {
         "module_under_prefix": True,
@@ -1005,8 +1047,8 @@ def _isolated_host_result() -> tuple[
         "runtime_dependency_violation_count": 0,
         "root_expand_compatibility": True,
     }
-    valid_observation = set(observation) == set(expected_observation) and all(
-        type(observation[key]) is type(expected)
+    valid_observation = set(core_observation) == set(expected_observation) and all(
+        type(core_observation[key]) is type(expected)
         for key, expected in expected_observation.items()
     )
     status = (
@@ -1014,7 +1056,44 @@ def _isolated_host_result() -> tuple[
         if not valid_observation
         else (
             AcceptanceCheckStatus.PASS
-            if observation == expected_observation
+            if core_observation == expected_observation
+            else AcceptanceCheckStatus.FAIL
+        )
+    )
+    expected_telemetry = {
+        "telemetry_ordered": True,
+        "telemetry_inspection_reconciled": True,
+        "telemetry_usage_provenance": True,
+        "telemetry_error_observed": True,
+        "telemetry_model_purpose_observed": True,
+        "telemetry_duration_observed": True,
+        "telemetry_closed": True,
+        "telemetry_cross_process": True,
+        "telemetry_concurrent": True,
+        "telemetry_redacted": True,
+        "telemetry_jsonl_digest": str,
+        "filesystem_permission_boundary_observed": bool,
+        "credential_canary_absent": True,
+    }
+    valid_telemetry = set(telemetry_observation) == set(expected_telemetry) and all(
+        isinstance(telemetry_observation[key], expected)
+        if isinstance(expected, type)
+        else type(telemetry_observation[key]) is type(expected)
+        for key, expected in expected_telemetry.items()
+    )
+    telemetry_status = (
+        AcceptanceCheckStatus.ERROR
+        if not valid_telemetry
+        else (
+            AcceptanceCheckStatus.PASS
+            if all(
+                value is True
+                for key, value in telemetry_observation.items()
+                if key not in {
+                    "telemetry_jsonl_digest",
+                    "filesystem_permission_boundary_observed",
+                }
+            )
             else AcceptanceCheckStatus.FAIL
         )
     )
@@ -1035,10 +1114,30 @@ def _isolated_host_result() -> tuple[
                 ),
                 evidence_digest=digest,
             ),
+            AcceptanceCheckResult(
+                check_id="core.lifecycle.telemetry-host",
+                status=telemetry_status,
+                evidence_level=EvidenceLevel.HOST,
+                reason_code=(
+                    "isolated_wheel_telemetry_observed"
+                    if telemetry_status is AcceptanceCheckStatus.PASS
+                    else (
+                        "isolated_wheel_telemetry_failed"
+                        if telemetry_status is AcceptanceCheckStatus.FAIL
+                        else "isolated_wheel_telemetry_error"
+                    )
+                ),
+                evidence_digest=telemetry_digest,
+            ),
         ),
         {
             "host_observation_digest": digest,
-            **{f"host_{key}": value for key, value in observation.items()},
+            "telemetry_host_observation_digest": telemetry_digest,
+            **{f"host_{key}": value for key, value in core_observation.items()},
+            **{
+                f"telemetry_host_{key}": value
+                for key, value in telemetry_observation.items()
+            },
         },
     )
 

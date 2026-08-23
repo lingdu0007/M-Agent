@@ -311,8 +311,22 @@ def extract_usage(data: dict[str, Any]) -> ModelUsage | None:
     )
     input_tokens = usage.get(input_key)
     output_tokens = usage.get(output_key)
+    input_details_name = "input_tokens_details"
+    input_details = usage.get(input_details_name)
+    if not isinstance(input_details, dict):
+        input_details_name = "prompt_tokens_details"
+        input_details = usage.get(input_details_name)
+    output_details_name = "output_tokens_details"
+    output_details = usage.get(output_details_name)
+    if not isinstance(output_details, dict):
+        output_details_name = "completion_tokens_details"
+        output_details = usage.get(output_details_name)
     cached_input_tokens = usage.get("cached_input_tokens")
+    if cached_input_tokens is None and isinstance(input_details, dict):
+        cached_input_tokens = input_details.get("cached_tokens")
     reasoning_tokens = usage.get("reasoning_tokens")
+    if reasoning_tokens is None and isinstance(output_details, dict):
+        reasoning_tokens = output_details.get("reasoning_tokens")
     if (
         input_tokens is None
         and output_tokens is None
@@ -327,8 +341,12 @@ def extract_usage(data: dict[str, Any]) -> ModelUsage | None:
         mappings.append(f"{output_key}->output_tokens")
     if cached_input_tokens is not None:
         mappings.append("cached_input_tokens->cached_input_tokens")
+        if isinstance(input_details, dict) and "cached_tokens" in input_details:
+            mappings[-1] = f"{input_details_name}.cached_tokens->cached_input_tokens"
     if reasoning_tokens is not None:
         mappings.append("reasoning_tokens->reasoning_tokens")
+        if isinstance(output_details, dict) and "reasoning_tokens" in output_details:
+            mappings[-1] = f"{output_details_name}.reasoning_tokens->reasoning_tokens"
     return ModelUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -676,6 +694,7 @@ class ProviderModelAdapter(ModelAdapter):
         base_url: str | None = None,
         timeout: float = 120.0,
         model_contract: ModelContract | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         structured_output_schema: dict[str, Any] | None = None,
         structured_output_name: str = "result",
     ) -> None:
@@ -691,8 +710,9 @@ class ProviderModelAdapter(ModelAdapter):
         #: 已发出请求的端点记录（不含凭证），供测试断言无请求发生。
         self.requests: list[str] = []
         self._client: httpx.AsyncClient | None = None
-        #: 可替换的本地 HTTP transport（测试用，不改变 provider 协议）。
-        self._transport: httpx.AsyncBaseTransport | None = None
+        #: Publicly injectable offline transport.  It is useful for contract
+        #: fixtures and never supplies credentials or enables live access.
+        self._transport = transport
 
     @property
     def model_contract(self) -> ModelContract:

@@ -11,6 +11,16 @@ from .._model import DeterministicModelAdapter, DeterministicStreamingModelAdapt
 from ._in_memory_store import InMemoryRunStore
 from ._sqlite_store import SQLiteRunStore
 from .._telemetry import JsonlTelemetrySink
+from ._opentelemetry import (
+    InMemorySpanExporter,
+    OpenTelemetrySpan,
+    OpenTelemetrySpanExporter,
+    OpenTelemetrySpanScope,
+    OpenTelemetryTelemetrySink,
+    OpenTelemetryTraceContext,
+    OpenTelemetryTracer,
+    OpenTelemetryWritableSpan,
+)
 from .._tools import DeterministicTool
 
 __all__ = [
@@ -20,7 +30,15 @@ __all__ = [
     "DeterministicTool",
     "FakeClock",
     "InMemoryRunStore",
+    "InMemorySpanExporter",
     "JsonlTelemetrySink",
+    "OpenTelemetrySpan",
+    "OpenTelemetrySpanExporter",
+    "OpenTelemetrySpanScope",
+    "OpenTelemetryTelemetrySink",
+    "OpenTelemetryTraceContext",
+    "OpenTelemetryTracer",
+    "OpenTelemetryWritableSpan",
     "PlaintextPayloadCodec",
     "SQLiteRunStore",
     "SystemClock",

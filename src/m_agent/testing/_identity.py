@@ -32,6 +32,7 @@ from m_agent._build_identity import (
     SOURCE_INTEGRITY_DIGEST,
     SOURCE_STATE,
 )
+from ._subprocess import isolated_subprocess_environment
 
 if TYPE_CHECKING:
     from ._pack import AcceptanceManifest
@@ -268,12 +269,7 @@ def assert_sdist_builds_candidate_wheel(source_artifact: Path, artifact: Path) -
         source_root = temporary_root / "source"
         output_directory = temporary_root / "wheel"
         _extract_sdist(source_artifact, source_root, root)
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in {"PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"}
-        }
-        environment["M_AGENT_RUN_LIVE_TESTS"] = "0"
+        environment = isolated_subprocess_environment()
         try:
             completed = subprocess.run(
                 [uv, "build", "--offline", "--wheel", "--out-dir", str(output_directory)],
