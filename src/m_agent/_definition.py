@@ -34,6 +34,8 @@ from ._model import (
     RevisionStability,
     ToolCallingMode,
 )
+from ._output import OutputContract
+from ._policy import AllowAllRunPolicy, PolicyIdentity, RunPolicy
 from ._tools import Tool, ToolDeclaration, ToolEffect
 
 
@@ -87,6 +89,12 @@ class DefinitionSnapshot(BaseModel, frozen=True):
     #: 依据本快照中的策略，运行中修改 Agent Definition 不影响已有 Run
     #: （ADR 0022/0023）。None 表示该 Run 不自动重试。
     retry_policy: RetryPolicy | None = None
+    #: Deterministic policy identity and the versioned final output semantics
+    #: are persisted with the Run; recovery never consults a later Definition.
+    policy_identity: PolicyIdentity = Field(
+        default_factory=lambda: AllowAllRunPolicy().identity
+    )
+    output_contract: OutputContract | None = None
 
     @model_validator(mode="after")
     def _validate_model_snapshot_shape(self) -> "DefinitionSnapshot":
@@ -146,6 +154,11 @@ class AgentDefinition(BaseModel, frozen=True):
     #: 自动重试。与 model_adapter 不同，Retry Policy 是纯数据声明，
     #: 随 Snapshot 一起冻结、持久化（不 exclude），恢复决策只读快照。
     retry_policy: RetryPolicy | None = None
+    #: Deterministic executable policy is an application-supplied port, never
+    #: serialized. Its immutable identity is persisted in the Snapshot.
+    run_policy: RunPolicy = Field(default_factory=AllowAllRunPolicy, exclude=True)
+    #: Versioned final-output semantics, frozen into every created Run.
+    output_contract: OutputContract | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -273,6 +286,16 @@ class AgentDefinition(BaseModel, frozen=True):
 
     def effective_model_bindings(self) -> ModelBindingSet:
         requirements = self.effective_model_requirements()
+        output_requirements = ModelRequirements()
+        if (
+            self.output_contract is not None
+            and self.output_contract.structured_output.value != "NONE"
+        ):
+            output_requirements = ModelRequirements(
+                capabilities=ModelCapabilities(
+                    structured_output=self.output_contract.structured_output
+                )
+            )
         contract = self._model_contract_for(self.model_adapter)
         bindings = self.model_bindings.resolved()
         primary = bindings.for_purpose(ModelPurpose.PRIMARY)
@@ -290,6 +313,8 @@ class AgentDefinition(BaseModel, frozen=True):
                 ),
                 "requirements": primary.requirements.merged_with(
                     requirements
+                ).merged_with(
+                    output_requirements
                 ).effective_for(primary.contract)
             }
         )
@@ -312,9 +337,11 @@ class AgentDefinition(BaseModel, frozen=True):
                                 binding.contract,
                             )
                         ),
-                        "requirements": binding.requirements.effective_for(
-                            binding.contract
-                        )
+                        "requirements": (
+                            binding.requirements.merged_with(output_requirements)
+                            if binding.purpose is ModelPurpose.OUTPUT_REPAIR
+                            else binding.requirements
+                        ).effective_for(binding.contract)
                     }
                 )
                 for binding in bindings.bindings
@@ -355,6 +382,8 @@ class AgentDefinition(BaseModel, frozen=True):
                 for tool in self.tools
             ),
             retry_policy=self.retry_policy,
+            policy_identity=self.run_policy.identity,
+            output_contract=self.output_contract,
         )
 
 

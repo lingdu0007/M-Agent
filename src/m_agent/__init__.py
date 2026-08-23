@@ -76,6 +76,18 @@ from ._definition import (
     DefinitionSnapshot,
     RetryPolicy,
 )
+from ._output import OutputContract, OutputFallback, OutputRepairPolicy
+from ._policy import (
+    AllowAllRunPolicy,
+    PolicyAction,
+    PolicyDecision,
+    PolicyDecisionRecord,
+    PolicyGate,
+    PolicyIdentity,
+    PolicyRequest,
+    RunPolicy,
+    StaticRunPolicy,
+)
 from ._errors import (
     DefinitionConflictError,
     DefinitionNotFoundError,
@@ -143,8 +155,11 @@ from ._updates import RunUpdate, RunUpdateType
 from ._runner import (
     DEFAULT_LEASE_TTL,
     ERROR_EFFECT_UNCONFIRMED,
+    ERROR_OUTPUT_VALIDATION_FAILED,
+    ERROR_POLICY_ERROR,
     CrashPoint,
     REASON_DEFINITION_UNAVAILABLE,
+    REASON_POLICY_RESOLUTION_REQUIRED,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     Runner,
 )
@@ -152,6 +167,7 @@ from ._sync import SyncRunner
 
 __all__ = [
     "AgentDefinition",
+    "AllowAllRunPolicy",
     "ALLOWED_FOR_DEFINITION_UNAVAILABLE",
     "ALLOWED_FOR_UNCERTAIN_NON_IDEMPOTENT",
     "Clock",
@@ -171,6 +187,8 @@ __all__ = [
     "DeterministicTool",
     "DuplicateRunError",
     "ERROR_EFFECT_UNCONFIRMED",
+    "ERROR_OUTPUT_VALIDATION_FAILED",
+    "ERROR_POLICY_ERROR",
     "FakeClock",
     "FailureClassification",
     "IllegalRunTransitionError",
@@ -186,9 +204,19 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ModelUsage",
+    "OutputContract",
+    "OutputFallback",
+    "OutputRepairPolicy",
     "PayloadCodec",
+    "PolicyAction",
+    "PolicyDecision",
+    "PolicyDecisionRecord",
+    "PolicyGate",
+    "PolicyIdentity",
+    "PolicyRequest",
     "PlaintextPayloadCodec",
     "REASON_DEFINITION_UNAVAILABLE",
+    "REASON_POLICY_RESOLUTION_REQUIRED",
     "REASON_UNCERTAIN_NON_IDEMPOTENT",
     "ResolutionAction",
     "ResolutionNotAllowedError",
@@ -197,6 +225,7 @@ __all__ = [
     "RunLease",
     "RunNotFoundError",
     "RunRecord",
+    "RunPolicy",
     "Runner",
     "SyncRunner",
     "RunResolution",
@@ -212,6 +241,7 @@ __all__ = [
     "StepRecord",
     "StepStatus",
     "StepType",
+    "StaticRunPolicy",
     "SystemClock",
     "TelemetryEvent",
     "TelemetryEventType",

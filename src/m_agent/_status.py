@@ -51,7 +51,13 @@ TERMINAL_STATUSES: frozenset[RunStatus] = frozenset(
 #: 在安全边界取消，ADR 0012）。终态一律拒绝后续转换。
 _ALLOWED_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.CREATED: frozenset(
-        {RunStatus.RUNNING, RunStatus.WAITING, RunStatus.CANCELLED}
+        {
+            RunStatus.RUNNING,
+            RunStatus.WAITING,
+            RunStatus.REJECTED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }
     ),
     RunStatus.RUNNING: frozenset(
         {

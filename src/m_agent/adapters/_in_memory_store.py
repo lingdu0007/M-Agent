@@ -18,6 +18,7 @@ from .._errors import (
 from .._run import RunRecord
 from .._status import RunStatus, validate_transition
 from .._steps import StepAttempt, StepCheckpoint, StepRecord, StepType, utc_now
+from .._policy import PolicyDecisionRecord
 from .._store import (
     FIELD_RUN_INPUT,
     FIELD_RUN_OUTPUT,
@@ -59,6 +60,7 @@ class InMemoryRunStore:
         self._steps: dict[str, list[StepRecord]] = {}
         self._attempts: dict[str, list[_StoredAttempt]] = {}
         self._checkpoints: dict[str, list[_StoredCheckpoint]] = {}
+        self._policy_decisions: dict[str, list[PolicyDecisionRecord]] = {}
 
     # -- Run Lease ----------------------------------------------------
 
@@ -460,6 +462,31 @@ class InMemoryRunStore:
             )
             for c in self._checkpoints.get(run_id, [])
         ]
+
+    async def record_policy_decision(
+        self,
+        record: PolicyDecisionRecord,
+        *,
+        expected_version: int,
+        lease_owner: str | None = None,
+    ) -> PolicyDecisionRecord:
+        current = self._runs.get(record.run_id)
+        if current is None:
+            raise RunNotFoundError(f"run {record.run_id} not found")
+        if current.version != expected_version:
+            raise StaleRunVersionError(
+                f"stale Policy mutation for run {record.run_id}: expected version "
+                f"{expected_version}, authoritative version is {current.version}"
+            )
+        if lease_owner is not None:
+            self._check_lease(current, lease_owner)
+        self._policy_decisions.setdefault(record.run_id, []).append(record)
+        return record
+
+    async def get_policy_decisions(
+        self, run_id: str
+    ) -> list[PolicyDecisionRecord]:
+        return list(self._policy_decisions.get(run_id, []))
 
     # -- 内部 payload 读取 -------------------------------------------
 

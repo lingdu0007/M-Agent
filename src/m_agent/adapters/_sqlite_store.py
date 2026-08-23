@@ -49,6 +49,7 @@ from .._steps import (
     StepType,
     utc_now,
 )
+from .._policy import PolicyAction, PolicyDecisionRecord, PolicyGate
 from .._store import (
     FIELD_RUN_INPUT,
     FIELD_RUN_OUTPUT,
@@ -115,6 +116,17 @@ CREATE TABLE IF NOT EXISTS step_checkpoints (
     run_id     TEXT NOT NULL,
     attempt_id TEXT NOT NULL,
     step_type  TEXT NOT NULL DEFAULT 'MODEL',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS policy_decisions (
+    run_id TEXT NOT NULL,
+    gate TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    policy_fingerprint TEXT NOT NULL,
+    input_summary TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 """
@@ -998,6 +1010,64 @@ class SQLiteRunStore:
                 )
             )
         return checkpoints
+
+    async def record_policy_decision(
+        self,
+        record: PolicyDecisionRecord,
+        *,
+        expected_version: int,
+        lease_owner: str | None = None,
+    ) -> PolicyDecisionRecord:
+        row = self._conn.execute(
+            "SELECT * FROM runs WHERE run_id = ?", (record.run_id,)
+        ).fetchone()
+        if row is None:
+            raise RunNotFoundError(f"run {record.run_id} not found")
+        stored = _run_from_row(row)
+        if stored.version != expected_version:
+            raise StaleRunVersionError(
+                f"stale Policy mutation for run {record.run_id}: expected version "
+                f"{expected_version}, authoritative version is {stored.version}"
+            )
+        if lease_owner is not None:
+            if (
+                stored.lease_owner != lease_owner
+                or stored.lease_expires_at is None
+                or stored.lease_expires_at <= self._clock.now()
+            ):
+                raise self._lease_conflict(record.run_id, lease_owner)
+        self._conn.execute(
+            "INSERT INTO policy_decisions "
+            "(run_id,gate,action,reason_code,policy_id,policy_version,"
+            "policy_fingerprint,input_summary,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                record.run_id, record.gate.value, record.action.value,
+                record.reason_code, record.policy_id, record.policy_version,
+                record.policy_fingerprint, record.input_summary,
+                record.created_at.isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return record
+
+    async def get_policy_decisions(
+        self, run_id: str
+    ) -> list[PolicyDecisionRecord]:
+        rows = self._conn.execute(
+            "SELECT * FROM policy_decisions WHERE run_id = ? ORDER BY rowid",
+            (run_id,),
+        ).fetchall()
+        return [
+            PolicyDecisionRecord(
+                run_id=row["run_id"], gate=PolicyGate(row["gate"]),
+                action=PolicyAction(row["action"]), reason_code=row["reason_code"],
+                policy_id=row["policy_id"], policy_version=row["policy_version"],
+                policy_fingerprint=row["policy_fingerprint"],
+                input_summary=row["input_summary"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
 
     # -- 内部 payload 读写 -------------------------------------------
 

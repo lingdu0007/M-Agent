@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from ._definition import DefinitionSnapshot
 from ._status import RunStatus
 from ._steps import StepAttempt, StepCheckpoint, StepRecord, utc_now
+from ._policy import PolicyDecisionRecord
 
 
 class RunRecord(BaseModel):
@@ -49,3 +50,4 @@ class RunInspection(BaseModel):
     steps: list[StepRecord] = Field(default_factory=list)
     attempts: list[StepAttempt] = Field(default_factory=list)
     checkpoints: list[StepCheckpoint] = Field(default_factory=list)
+    policy_decisions: list[PolicyDecisionRecord] = Field(default_factory=list)

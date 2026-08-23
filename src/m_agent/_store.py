@@ -29,6 +29,7 @@ from ._steps import (
     StepRecord,
     StepStatus,
 )
+from ._policy import PolicyDecisionRecord
 
 #: Payload 区内字段名（metadata 与 payload 的固定拆分键）。
 FIELD_RUN_INPUT = "run:input"
@@ -249,6 +250,18 @@ class RunStore(Protocol):
     async def get_attempts(self, run_id: str) -> list[StepAttempt]: ...
 
     async def get_checkpoints(self, run_id: str) -> list[StepCheckpoint]: ...
+
+    async def record_policy_decision(
+        self,
+        record: PolicyDecisionRecord,
+        *,
+        expected_version: int,
+        lease_owner: str | None = None,
+    ) -> PolicyDecisionRecord: ...
+
+    async def get_policy_decisions(
+        self, run_id: str
+    ) -> list[PolicyDecisionRecord]: ...
 
 
 def _split_run(run: RunRecord, codec: PayloadCodec) -> tuple[_StoredRun, dict[str, bytes]]:

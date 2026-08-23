@@ -37,6 +37,7 @@ class ResolutionAction(str, enum.Enum):
     CONFIRM_STEP = "CONFIRM_STEP"
     FAIL_RUN = "FAIL_RUN"
     CANCEL_RUN = "CANCEL_RUN"
+    CONTINUE_RUN = "CONTINUE_RUN"
 
 
 class RunResolution(BaseModel, frozen=True):
@@ -118,6 +119,12 @@ ALLOWED_FOR_DEFINITION_UNAVAILABLE: tuple[ResolutionAction, ...] = (
     ResolutionAction.CANCEL_RUN,
 )
 
+ALLOWED_FOR_POLICY_RESOLUTION: tuple[ResolutionAction, ...] = (
+    ResolutionAction.CONTINUE_RUN,
+    ResolutionAction.FAIL_RUN,
+    ResolutionAction.CANCEL_RUN,
+)
+
 
 def allowed_resolutions(run: RunRecord) -> tuple[ResolutionAction, ...]:
     """返回当前 WAITING Run 机器可读的合法 resolution actions。
@@ -129,6 +136,7 @@ def allowed_resolutions(run: RunRecord) -> tuple[ResolutionAction, ...]:
     """
     from ._runner import (  # 延迟导入避免循环依赖
         REASON_DEFINITION_UNAVAILABLE,
+        REASON_POLICY_RESOLUTION_REQUIRED,
         REASON_UNCERTAIN_NON_IDEMPOTENT,
     )
 
@@ -136,6 +144,10 @@ def allowed_resolutions(run: RunRecord) -> tuple[ResolutionAction, ...]:
         return ALLOWED_FOR_UNCERTAIN_NON_IDEMPOTENT
     if run.waiting_reason == REASON_DEFINITION_UNAVAILABLE:
         return ALLOWED_FOR_DEFINITION_UNAVAILABLE
+    if run.waiting_reason and run.waiting_reason.startswith(
+        REASON_POLICY_RESOLUTION_REQUIRED + ":"
+    ):
+        return ALLOWED_FOR_POLICY_RESOLUTION
     return ()
 
 
