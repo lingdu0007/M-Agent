@@ -35,6 +35,8 @@ SAFE_ERROR_CODES = frozenset(
         "MODEL_CAPABILITY_UNSUPPORTED",
         "MODEL_CONTRACT_VIOLATION",
         "MODEL_DISPATCH_CANCELLED",
+        "POLICY_ERROR",
+        "POLICY_OUTCOME_PENDING",
         "effect_unconfirmed",
         "invalid_request",
         "lookup_broken",

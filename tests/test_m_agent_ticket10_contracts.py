@@ -13,9 +13,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import httpx
 
 from m_agent.adapters import (
     InMemorySpanExporter,
@@ -36,9 +39,11 @@ from m_agent.runtime import (
     ModelRequest,
     ModelResponse,
     ModelRequirements,
+    OutputContract,
     RevisionStability,
     RunStatus,
     StreamingMode,
+    StructuredOutputMode,
     TelemetryEvent,
     TelemetryEventType,
 )
@@ -221,6 +226,79 @@ class AdapterContractKitTests(unittest.IsolatedAsyncioTestCase):
             await adapter.aclose()
         self.assertEqual(adapter.requests, [])
 
+    async def test_official_strict_schema_must_match_output_contract_at_registration(
+        self,
+    ) -> None:
+        adapter_schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        }
+        matching_contract_schema = {
+            "additionalProperties": False,
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string"}},
+            "type": "object",
+        }
+        mismatched_contract_schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        }
+        for adapter_type in (ChatCompletionsModelAdapter, ResponsesModelAdapter):
+            for label, contract_schema, accepts_registration in (
+                ("matching", matching_contract_schema, True),
+                ("mismatched", mismatched_contract_schema, False),
+            ):
+                with self.subTest(adapter=adapter_type.__name__, schema=label):
+                    probe = adapter_type(
+                        model="fixture-model",
+                        base_url="https://offline.invalid/v1",
+                        structured_output_schema=adapter_schema,
+                    )
+                    adapter = adapter_type(
+                        model="fixture-model",
+                        base_url="https://offline.invalid/v1",
+                        model_contract=_official_fixture_contract(probe),
+                        structured_output_schema=adapter_schema,
+                    )
+                    definition = AgentDefinition.for_adapter(
+                        definition_id=(
+                            f"{adapter_type.__name__}-{label}-output-contract"
+                        ),
+                        version="1",
+                        instructions="Offline registration only.",
+                        model_adapter=adapter,
+                        output_contract=OutputContract(
+                            contract_id="answer",
+                            version="1",
+                            schema=contract_schema,
+                            structured_output=(
+                                StructuredOutputMode.JSON_SCHEMA_STRICT
+                            ),
+                        ),
+                    )
+                    try:
+                        registry = DefinitionRegistry()
+                        if accepts_registration:
+                            registry.register(definition)
+                            self.assertTrue(
+                                registry.is_registered(
+                                    definition.definition_id, definition.version
+                                )
+                            )
+                        else:
+                            with self.assertRaisesRegex(
+                                ModelCapabilityError, "Output Contract schema"
+                            ):
+                                registry.register(definition)
+                    finally:
+                        await probe.aclose()
+                        await adapter.aclose()
+                    self.assertEqual(adapter.requests, [])
+
     async def test_offline_fixture_request_log_excludes_credential_canary(self) -> None:
         credential_canary = "T10-CREDENTIAL-CANARY"
         fixture = chat_completion_fixture()
@@ -263,6 +341,117 @@ class AdapterContractKitTests(unittest.IsolatedAsyncioTestCase):
                 await adapter.aclose()
         self.assertEqual(caught.exception.code, "provider_unavailable")
         self.assertEqual(len(fixture.requests), 1)
+
+    async def test_provider_errors_never_echo_endpoint_canaries(self) -> None:
+        """Both direct and streamed official dispatches redact endpoint detail."""
+        from m_agent.runtime import ModelFailure
+
+        endpoint_canary = "T10-ENDPOINT-CANARY"
+        request = ModelRequest(input="hello", instructions="reply")
+        with patch.dict(os.environ, {"M_AGENT_OPENAI_API_KEY": "fixture-key"}):
+            for adapter_type in (
+                ChatCompletionsModelAdapter,
+                ResponsesModelAdapter,
+            ):
+                for dispatch in ("generate", "stream"):
+                    with self.subTest(adapter=adapter_type.__name__, dispatch=dispatch):
+                        fixture = provider_error_fixture(429)
+                        adapter = adapter_type(
+                            base_url=(
+                                f"https://{endpoint_canary}.invalid/v1?"
+                                "credential=ignored"
+                            ),
+                            transport=fixture.transport,
+                        )
+                        try:
+                            with self.assertRaises(ModelFailure) as caught:
+                                if dispatch == "generate":
+                                    await adapter.generate(request)
+                                else:
+                                    await anext(adapter.stream(request))
+                        finally:
+                            await adapter.aclose()
+                        self.assertEqual(caught.exception.code, "provider_unavailable")
+                        self.assertNotIn(endpoint_canary, str(caught.exception))
+                        self.assertNotIn(endpoint_canary, caught.exception.message)
+
+    async def test_transport_errors_do_not_chain_endpoint_canaries(self) -> None:
+        """The public failure boundary also drops the original exception chain."""
+        from m_agent.runtime import ModelFailure
+
+        endpoint_canary = "T10-TRANSPORT-ENDPOINT-CANARY"
+        request = ModelRequest(input="hello", instructions="reply")
+
+        def offline_transport_error(_request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError(endpoint_canary)
+
+        with patch.dict(os.environ, {"M_AGENT_OPENAI_API_KEY": "fixture-key"}):
+            for adapter_type in (
+                ChatCompletionsModelAdapter,
+                ResponsesModelAdapter,
+            ):
+                for dispatch in ("generate", "stream"):
+                    with self.subTest(adapter=adapter_type.__name__, dispatch=dispatch):
+                        adapter = adapter_type(
+                            base_url=f"https://{endpoint_canary}.invalid/v1",
+                            transport=httpx.MockTransport(offline_transport_error),
+                        )
+                        try:
+                            with self.assertRaises(ModelFailure) as caught:
+                                if dispatch == "generate":
+                                    await adapter.generate(request)
+                                else:
+                                    await anext(adapter.stream(request))
+                        finally:
+                            await adapter.aclose()
+                        rendered = "".join(
+                            traceback.format_exception(caught.exception)
+                        )
+                        self.assertIsNone(caught.exception.__cause__)
+                        self.assertNotIn(endpoint_canary, rendered)
+
+    async def test_invalid_provider_bodies_do_not_chain_raw_content_canaries(self) -> None:
+        """Malformed HTTP and SSE bodies never survive in failure tracebacks."""
+        from m_agent.runtime import ModelFailure
+
+        raw_canary = "T10-PROVIDER-RAW-CANARY"
+        request = ModelRequest(input="hello", instructions="reply")
+        with patch.dict(os.environ, {"M_AGENT_OPENAI_API_KEY": "fixture-key"}):
+            for adapter_type in (
+                ChatCompletionsModelAdapter,
+                ResponsesModelAdapter,
+            ):
+                for dispatch, response in (
+                    ("generate", httpx.Response(200, content=raw_canary)),
+                    (
+                        "stream",
+                        httpx.Response(
+                            200,
+                            content=f"data: {raw_canary}\n\n",
+                            headers={"content-type": "text/event-stream"},
+                        ),
+                    ),
+                ):
+                    with self.subTest(adapter=adapter_type.__name__, dispatch=dispatch):
+                        adapter = adapter_type(
+                            base_url="https://offline.invalid/v1",
+                            transport=httpx.MockTransport(
+                                lambda _request, response=response: response
+                            ),
+                        )
+                        try:
+                            with self.assertRaises(ModelFailure) as caught:
+                                if dispatch == "generate":
+                                    await adapter.generate(request)
+                                else:
+                                    await anext(adapter.stream(request))
+                        finally:
+                            await adapter.aclose()
+                        rendered = "".join(
+                            traceback.format_exception(caught.exception)
+                        )
+                        self.assertIsNone(caught.exception.__cause__)
+                        self.assertNotIn(raw_canary, rendered)
 
     async def test_offline_stream_fixtures_cover_completion_and_cancellation(self) -> None:
         with patch.dict(os.environ, {"M_AGENT_OPENAI_API_KEY": "fixture-key"}):

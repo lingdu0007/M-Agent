@@ -450,6 +450,16 @@ class DefinitionRegistry:
                     f"is incompatible with {binding.purpose.value} Model Contract: "
                     f"reason_code={missing}"
                 )
+            output_contract = definition.output_contract
+            if (
+                output_contract is not None
+                and binding.purpose
+                in (ModelPurpose.PRIMARY, ModelPurpose.OUTPUT_REPAIR)
+            ):
+                adapter.assert_output_contract_schema(
+                    output_contract.structured_output,
+                    output_contract.schema_definition,
+                )
             contract_key = (
                 binding.contract.contract_id,
                 binding.contract.version,

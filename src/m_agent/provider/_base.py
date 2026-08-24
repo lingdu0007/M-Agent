@@ -32,11 +32,11 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
 from m_agent._context import ContextItem
-from m_agent._errors import ModelContractViolationError
+from m_agent._errors import ModelCapabilityError, ModelContractViolationError
 from m_agent._failure import FailureClassification, ModelFailure
 from m_agent._model import (
     ModelAdapter,
@@ -178,28 +178,34 @@ def classify_provider_status(status_code: int) -> tuple[FailureClassification, s
 def provider_error(
     status_code: int, *, operation: str
 ) -> ModelFailure:
+    # Endpoint configuration is deployment-sensitive and must never cross the
+    # adapter error boundary.  Keep ``operation`` for source compatibility with
+    # the endpoint implementations, but deliberately do not retain it.
+    del operation
     classification, code = classify_provider_status(status_code)
     return ModelFailure(
         classification,
         code,
-        f"{operation} failed with HTTP {status_code}",
+        f"provider request failed with HTTP {status_code}",
     )
 
 
 def transport_error(exc: BaseException, *, operation: str) -> ModelFailure:
     """网络 / 超时 / 传输错误：瞬时分类；消息不含任何请求内容。"""
+    del operation
     return ModelFailure(
         FailureClassification.TRANSIENT,
         "provider_transport_error",
-        f"{operation} failed at the transport layer: {type(exc).__name__}",
+        f"provider request failed at the transport layer: {type(exc).__name__}",
     )
 
 
 def invalid_response(operation: str, detail: str) -> ModelFailure:
+    del operation
     return ModelFailure(
         FailureClassification.PERMANENT,
         "provider_response_invalid",
-        f"{operation} returned an unparseable response: {detail}",
+        f"provider response is invalid: {detail}",
     )
 
 
@@ -804,15 +810,52 @@ class ProviderModelAdapter(ModelAdapter):
                 )
             try:
                 content = json.loads(response.content or "")
-            except (AttributeError, json.JSONDecodeError) as exc:
+            except (AttributeError, json.JSONDecodeError):
                 raise ModelContractViolationError(
                     "strict structured response is not valid JSON"
-                ) from exc
+                ) from None
             if not _matches_json_schema(content, schema, schema):
                 raise ModelContractViolationError(
                     "strict structured response violates the configured JSON Schema"
                 )
         return response
+
+    def assert_output_contract_schema(
+        self,
+        mode: StructuredOutputMode,
+        schema: Mapping[str, Any],
+    ) -> None:
+        """Bind native strict output to the Definition's frozen schema."""
+        if mode is not StructuredOutputMode.JSON_SCHEMA_STRICT:
+            return
+        configured = self.structured_output_schema
+        if configured is None:
+            raise ModelCapabilityError(
+                "provider strict output requires an Output Contract schema"
+            )
+        try:
+            configured_schema = json.dumps(
+                configured,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            contract_schema = json.dumps(
+                schema,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ModelCapabilityError(
+                "provider strict Output Contract schema is not JSON-serializable"
+            ) from exc
+        if configured_schema != contract_schema:
+            raise ModelCapabilityError(
+                "provider strict schema does not match Output Contract schema"
+            )
 
     # -- 供子类使用的 HTTP 基础设施 -----------------------------------
 
@@ -856,7 +899,7 @@ class ProviderModelAdapter(ModelAdapter):
                 url, json=payload, headers=self._headers(api_key)
             )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
-            raise transport_error(exc, operation=url) from exc
+            raise transport_error(exc, operation=url) from None
         if 300 <= response.status_code < 400:
             raise provider_error(response.status_code, operation=url)
         if response.status_code >= 400:
@@ -866,7 +909,7 @@ class ProviderModelAdapter(ModelAdapter):
         except ValueError as exc:
             raise invalid_response(
                 url, f"expected JSON body ({type(exc).__name__})"
-            ) from exc
+            ) from None
 
     async def aclose(self) -> None:
         """关闭底层 HTTP 客户端（幂等；应用在进程退出前调用）。"""
@@ -908,4 +951,4 @@ async def consume_sse_events(
         except ValueError as exc:
             raise invalid_response(
                 "stream", f"invalid SSE JSON ({type(exc).__name__})"
-            ) from exc
+            ) from None

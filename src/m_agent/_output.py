@@ -4,11 +4,102 @@ from __future__ import annotations
 
 import enum
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ._model import StructuredOutputMode
+
+
+class _FrozenSchemaDict(dict[str, Any]):
+    """A JSON-compatible mapping that rejects in-place schema mutation."""
+
+    def __init__(self, values: dict[str, Any]) -> None:
+        dict.__init__(self)
+        for key, value in values.items():
+            dict.__setitem__(self, key, value)
+
+    @staticmethod
+    def _immutable(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise TypeError("Output Contract schema is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __ior__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+
+    def __copy__(self) -> "_FrozenSchemaDict":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_FrozenSchemaDict":
+        del memo
+        return self
+
+
+class _FrozenSchemaList(list[Any]):
+    """A JSON-compatible sequence that rejects in-place schema mutation."""
+
+    def __init__(self, values: list[Any]) -> None:
+        list.__init__(self, values)
+
+    @staticmethod
+    def _immutable(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise TypeError("Output Contract schema is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __iadd__ = _immutable
+    __imul__ = _immutable
+    append = _immutable
+    clear = _immutable
+    extend = _immutable
+    insert = _immutable
+    pop = _immutable
+    remove = _immutable
+    reverse = _immutable
+    sort = _immutable
+
+    def __copy__(self) -> "_FrozenSchemaList":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_FrozenSchemaList":
+        del memo
+        return self
+
+
+def _freeze_schema_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _FrozenSchemaDict(
+            {key: _freeze_schema_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return _FrozenSchemaList([_freeze_schema_value(item) for item in value])
+    return value
+
+
+def _canonical_frozen_schema(value: dict[str, Any]) -> dict[str, Any]:
+    """Copy a JSON Schema through its canonical JSON representation."""
+    try:
+        canonical = json.loads(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Output Contract schema must be JSON-serializable") from exc
+    if not isinstance(canonical, dict):  # Defensive: the field type is dict.
+        raise ValueError("Output Contract schema must be a JSON object")
+    return _freeze_schema_value(canonical)
 
 
 class OutputFallback(str, enum.Enum):
@@ -32,12 +123,30 @@ class OutputContract(BaseModel, frozen=True):
     fallback: OutputFallback = OutputFallback.NONE
     repair: OutputRepairPolicy | None = None
 
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> "OutputContract":
+        """Copy through validation so a public update cannot thaw the schema."""
+        del deep
+        values = self.model_dump()
+        if update is not None:
+            values.update(update)
+        return type(self).model_validate(values)
+
     @model_validator(mode="after")
     def _validate_fallback(self) -> "OutputContract":
         if self.fallback is OutputFallback.REPAIR and self.repair is None:
             raise ValueError("Output REPAIR fallback requires OutputRepairPolicy")
         if self.fallback is OutputFallback.NONE and self.repair is not None:
             raise ValueError("OutputRepairPolicy requires REPAIR fallback")
+        object.__setattr__(
+            self,
+            "schema_definition",
+            _canonical_frozen_schema(self.schema_definition),
+        )
         return self
 
 

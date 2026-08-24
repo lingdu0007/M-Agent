@@ -1140,6 +1140,19 @@ class ModelAdapter(ABC):
         """Validate provider-specific response guarantees before normalization."""
         return response
 
+    def assert_output_contract_schema(
+        self,
+        mode: StructuredOutputMode,
+        schema: Mapping[str, Any],
+    ) -> None:
+        """Validate an Output Contract schema before a Definition is registered.
+
+        Generic and deterministic adapters have no adapter-local schema to
+        compare, so they deliberately retain a no-op implementation. Official
+        adapters override this seam for native strict structured output.
+        """
+        del mode, schema
+
     @abstractmethod
     async def generate(self, request: ModelRequest) -> ModelResponse:
         """按统一模型契约生成一次完整响应。"""

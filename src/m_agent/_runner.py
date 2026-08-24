@@ -112,7 +112,7 @@ from ._model import (
     normalize_model_response,
     serialize_model_response,
 )
-from ._output import OutputFallback, validate_output
+from ._output import OutputContract, OutputFallback, validate_output
 from ._resolution import (
     ResolutionAction,
     RunResolution,
@@ -154,6 +154,7 @@ REASON_DEFINITION_UNAVAILABLE = "DEFINITION_UNAVAILABLE"
 REASON_UNCERTAIN_NON_IDEMPOTENT = "UNCERTAIN_NON_IDEMPOTENT"
 REASON_POLICY_RESOLUTION_REQUIRED = "POLICY_RESOLUTION_REQUIRED"
 ERROR_POLICY_ERROR = "POLICY_ERROR"
+ERROR_POLICY_OUTCOME_PENDING = "POLICY_OUTCOME_PENDING"
 ERROR_OUTPUT_VALIDATION_FAILED = "OUTPUT_VALIDATION_FAILED"
 
 #: 恢复时发现未确认的 NON_IDEMPOTENT 工具调用（外部效果可能已在崩溃前
@@ -796,6 +797,46 @@ class Runner:
                     lease_owner=lease.owner,
                 )
                 self._publish_status(run.run_id, RunStatus.RUNNING)
+                if run.waiting_reason and run.waiting_reason.startswith(
+                    REASON_POLICY_RESOLUTION_REQUIRED + ":"
+                ):
+                    decisions = await self._store.get_policy_decisions(run.run_id)
+                    last_decision = decisions[-1] if decisions else None
+                    if last_decision is not None and (
+                        last_decision.gate is PolicyGate.TOOL_OUTCOME
+                    ):
+                        pending_attempt = await self._pending_tool_outcome(
+                            run, run.waiting_step_id
+                        )
+                        if pending_attempt is None or pending_attempt.output is None:
+                            raise RuntimeError(
+                                "policy-held Tool Outcome has no pending evidence"
+                            )
+                        pending_outcome = deserialize_tool_outcome(
+                            pending_attempt.output
+                        )
+                        running = await self._enforce_policy(
+                            running,
+                            definition,
+                            lease,
+                            PolicyGate.TOOL_OUTCOME,
+                            {
+                                "tool_name": pending_outcome.tool_name,
+                                "call_id": pending_outcome.call_id,
+                                "status": pending_outcome.status.value,
+                                "continued_by_application": True,
+                            },
+                            waiting_step_id=run.waiting_step_id,
+                        )
+                        if running.status is not RunStatus.RUNNING:
+                            return running
+                        await self._checkpoint_tool_outcome(
+                            running,
+                            lease,
+                            pending_attempt.step_id,
+                            pending_outcome,
+                            attempt_id=pending_attempt.attempt_id,
+                        )
                 self._active_advancers.add(run_id)
                 try:
                     if not await self._store.get_checkpoints(run.run_id):
@@ -1191,6 +1232,23 @@ class Runner:
                 target_call.tool_name,
                 result=resolution.result,
             )
+            # Application confirmation creates a model-visible Tool Outcome.
+            # It must cross the same final authorization seam as an outcome
+            # returned by a dispatched Tool before becoming durable evidence.
+            run = await self._enforce_policy(
+                run,
+                definition,
+                lease,
+                PolicyGate.TOOL_OUTCOME,
+                {
+                    "tool_name": outcome.tool_name,
+                    "call_id": outcome.call_id,
+                    "status": outcome.status.value,
+                    "confirmed_by_application": True,
+                },
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
             await self._checkpoint_tool_outcome(
                 run, lease, target_step_id, outcome
             )
@@ -1366,6 +1424,19 @@ class Runner:
         ]
         persisted_steps = await self._store.get_steps(run.run_id)
         persisted_attempts = await self._store.get_attempts(run.run_id)
+        pending_outcome_attempt = next(
+            (
+                attempt
+                for attempt in reversed(persisted_attempts)
+                if attempt.error_code == ERROR_POLICY_OUTCOME_PENDING
+                and attempt.output is not None
+            ),
+            None,
+        )
+        if pending_outcome_attempt is not None:
+            return await self._enter_waiting_policy_outcome(
+                run, lease, pending_outcome_attempt.step_id
+            )
         inflight_step = next(
             (
                 step
@@ -1516,6 +1587,18 @@ class Runner:
                 if run.status is not RunStatus.RUNNING:
                     return run
         if recovery_model_step_id is not None:
+            if (
+                inflight_model_attempt is not None
+                and inflight_model_attempt.model_purpose
+                is ModelPurpose.OUTPUT_REPAIR
+            ):
+                return await self._resume_output_repair(
+                    run,
+                    definition,
+                    lease,
+                    step_id=recovery_model_step_id,
+                    model_checkpoints=model_checkpoints,
+                )
             return await self._run_agent_loop(
                 run,
                 definition,
@@ -2388,10 +2471,16 @@ class Runner:
         definition: AgentDefinition,
         lease: RunLease,
         output: str,
+        *,
+        repair: bool = False,
     ) -> RunRecord:
         """Apply FINAL_OUTPUT policy then frozen Output Contract/repair."""
         run = await self._enforce_policy(
-            run, definition, lease, PolicyGate.FINAL_OUTPUT, {"output": output}
+            run,
+            definition,
+            lease,
+            PolicyGate.FINAL_OUTPUT,
+            {"output": output, "repair": True} if repair else {"output": output},
         )
         if run.status is not RunStatus.RUNNING:
             return run
@@ -2446,15 +2535,6 @@ class Runner:
             for attempt in await self._store.get_attempts(run.run_id)
         )
         for _ in range(max(0, max_attempts - used_attempts)):
-            repair_input = {
-                "invalid_output": candidate,
-                "validation_error": validation_error,
-                "output_contract": {
-                    "contract_id": contract.contract_id,
-                    "version": contract.version,
-                    "schema": contract.schema_definition,
-                },
-            }
             run, response = await self._run_single_model_step(
                 run,
                 definition,
@@ -2462,8 +2542,8 @@ class Runner:
                 (),
                 (),
                 purpose=ModelPurpose.OUTPUT_REPAIR,
-                input_override=json.dumps(
-                    repair_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                input_override=self._output_repair_input(
+                    contract, candidate, validation_error
                 ),
                 allow_tools=False,
             )
@@ -2494,6 +2574,83 @@ class Runner:
                 self._publish_status(run.run_id, RunStatus.SUCCEEDED)
                 return result
         return await self._fail_run(run, lease, ERROR_OUTPUT_VALIDATION_FAILED)
+
+    async def _resume_output_repair(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        *,
+        step_id: str,
+        model_checkpoints: Sequence[StepCheckpoint],
+    ) -> RunRecord:
+        """Replay an uncertain repair reservation using only frozen evidence."""
+        if run.snapshot is None or run.snapshot.output_contract is None:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery requires a frozen Output Contract"
+            )
+        contract = run.snapshot.output_contract
+        if contract.fallback is not OutputFallback.REPAIR:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery requires a frozen REPAIR fallback"
+            )
+        if not model_checkpoints:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery requires an invalid model checkpoint"
+            )
+        candidate_response = deserialize_model_response(model_checkpoints[-1].output)
+        if candidate_response.tool_calls or candidate_response.content is None:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery requires a checkpointed final output"
+            )
+        valid, validation_error = validate_output(contract, candidate_response.content)
+        if valid:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery cannot replay a valid checkpointed output"
+            )
+        run, response = await self._run_single_model_step(
+            run,
+            definition,
+            lease,
+            (),
+            (),
+            step_id=step_id,
+            recovery_replay=True,
+            purpose=ModelPurpose.OUTPUT_REPAIR,
+            input_override=self._output_repair_input(
+                contract,
+                candidate_response.content,
+                validation_error or ERROR_OUTPUT_VALIDATION_FAILED,
+            ),
+            allow_tools=False,
+        )
+        if response is None:
+            return run
+        return await self._finalize_output(
+            run, definition, lease, response.content or "", repair=True
+        )
+
+    @staticmethod
+    def _output_repair_input(
+        contract: OutputContract,
+        invalid_output: str,
+        validation_error: str,
+    ) -> str:
+        """Build the stable repair request from frozen contract evidence."""
+        return json.dumps(
+            {
+                "invalid_output": invalid_output,
+                "validation_error": validation_error,
+                "output_contract": {
+                    "contract_id": contract.contract_id,
+                    "version": contract.version,
+                    "schema": contract.schema_definition,
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     async def _fail_strict_output_contract(
         self, run: RunRecord, lease: RunLease, error_code: str
@@ -2749,6 +2906,7 @@ class Runner:
                     failed_step_id=step_id,
                     failed_step_type=StepType.TOOL,
                     failed_attempt_id=attempt_id,
+                    pending_tool_outcome=outcome,
                 )
                 if run.status is not RunStatus.RUNNING:
                     return run, None
@@ -3052,6 +3210,8 @@ class Runner:
         failed_step_id: str | None = None,
         failed_step_type: StepType | None = None,
         failed_attempt_id: str | None = None,
+        pending_tool_outcome: ToolOutcome | None = None,
+        waiting_step_id: str | None = None,
     ) -> RunRecord:
         """Evaluate and durably evidence one gate before its protected action.
 
@@ -3084,6 +3244,26 @@ class Runner:
             await self._store.record_policy_decision(
                 record, expected_version=run.version, lease_owner=lease.owner
             )
+            if failed_step_id is not None and failed_step_type is not None:
+                await self._record_failed_attempt(
+                    run,
+                    lease,
+                    failed_step_id,
+                    (
+                        FailureClassification.PERMANENT,
+                        ERROR_POLICY_ERROR,
+                        "policy implementation fault",
+                    ),
+                    failed_step_type,
+                    attempt_id=failed_attempt_id,
+                )
+                await self._record_failed_step(
+                    run,
+                    lease,
+                    failed_step_id,
+                    failed_step_type,
+                    error_code=ERROR_POLICY_ERROR,
+                )
             return await self._fail_run(run, lease, ERROR_POLICY_ERROR)
         record = PolicyDecisionRecord(
             run_id=run.run_id,
@@ -3100,6 +3280,34 @@ class Runner:
         )
         if decision.action is PolicyAction.ALLOW:
             return run
+        if decision.action is PolicyAction.REQUIRE_RESOLUTION:
+            if pending_tool_outcome is not None:
+                if failed_step_id is None:
+                    raise RuntimeError(
+                        "policy-held Tool Outcome requires a Tool Step identity"
+                    )
+                await self._record_pending_tool_outcome(
+                    run,
+                    lease,
+                    failed_step_id,
+                    pending_tool_outcome,
+                    attempt_id=failed_attempt_id,
+                )
+            result = await self._store.transition_run(
+                run.run_id,
+                expected_version=run.version,
+                status=RunStatus.WAITING,
+                waiting_reason=(
+                    f"{REASON_POLICY_RESOLUTION_REQUIRED}:{decision.reason_code}"
+                ),
+                waiting_step_id=waiting_step_id or failed_step_id,
+                lease_owner=lease.owner,
+            )
+            await self._store.release_lease(
+                run.run_id, lease.owner, expected_version=result.version
+            )
+            self._publish_status(run.run_id, RunStatus.WAITING)
+            return result
         if failed_step_id is not None and failed_step_type is not None:
             await self._record_failed_attempt(
                 run,
@@ -3133,13 +3341,61 @@ class Runner:
             )
             self._publish_status(run.run_id, RunStatus.REJECTED)
             return result
+        raise AssertionError("unreachable policy decision")
+
+    async def _pending_tool_outcome(
+        self, run: RunRecord, step_id: str | None
+    ) -> StepAttempt | None:
+        if step_id is None:
+            return None
+        attempts = await self._store.get_attempts(run.run_id)
+        return next(
+            (
+                attempt
+                for attempt in reversed(attempts)
+                if attempt.step_id == step_id
+                and attempt.error_code == ERROR_POLICY_OUTCOME_PENDING
+                and attempt.output is not None
+            ),
+            None,
+        )
+
+    async def _record_pending_tool_outcome(
+        self,
+        run: RunRecord,
+        lease: RunLease,
+        step_id: str,
+        outcome: ToolOutcome,
+        *,
+        attempt_id: str | None,
+    ) -> None:
+        """Store a held outcome as protected evidence, never a checkpoint."""
+        await self._store.record_attempt(
+            StepAttempt(
+                attempt_id=attempt_id if attempt_id is not None else new_id(),
+                step_id=step_id,
+                run_id=run.run_id,
+                status=StepStatus.FAILED,
+                output=serialize_tool_outcome(outcome),
+                error="policy outcome awaits explicit continuation",
+                classification=FailureClassification.PERMANENT,
+                error_code=ERROR_POLICY_OUTCOME_PENDING,
+            ),
+            expected_version=run.version,
+            lease_owner=lease.owner,
+        )
+
+    async def _enter_waiting_policy_outcome(
+        self, run: RunRecord, lease: RunLease, step_id: str
+    ) -> RunRecord:
         result = await self._store.transition_run(
             run.run_id,
             expected_version=run.version,
             status=RunStatus.WAITING,
             waiting_reason=(
-                f"{REASON_POLICY_RESOLUTION_REQUIRED}:{decision.reason_code}"
+                f"{REASON_POLICY_RESOLUTION_REQUIRED}:{ERROR_POLICY_OUTCOME_PENDING}"
             ),
+            waiting_step_id=step_id,
             lease_owner=lease.owner,
         )
         await self._store.release_lease(

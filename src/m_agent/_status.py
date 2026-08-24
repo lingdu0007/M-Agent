@@ -62,6 +62,7 @@ _ALLOWED_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.RUNNING: frozenset(
         {
             RunStatus.SUCCEEDED,
+            RunStatus.REJECTED,
             RunStatus.FAILED,
             RunStatus.WAITING,
             RunStatus.CANCELLED,

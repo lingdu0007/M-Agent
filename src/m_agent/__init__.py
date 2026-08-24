@@ -29,8 +29,9 @@ Runtime Integrator 提供：
 - Runner 不承担 worker、queue、scheduler 或自动扫描职责；进程部署、
   任务调度、租约接管完全由上层应用控制。
 - Run Store 是权威状态来源；Telemetry 只用于观测（可采样、脱敏、
-  丢弃），本包不提供 Session / RAG / Workflow / MultiAgent /
-  OpenTelemetry Adapter / Dashboard 等运行时子系统。
+  丢弃）。Core 只定义 ``TelemetrySink``；可选的 OpenTelemetry bridge
+  位于 :mod:`m_agent.adapters`，以本地 exporter / 公共 Protocol 运行，
+  不让 Core 引入 SDK、Collector、Dashboard 或其他观测平台。
 
 最小示例（Runtime Integrator）：
 

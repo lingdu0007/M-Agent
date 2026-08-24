@@ -169,10 +169,10 @@ class ResponsesModelAdapter(ProviderModelAdapter):
                     data["model"] if isinstance(data.get("model"), str) else None
                 ),
             )
-        except (AttributeError, TypeError, ValueError) as exc:
+        except (AttributeError, TypeError, ValueError):
             raise ModelContractViolationError(
                 "provider response cannot be normalized"
-            ) from exc
+            ) from None
 
     async def stream(
         self, request: ModelRequest,
@@ -236,11 +236,11 @@ class ResponsesModelAdapter(ProviderModelAdapter):
                     url, "stream ended without response.completed"
                 )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
-            raise transport_error(exc, operation=url) from exc
-        except (AttributeError, TypeError, ValueError) as exc:
+            raise transport_error(exc, operation=url) from None
+        except (AttributeError, TypeError, ValueError):
             raise ModelContractViolationError(
                 "provider response cannot be normalized"
-            ) from exc
+            ) from None
 
     async def aclose(self) -> None:
         await super().aclose()
