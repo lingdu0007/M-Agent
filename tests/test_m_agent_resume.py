@@ -36,23 +36,31 @@ _TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    FakeClock,
     IllegalRunTransitionError,
-    InMemoryRunStore,
-    PlaintextPayloadCodec,
     REASON_DEFINITION_UNAVAILABLE,
     RunNotFoundError,
     Runner,
     RunStatus,
-    SQLiteRunStore,
     StepType,
     deserialize_model_response,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 
 from fixtures.crash_worker import LoggingContextProvider, LoggingModelAdapter

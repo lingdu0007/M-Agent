@@ -47,7 +47,7 @@ from m_agent.runtime import (
     TelemetryEvent,
     TelemetryEventType,
 )
-from m_agent.provider import (
+from m_agent.adapters.provider import (
     ChatCompletionsModelAdapter,
     ResponsesModelAdapter,
     chat_completion_fixture,

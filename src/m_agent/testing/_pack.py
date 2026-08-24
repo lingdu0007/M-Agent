@@ -166,15 +166,21 @@ class AcceptanceManifest(BaseModel, frozen=True):
             for key, value in self.environment.items()
         ):
             raise ValueError("Manifest environment identity must be nonempty")
-        if not self.scenarios or len(set(self.scenarios)) != len(self.scenarios):
-            raise ValueError("Manifest scenarios must be nonempty and unique")
+        if not self.scenarios or len(
+            {scenario.casefold() for scenario in self.scenarios}
+        ) != len(self.scenarios):
+            raise ValueError(
+                "Manifest scenarios must be nonempty and unique under case folding"
+            )
         if any(not scenario.strip() for scenario in self.scenarios):
             raise ValueError("Manifest scenario declarations must be nonempty")
         if not self.required_checks:
             raise ValueError("Manifest required checks must be nonempty")
         check_ids = [check.check_id for check in self.required_checks]
-        if len(set(check_ids)) != len(check_ids):
-            raise ValueError("Manifest required check_id values must be unique")
+        if len({check_id.casefold() for check_id in check_ids}) != len(check_ids):
+            raise ValueError(
+                "Manifest required check_id values must be unique under case folding"
+            )
         if any(
             not check.required or check.scenario not in self.scenarios
             for check in self.required_checks
@@ -186,12 +192,17 @@ class AcceptanceManifest(BaseModel, frozen=True):
             not command.strip() for command in self.required_cli_commands
         ):
             raise ValueError("Manifest required CLI commands must be unique and nonempty")
+        host_os = self.environment.get("os")
+        if host_os is not None and host_os not in _SUPPORTED_HOST_OSES:
+            raise ValueError(
+                "Manifest environment os must use a supported lowercase identity"
+            )
         if (
             any(
                 check.evidence_level is EvidenceLevel.HOST
                 for check in self.required_checks
             )
-            and self.environment.get("os") == "windows"
+            and host_os == "windows"
         ):
             raise ValueError("Windows is unsupported for Acceptance Pack HOST evidence")
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
@@ -200,6 +211,15 @@ class AcceptanceManifest(BaseModel, frozen=True):
     @field_serializer("environment")
     def _serialize_environment(self, value: Mapping[str, str]) -> dict[str, str]:
         return dict(value)
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """Keep identity validation active for controlled Manifest mutations."""
+        values = self.model_dump()
+        if update is not None:
+            values.update(update)
+        return type(self).model_validate(values)
 
     def canonical_bytes(self) -> bytes:
         payload = self.model_dump(mode="json")
@@ -218,6 +238,9 @@ class AcceptanceManifest(BaseModel, frozen=True):
 CORE_LIFECYCLE_PACK_VERSION = "foundation-v1"
 CORE_LIFECYCLE_PROFILE = "core-lifecycle-foundation"
 CORE_LIFECYCLE_SCENARIO = "core-lifecycle"
+DURABLE_EFFECTS_SCENARIO = "durable-effects-recovery"
+RUNTIME_BASELINE_PACK_VERSION = "runtime-baseline-v1"
+RUNTIME_BASELINE_PROFILE = "runtime-baseline-0-3"
 _CORE_LIFECYCLE_REQUIRED_CHECKS = (
     AcceptanceCheck(
         check_id="core.lifecycle",
@@ -350,7 +373,120 @@ def core_lifecycle_manifest(
         fixture_digest=fixture_digest,
         environment=environment,
         scenarios=(CORE_LIFECYCLE_SCENARIO,),
-        required_checks=_CORE_LIFECYCLE_REQUIRED_CHECKS,
+        required_checks=tuple(
+            _RUNTIME_BASELINE_MIGRATION_CHECK
+            if check.check_id == "core.lifecycle.expand-compatibility"
+            else check
+            for check in _CORE_LIFECYCLE_REQUIRED_CHECKS
+        ),
+        required_cli_commands=("run", "inspect", "verify", "render"),
+    )
+
+
+_RUNTIME_BASELINE_MIGRATION_CHECK = AcceptanceCheck(
+    check_id="core.lifecycle.migration",
+    scenario=CORE_LIFECYCLE_SCENARIO,
+    owner="Distribution API",
+    public_seam="m_agent,m_agent.runtime,m_agent.adapters",
+    positive_check="root_facade_and_directional_migration_errors_match_wheel",
+    negative_check="legacy_root_or_provider_import_is_fail",
+    authoritative_evidence="migration_authoritative_digest",
+    independent_evidence="migration_table_digest",
+    milestone="0_3",
+    non_claim="backward_compatible_0_2_public_surface",
+)
+
+
+_DURABLE_EFFECTS_REQUIRED_CHECKS = (
+    AcceptanceCheck(
+        check_id="durable.effects.recovery-windows",
+        scenario=DURABLE_EFFECTS_SCENARIO,
+        owner="Runtime Core",
+        public_seam="m_agent.runtime.Runner.resume_run,m_agent.runtime.Runner.inspect_run",
+        positive_check="real_child_hard_exit_sqlite_reopen_repeats_cleanly",
+        negative_check="duplicate_effect_or_budget_reset_is_fail",
+        authoritative_evidence="recovery_windows_authoritative_digest",
+        independent_evidence="recovery_windows_journal_digest",
+        milestone="0_3",
+        non_claim="exactly_once_external_effect",
+    ),
+    AcceptanceCheck(
+        check_id="durable.effects.budget-fail-closed",
+        scenario=DURABLE_EFFECTS_SCENARIO,
+        owner="Runtime Core",
+        public_seam="m_agent.runtime.Runner.resume_run,m_agent.runtime.RunInspection",
+        positive_check="pre_dispatch_reservation_survives_hard_exit",
+        negative_check="recovered_budget_capacity_is_fail",
+        authoritative_evidence="budget_fail_closed_authoritative_digest",
+        independent_evidence="budget_fail_closed_journal_digest",
+        milestone="0_3",
+        non_claim="provider_quota_or_cost_budget",
+    ),
+    AcceptanceCheck(
+        check_id="durable.effects.waiting-resolution",
+        scenario=DURABLE_EFFECTS_SCENARIO,
+        owner="Runtime Core",
+        public_seam="m_agent.runtime.Runner.resolve_run",
+        positive_check="uncertain_non_idempotent_effect_waits_for_confirm_resolution",
+        negative_check="automatic_effect_replay_is_fail",
+        authoritative_evidence="waiting_resolution_authoritative_digest",
+        independent_evidence="waiting_resolution_journal_digest",
+        milestone="0_3",
+        non_claim="automatic_uncertain_effect_resolution",
+    ),
+    AcceptanceCheck(
+        check_id="durable.effects.mutation",
+        scenario=DURABLE_EFFECTS_SCENARIO,
+        owner="Testing",
+        public_seam="m_agent.testing.reconcile_recovery_window",
+        positive_check="controlled_duplicate_effect_mutation_is_detected",
+        negative_check="undetected_mutation_is_harness_error",
+        authoritative_evidence="mutation_authoritative_digest",
+        independent_evidence="mutation_independent_digest",
+        milestone="0_3",
+        non_claim="business_effect_evidence",
+    ),
+    AcceptanceCheck(
+        check_id="durable.effects.host-wheel",
+        scenario=DURABLE_EFFECTS_SCENARIO,
+        owner="Testing",
+        public_seam="python -I -m m_agent.testing",
+        positive_check="installed_wheel_runs_child_exit_and_sqlite_reopen",
+        negative_check="source_import_or_artifact_identity_mismatch_is_fail",
+        authoritative_evidence="durable_host_authoritative_digest",
+        independent_evidence="durable_host_independent_digest",
+        milestone="0_3",
+        non_claim="live_provider_or_production_effect",
+        evidence_level=EvidenceLevel.HOST,
+    ),
+)
+
+
+def runtime_baseline_manifest(
+    *,
+    source_commit: str,
+    artifact_digest: str,
+    sdist_digest: str,
+    fixture_digest: str,
+    environment: Mapping[str, str],
+) -> AcceptanceManifest:
+    """Freeze the two required 0.3 Scenarios for one exact candidate."""
+    core_checks = tuple(
+        _RUNTIME_BASELINE_MIGRATION_CHECK
+        if check.check_id == "core.lifecycle.expand-compatibility"
+        else check
+        for check in _CORE_LIFECYCLE_REQUIRED_CHECKS
+    )
+    return AcceptanceManifest(
+        pack_version=RUNTIME_BASELINE_PACK_VERSION,
+        profile=RUNTIME_BASELINE_PROFILE,
+        source_commit=source_commit,
+        artifact_digest=artifact_digest,
+        sdist_digest=sdist_digest,
+        fixture_digest=fixture_digest,
+        environment=environment,
+        scenarios=(CORE_LIFECYCLE_SCENARIO, DURABLE_EFFECTS_SCENARIO),
+        required_checks=(*core_checks, *_DURABLE_EFFECTS_REQUIRED_CHECKS),
         required_cli_commands=("run", "inspect", "verify", "render"),
     )
 

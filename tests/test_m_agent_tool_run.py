@@ -27,16 +27,12 @@ from __future__ import annotations
 
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    InMemoryRunStore,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     Runner,
     RunStatus,
     StepStatus,
@@ -48,6 +44,18 @@ from m_agent import (
     ToolOutcomeStatus,
     deserialize_model_response,
     deserialize_tool_outcome,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 

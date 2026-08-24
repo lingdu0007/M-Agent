@@ -22,13 +22,21 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_boolean_capabilities_and_definition_field_remain_supported(
         self,
     ) -> None:
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            ModelCapabilities,
+            Runner,
+            RunStatus,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
         from m_agent import (
             AgentDefinition,
-            DeterministicModelAdapter,
             DefinitionRegistry,
-            InMemoryRunStore,
-            ModelCapabilities,
-            PlaintextPayloadCodec,
             Runner,
             RunStatus,
         )
@@ -292,7 +300,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_does_not_replay_persisted_failed_model_step(
         self,
     ) -> None:
-        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -448,7 +457,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_preserves_pre_dispatch_budget_failure_code(
         self,
     ) -> None:
-        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -1578,7 +1588,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
             stores[1].close()
 
     def test_strict_provider_binding_requires_configured_schema(self) -> None:
-        from m_agent.provider import ChatCompletionsModelAdapter
+        from m_agent.adapters.provider import ChatCompletionsModelAdapter
         from m_agent.runtime import (
             AgentDefinition,
             ModelCapabilities,
@@ -1634,7 +1644,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
 
         from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
-        from m_agent.provider import ChatCompletionsModelAdapter
+        from m_agent.adapters.provider import ChatCompletionsModelAdapter
         from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
@@ -2878,7 +2888,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inspection.checkpoints, [])
 
     async def test_actual_provider_revision_is_persisted_with_response(self) -> None:
-        from m_agent import deserialize_model_response
+        from m_agent.runtime import deserialize_model_response
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -3746,7 +3756,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_final_lease_check_precedes_adapter_dispatch(self) -> None:
         """A mutable adapter hook cannot invalidate the lease after its guard."""
-        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -3807,7 +3818,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_dispatch_rechecks_lease_after_contract_hooks(
         self,
     ) -> None:
-        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -4269,7 +4281,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_usage_keeps_unavailable_and_rejects_missing_required_fields(
         self,
     ) -> None:
-        from m_agent import deserialize_model_response
+        from m_agent.runtime import deserialize_model_response
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -4527,7 +4539,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_rejects_changed_frozen_model_contract_before_dispatch(
         self,
     ) -> None:
-        from m_agent import DEFAULT_LEASE_TTL, CrashPoint, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL, CrashPoint
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -4815,7 +4828,7 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_sqlite_recovery_replays_uncheckpointed_model_with_budget(
         self,
     ) -> None:
-        from m_agent import FakeClock
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             PlaintextPayloadCodec,
             SQLiteRunStore,
@@ -4928,7 +4941,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """An uncheckpointed Model Attempt consumes budget then replays."""
-        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -5060,7 +5074,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """A failed checkpoint retains usage before bounded replay."""
-        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -5215,7 +5230,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_replays_checkpoint_unconfirmed_attempt_with_budget(
         self,
     ) -> None:
-        from m_agent import DEFAULT_LEASE_TTL, CrashPoint, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL, CrashPoint
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -5318,7 +5334,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """A later checkpoint closes an older failed reservation for that Step."""
-        from m_agent import DEFAULT_LEASE_TTL, CrashPoint, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL, CrashPoint
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
@@ -5412,7 +5429,8 @@ class TypedModelContractRunnerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """A budget limit cannot authorize a second uncertain provider call."""
-        from m_agent import DEFAULT_LEASE_TTL, CrashPoint, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL, CrashPoint
+        from m_agent.adapters import FakeClock
         from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,

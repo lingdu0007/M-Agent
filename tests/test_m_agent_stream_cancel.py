@@ -25,29 +25,23 @@ import os
 import tempfile
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicStreamingModelAdapter,
-    DeterministicTool,
     FailureClassification,
     IllegalRunTransitionError,
-    InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
     ModelDelta,
     ModelFailure,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RetryPolicy,
     Runner,
     RunStatus,
     RunUpdate,
     RunUpdateType,
     StaleRunVersionError,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     ToolCall,
@@ -56,6 +50,20 @@ from m_agent import (
     ToolOutcome,
     ToolRequest,
     deserialize_model_response,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicStreamingModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 
@@ -1079,7 +1087,8 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         from datetime import timedelta
 
-        from m_agent import DEFAULT_LEASE_TTL, FakeClock
+        from m_agent.runtime import DEFAULT_LEASE_TTL
+        from m_agent.adapters import FakeClock
 
         clock = FakeClock()
         store = ReservationGateStore(clock=clock)
@@ -1168,7 +1177,7 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_waiting_run_reuses_resolution(self) -> None:
         # WAITING Run 的取消复用 CANCEL_RUN resolution（Ticket 07 语义）。
-        from m_agent import (
+        from m_agent.runtime import (
             REASON_UNCERTAIN_NON_IDEMPOTENT,
             ToolFailure,
         )

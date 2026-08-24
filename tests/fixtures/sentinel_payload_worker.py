@@ -13,17 +13,24 @@ _SRC = os.path.abspath(
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from m_agent import (  # noqa: E402
+from m_agent.runtime import (
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    FakeClock,
     ModelRequest,
     ModelResponse,
     PayloadCodec,
     Runner,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    FakeClock,
     SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
 )
 
 _CRASH_EXIT_CODE = 17

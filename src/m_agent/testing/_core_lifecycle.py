@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import importlib
 from importlib.resources import files
 import json
 from pathlib import Path
@@ -342,7 +343,7 @@ def _fixture_response() -> tuple[str, str]:
 def _expand_compatibility_observation() -> dict[str, bool | int]:
     """Measure every documented 0.2 root binding through public namespaces."""
     import m_agent
-    from m_agent import adapters, runtime
+    from .. import adapters, runtime
 
     root_exports = tuple(m_agent.__all__)
     runtime_bindings = all(
@@ -483,6 +484,56 @@ def _telemetry_concurrent(events: list[dict], run_ids: set[str]) -> bool:
 
 def _telemetry_digest(*payloads: bytes) -> str:
     return "sha256:" + hashlib.sha256(b"".join(payloads)).hexdigest()
+
+
+def _migration_observation() -> dict[str, object]:
+    """Verify the deliberate 0.3 public import reset and its directions."""
+    root_exports = tuple(__import__("m_agent").__all__)
+    expected_root = {
+        "AgentDefinition",
+        "DefinitionRegistry",
+        "Runner",
+        "SyncRunner",
+        "RunStatus",
+        "RunRecord",
+        "RunInspection",
+    }
+    root_surface = set(root_exports) == expected_root and len(root_exports) == len(expected_root)
+    semantic_namespaces = (
+        all(hasattr(importlib.import_module(name), "__all__")
+            for name in ("m_agent.runtime", "m_agent.adapters", "m_agent.testing"))
+        and hasattr(importlib.import_module("m_agent.companion"), "__all__")
+    )
+    moved = {}
+    runtime_names = set(importlib.import_module("m_agent.runtime").__all__) - set(root_exports)
+    adapter_names = set(importlib.import_module("m_agent.adapters").__all__)
+    for name in runtime_names | adapter_names:
+        try:
+            getattr(__import__("m_agent"), name)
+        except AttributeError as error:
+            destination = "m_agent.runtime" if name in runtime_names else "m_agent.adapters"
+            moved[name] = destination in str(error) or "removed" in str(error)
+        else:
+            moved[name] = False
+    try:
+        importlib.import_module("m_agent.provider")
+    except ImportError as error:
+        provider_removed = "m_agent.adapters.provider" in str(error)
+    else:
+        provider_removed = False
+    try:
+        importlib.import_module("agent_framework")
+    except ImportError as error:
+        legacy_removed = "migrating-from-0.1" in str(error)
+    else:
+        legacy_removed = False
+    return {
+        "root_surface_reset": root_surface,
+        "semantic_namespaces_available": semantic_namespaces,
+        "moved_runtime_errors_directional": all(moved.values()),
+        "provider_namespace_removed_directional": provider_removed,
+        "legacy_namespace_removed_directional": legacy_removed,
+    }
 
 
 def _run_concurrent_telemetry(
@@ -645,7 +696,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         unknown_definition_rejected = True
     else:
         unknown_definition_rejected = False
-    from m_agent import adapters, companion, runtime, testing
+    from .. import adapters, companion, runtime, testing
 
     public_layers_available = (
         getattr(runtime, "Runner") is Runner
@@ -655,7 +706,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
     )
     dependency_violations = find_runtime_dependency_violations()
     dependency_direction_passed = not dependency_violations
-    expand_observation = _expand_compatibility_observation()
+    migration_observation = _migration_observation()
     telemetry_correlated = bool(telemetry_events) and all(
         event.get("run_id") == created.run_id for event in telemetry_events
     )
@@ -784,7 +835,7 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
         "telemetry_concurrent": telemetry_concurrent,
         "telemetry_redacted": telemetry_redacted,
         "telemetry_opentelemetry": telemetry_opentelemetry,
-        **expand_observation,
+        **migration_observation,
     }
     results = (
         AcceptanceCheckResult(
@@ -882,15 +933,15 @@ async def run_core_lifecycle(*, fixture_digest: str) -> tuple[
             ),
         ),
         AcceptanceCheckResult(
-            check_id="core.lifecycle.expand-compatibility",
+            check_id="core.lifecycle.migration",
             status=(
                 AcceptanceCheckStatus.PASS
-                if expand_observation["expand_compatibility"]
+                if all(migration_observation.values())
                 else AcceptanceCheckStatus.FAIL
             ),
             evidence_level=EvidenceLevel.CONTRACT,
-            reason_code="root_expand_compatibility_checked",
-            evidence_digest=_evidence_digest(expand_observation),
+            reason_code="public_import_reset_checked",
+            evidence_digest=_evidence_digest(migration_observation),
         ),
         AcceptanceCheckResult(
             check_id="core.lifecycle.unknown-definition",

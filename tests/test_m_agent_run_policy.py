@@ -9,17 +9,24 @@ from pathlib import Path
 
 class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_input_rejection_prevents_model_dispatch_and_is_inspectable(self) -> None:
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
-            DeterministicModelAdapter,
-            InMemoryRunStore,
-            PlaintextPayloadCodec,
             PolicyAction,
             PolicyDecision,
             PolicyGate,
             Runner,
             StaticRunPolicy,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
 
         adapter = DeterministicModelAdapter(("never dispatched",))
@@ -60,13 +67,34 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_each_policy_gate_has_allow_and_reject_evidence(self) -> None:
         """Each public gate executes before the effect it protects."""
+        from m_agent.runtime import (
+            AgentDefinition,
+            ContextItem,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelRequest,
+            ModelResponse,
+            PolicyAction,
+            PolicyDecision,
+            PolicyGate,
+            PolicyIdentity,
+            RunPolicy,
+            Runner,
+            ToolCall,
+            ToolEffect,
+            ToolOutcome,
+        )
+        from m_agent.adapters import (
+            DeterministicContextProvider,
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
         from m_agent import (
-            AgentDefinition, ContextItem, DefinitionRegistry,
-            DeterministicContextProvider, DeterministicModelAdapter,
-            DeterministicTool, InMemoryRunStore, ModelCapabilities,
-            ModelRequest, ModelResponse, PlaintextPayloadCodec, PolicyAction,
-            PolicyDecision, PolicyGate, PolicyIdentity, RunPolicy, Runner,
-            ToolCall, ToolEffect, ToolOutcome,
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
         from m_agent.runtime import ModelRequirements, ToolCallingMode
 
@@ -155,12 +183,33 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_final_tool_authorization_wins_over_earlier_allow(self) -> None:
         """A changed policy at the final Tool request gate prevents the effect."""
+        from m_agent.runtime import (
+            AgentDefinition,
+            CrashPoint,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelRequest,
+            ModelResponse,
+            PolicyAction,
+            PolicyDecision,
+            PolicyGate,
+            PolicyIdentity,
+            RunPolicy,
+            Runner,
+            ToolCall,
+            ToolEffect,
+            ToolOutcome,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
         from m_agent import (
-            AgentDefinition, CrashPoint, DefinitionRegistry, DeterministicModelAdapter,
-            DeterministicTool, InMemoryRunStore, ModelCapabilities,
-            ModelRequest, ModelResponse, PlaintextPayloadCodec, PolicyAction,
-            PolicyDecision, PolicyGate, PolicyIdentity, RunPolicy, Runner,
-            ToolCall, ToolEffect, ToolOutcome,
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
         from m_agent.runtime import ModelRequirements, ToolCallingMode
 
@@ -232,12 +281,34 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_policy_resolution_continues_a_pending_tool_outcome_without_replaying_effect(self) -> None:
         """A held outcome is re-authorized, never recreated by redispatch."""
+        from m_agent.runtime import (
+            AgentDefinition,
+            CrashPoint,
+            DefinitionRegistry,
+            ModelCapabilities,
+            ModelRequest,
+            ModelResponse,
+            PolicyAction,
+            PolicyDecision,
+            PolicyGate,
+            PolicyIdentity,
+            RunPolicy,
+            RunResolution,
+            Runner,
+            ToolCall,
+            ToolEffect,
+            ToolOutcome,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
         from m_agent import (
-            AgentDefinition, CrashPoint, DefinitionRegistry, DeterministicModelAdapter,
-            DeterministicTool, InMemoryRunStore, ModelCapabilities,
-            ModelRequest, ModelResponse, PlaintextPayloadCodec, PolicyAction,
-            PolicyDecision, PolicyGate, PolicyIdentity, RunPolicy, RunResolution,
-            Runner, ToolCall, ToolEffect, ToolOutcome,
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
         from m_agent.runtime import ModelRequirements, ToolCallingMode
 
@@ -342,10 +413,22 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(policy.outcome_checks, 2)
 
     async def test_policy_fault_fails_closed_without_model_dispatch(self) -> None:
-        from m_agent import (
-            AgentDefinition, DefinitionRegistry, DeterministicModelAdapter,
-            InMemoryRunStore, PlaintextPayloadCodec, PolicyIdentity, Runner,
+        from m_agent.runtime import (
+            AgentDefinition,
+            DefinitionRegistry,
+            PolicyIdentity,
+            Runner,
             RunPolicy,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
 
         class FaultyPolicy(RunPolicy):
@@ -371,17 +454,13 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_confirmed_uncertain_outcome_cannot_bypass_tool_outcome_policy(self) -> None:
         """Application confirmation still crosses the final outcome gate."""
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
-            DeterministicModelAdapter,
-            DeterministicTool,
             FailureClassification,
-            InMemoryRunStore,
             ModelCapabilities,
             ModelRequest,
             ModelResponse,
-            PlaintextPayloadCodec,
             PolicyAction,
             PolicyDecision,
             PolicyGate,
@@ -392,6 +471,17 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
             ToolCall,
             ToolEffect,
             ToolFailure,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
         from m_agent.runtime import ModelRequirements, ToolCallingMode
 
@@ -504,16 +594,12 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_outcome_policy_fault_closes_active_tool_evidence(self) -> None:
         """A policy fault cannot leave an inspected Tool attempt in progress."""
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
-            DeterministicModelAdapter,
-            DeterministicTool,
-            InMemoryRunStore,
             ModelCapabilities,
             ModelRequest,
             ModelResponse,
-            PlaintextPayloadCodec,
             PolicyAction,
             PolicyDecision,
             PolicyGate,
@@ -525,6 +611,17 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
             ToolCall,
             ToolEffect,
             ToolOutcome,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            DeterministicTool,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
         from m_agent.runtime import ModelRequirements, ToolCallingMode
 
@@ -641,15 +738,22 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_invalid_final_output_is_preserved_then_repaired_in_a_new_model_step(self) -> None:
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
-            DeterministicModelAdapter,
-            InMemoryRunStore,
             OutputContract,
             OutputFallback,
             OutputRepairPolicy,
+            Runner,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
             PlaintextPayloadCodec,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
             Runner,
         )
 
@@ -683,10 +787,24 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("OUTPUT_NOT_VALID_JSON", adapter.last_request.input)
 
     async def test_repair_limit_stays_exhausted_after_a_repair_checkpoint_crash(self) -> None:
+        from m_agent.runtime import (
+            AgentDefinition,
+            CrashPoint,
+            DefinitionRegistry,
+            OutputContract,
+            OutputFallback,
+            OutputRepairPolicy,
+            Runner,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            InMemoryRunStore,
+            PlaintextPayloadCodec,
+        )
         from m_agent import (
-            AgentDefinition, CrashPoint, DefinitionRegistry, DeterministicModelAdapter,
-            InMemoryRunStore, OutputContract, OutputFallback, OutputRepairPolicy,
-            PlaintextPayloadCodec, Runner,
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
 
         adapter = DeterministicModelAdapter(("not-json", "still-not-json", '{"answer":"must-not-run"}'))
@@ -715,17 +833,24 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.call_count, 2)
 
     async def test_sqlite_recovery_repairs_checkpointed_invalid_output_without_replaying_primary(self) -> None:
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             CrashPoint,
             DefinitionRegistry,
-            DeterministicModelAdapter,
             OutputContract,
             OutputFallback,
             OutputRepairPolicy,
-            PlaintextPayloadCodec,
             Runner,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            PlaintextPayloadCodec,
             SQLiteRunStore,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
         from m_agent.runtime import ModelExecutionBudget
 
@@ -773,20 +898,27 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sqlite_recovery_replays_uncheckpointed_repair_with_frozen_purpose_and_input(self) -> None:
         """Repair recovery keeps its purpose, input, tool ban, and budget."""
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             CrashPoint,
             DefinitionRegistry,
-            DeterministicModelAdapter,
             ModelRequest,
             OutputContract,
             OutputFallback,
             OutputRepairPolicy,
-            PlaintextPayloadCodec,
             RetryPolicy,
             Runner,
-            SQLiteRunStore,
             StepStatus,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            PlaintextPayloadCodec,
+            SQLiteRunStore,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
         from m_agent.runtime import ModelExecutionBudget, ModelPurpose
 
@@ -906,11 +1038,16 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_output_contract_schema_is_deeply_frozen_across_definition_snapshots(self) -> None:
         """External schema mutation cannot rewrite an existing Run contract."""
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             DefinitionSnapshot,
-            DeterministicModelAdapter,
             OutputContract,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+        )
+        from m_agent import (
+            AgentDefinition,
         )
 
         source_schema = {
@@ -993,15 +1130,13 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sqlite_recovery_keeps_repair_final_output_policy_provenance(self) -> None:
         """A recovered repair response crosses the same repair-specific gate."""
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             CrashPoint,
             DefinitionRegistry,
-            DeterministicModelAdapter,
             OutputContract,
             OutputFallback,
             OutputRepairPolicy,
-            PlaintextPayloadCodec,
             PolicyAction,
             PolicyDecision,
             PolicyGate,
@@ -1009,7 +1144,16 @@ class RunPolicyContractTests(unittest.IsolatedAsyncioTestCase):
             RetryPolicy,
             RunPolicy,
             Runner,
+        )
+        from m_agent.adapters import (
+            DeterministicModelAdapter,
+            PlaintextPayloadCodec,
             SQLiteRunStore,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
+            Runner,
         )
         from m_agent.runtime import ModelExecutionBudget
 

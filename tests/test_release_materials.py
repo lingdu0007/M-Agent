@@ -14,7 +14,7 @@ class ReleaseMaterialTests(unittest.TestCase):
     def test_identity_python_and_dependencies(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
         self.assertEqual(project["name"], "m-agent")
-        self.assertEqual(project["version"], "0.2.0")
+        self.assertEqual(project["version"], "0.3.0")
         self.assertEqual(project["description"], "An embeddable Agent Application Runtime for Python")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], ["pydantic>=2"])
@@ -58,7 +58,7 @@ class ReleaseMaterialTests(unittest.TestCase):
         self.assertIn("testing", project["optional-dependencies"])
         migration = (ROOT / "docs/migrating-to-0.3.md").read_text()
         for marker in (
-            "expand",
+            "contract reset",
             "m_agent.runtime",
             "m_agent.adapters",
             "m_agent.companion",
@@ -72,7 +72,7 @@ class ReleaseMaterialTests(unittest.TestCase):
         for required_check in (
             "core.lifecycle.public-namespaces",
             "core.lifecycle.dependency-direction",
-            "core.lifecycle.expand-compatibility",
+            "core.lifecycle.migration",
             "core.lifecycle.host-wheel",
         ):
             self.assertIn(required_check, matrix)

@@ -37,25 +37,31 @@ from pathlib import Path
 
 import fcntl
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     ContextItem,
     ContextRequest,
     DefinitionRegistry,
-    DeterministicContextProvider,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    FakeClock,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RetryPolicy,
-    SQLiteRunStore,
     ToolCall,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
+)
+from m_agent.adapters import (
+    DeterministicContextProvider,
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 

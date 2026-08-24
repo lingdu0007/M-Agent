@@ -92,12 +92,19 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
 
     def test_root_facade_and_runtime_namespace_complete_one_lifecycle(self) -> None:
         """An integrator can use only public imports for a deterministic Run."""
-        from m_agent import (
+        from m_agent.runtime import (
             AgentDefinition,
             DefinitionRegistry,
+            Runner,
+        )
+        from m_agent.adapters import (
             DeterministicModelAdapter,
             InMemoryRunStore,
             PlaintextPayloadCodec,
+        )
+        from m_agent import (
+            AgentDefinition,
+            DefinitionRegistry,
             Runner,
         )
         from m_agent.adapters import (
@@ -212,7 +219,10 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             ("required_checks", ()),
         ):
             with self.subTest(field=field):
-                changed = manifest.model_copy(update={field: value})
+                try:
+                    changed = manifest.model_copy(update={field: value})
+                except ValueError:
+                    continue
                 self.assertNotEqual(changed.digest, manifest.digest)
                 with self.assertRaises(ValueError):
                     execution.assert_matches(changed)

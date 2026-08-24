@@ -52,15 +52,21 @@ from support_agent import (
     open_after_crash,
 )
 
-from m_agent import (
+from m_agent.runtime import (
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     CrashPoint,
-    PlaintextPayloadCodec,
     RunResolution,
     RunStatus,
     Runner,
-    SQLiteRunStore,
     allowed_resolutions,
+)
+from m_agent.adapters import (
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    RunStatus,
+    Runner,
 )
 
 _CRASH_EXIT_CODE = 17

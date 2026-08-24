@@ -1,6 +1,6 @@
 # M-Agent
 
-M-Agent 0.2.0 is an embeddable Agent Application Runtime for Python. Install
+M-Agent 0.3.0 is an embeddable Agent Application Runtime for Python. Install
 the `m-agent` distribution and import `m_agent`.
 
 ```bash
@@ -17,8 +17,9 @@ observability verification.
 
 ## Runtime Foundation
 
-During the 0.2 expand window, existing `m_agent` imports remain supported.
-New integrations can instead use `m_agent.runtime` for Core contracts and
+The 0.3 release is a deliberate public contract reset. The root package keeps
+only the high-frequency Run facade; removed 0.2 imports fail with directional
+migration errors. New integrations use `m_agent.runtime` for Core contracts and
 ports, `m_agent.adapters` for concrete implementations,
 `m_agent.companion` for optional composition capabilities, and
 `m_agent.testing` for the offline Acceptance Pack. Core does not import the
@@ -37,11 +38,13 @@ to the same async state machine:
 from m_agent import (
     AgentDefinition,
     DefinitionRegistry,
+    Runner,
+    SyncRunner,
+)
+from m_agent.adapters import (
     DeterministicModelAdapter,
     InMemoryRunStore,
     PlaintextPayloadCodec,
-    Runner,
-    SyncRunner,
 )
 
 registry = DefinitionRegistry()
@@ -75,12 +78,10 @@ python examples/durable_support_agent/run_acceptance.py
 
 ## Python and Migration
 
-Supported Python is 3.11 or newer. The offline workflow matrix targets Python
-3.11, 3.12, 3.13, and 3.14. The 0.1 `agent_framework` import path is a
-temporary compatibility shim for accurately mappable synchronous Agent
-behavior. It is deprecated throughout 0.2.x and will be removed in 0.3.0.
-Unsupported legacy concepts raise `LegacyMigrationError`. See [the migration
-table](docs/migrating-from-0.1.md).
+Supported Python is 3.11 or newer. CONTRACT coverage targets Linux Python
+3.11-3.14; HOST evidence is Linux Python 3.11. macOS and Windows gaps are
+recorded in the Coverage Matrix, and Windows is not supported. The 0.1
+`agent_framework` path is removed in 0.3.0; see [the migration table](docs/migrating-to-0.3.md).
 
 ## Project Material
 

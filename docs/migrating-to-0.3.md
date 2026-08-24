@@ -2,15 +2,14 @@
 
 ## Expand Window
 
-The Runtime Foundation uses an **expand** window while the distribution is
-still `0.2.x`: every existing `m_agent` root import remains supported and has
-the same behavior. New integrations should use the four semantic namespaces
-below. This is deliberately additive; it does not change Runner semantics or
-silently replace an Adapter.
+The 0.3 Runtime Baseline is a deliberate public contract reset. The 0.2 root
+surface is not retained; removed imports fail with a directional migration
+error so integrations cannot silently keep the old semantics. New integrations
+must use the four semantic namespaces below.
 
 ## 0.3 Import Table
 
-At `0.3.0`, the root package becomes a small high-frequency facade:
+At `0.3.0`, the root package is a small high-frequency facade:
 `AgentDefinition`, `DefinitionRegistry`, `Runner`, `SyncRunner`, `RunStatus`,
 `RunRecord`, and `RunInspection`. The following table lists every 0.2 root
 export scheduled to move or be removed, together with its 0.3 replacement.

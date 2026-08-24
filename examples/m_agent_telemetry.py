@@ -18,24 +18,31 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     ContextItem,
     DefinitionRegistry,
-    DeterministicContextProvider,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    InMemoryRunStore,
-    JsonlTelemetrySink,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     Runner,
     ToolCall,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
+)
+from m_agent.adapters import (
+    DeterministicContextProvider,
+    DeterministicModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    JsonlTelemetrySink,
+    PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 

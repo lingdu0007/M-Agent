@@ -200,7 +200,7 @@ ADR 0013 / PRD User Stories 21-23, 44：同一 Run 只允许一个有效推进�
   供应商兼容性验证；
 - **Live provider Adapters**（Ticket 10，ADR 0030 / 0038）：OpenAI
   兼容 Chat Completions 与 Responses 风格 API 的 live Adapter 位于
-  可选 `m_agent.provider` 子包（`provider` extra，依赖 `httpx`）。
+  可选 `m_agent.adapters.provider` 子包（`provider` extra，依赖 `httpx`）。
   两者都如实声明 streaming / tool calling / native structured
   output / usage reporting 能力，并拥有凭证门控契约测试（经公共
   Runner seam 验证真实 provider 行为；默认离线 CI 排除；pytest 还须

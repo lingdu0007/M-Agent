@@ -10,17 +10,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
     FailureClassification,
     ModelFailure,
     ModelRequest,
     ModelResponse,
     Runner,
-    SQLiteRunStore,
     StepStatus,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
 )
 
 from fixtures.sentinel_payload_worker import SentinelPayloadCodec

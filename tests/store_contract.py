@@ -15,17 +15,14 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     DefinitionSnapshot,
-    DeterministicModelAdapter,
     DuplicateRunError,
     FailureClassification,
-    FakeClock,
     IllegalRunTransitionError,
     LeaseNotHeldError,
     PayloadCodec,
-    PlaintextPayloadCodec,
     RunNotFoundError,
     RunRecord,
     RunStatus,
@@ -35,6 +32,15 @@ from m_agent import (
     StepRecord,
     StepStatus,
     StepType,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    FakeClock,
+    PlaintextPayloadCodec,
+)
+from m_agent import (
+    RunRecord,
+    RunStatus,
 )
 from m_agent.runtime import (
     ModelBinding,

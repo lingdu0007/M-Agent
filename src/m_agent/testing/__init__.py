@@ -9,6 +9,7 @@ from ._pack import (
     CORE_LIFECYCLE_PACK_VERSION,
     CORE_LIFECYCLE_PROFILE,
     CORE_LIFECYCLE_SCENARIO,
+    DURABLE_EFFECTS_SCENARIO,
     EvidenceLevel,
     EXIT_HARNESS_ERROR,
     EXIT_INCOMPLETE,
@@ -20,11 +21,15 @@ from ._pack import (
     PackExecutionStatus,
     ScenarioEvidenceBundle,
     core_lifecycle_manifest,
+    RUNTIME_BASELINE_PACK_VERSION,
+    RUNTIME_BASELINE_PROFILE,
+    runtime_baseline_manifest,
 )
 from ._dependencies import find_runtime_dependency_violations
 from ._identity import installed_identity
 from ._adapter_contracts import ModelAdapterContractReport, run_model_adapter_contract
 from ._subprocess import isolated_subprocess_environment
+from ._durable_effects import reconcile_recovery_window, run_durable_effects_recovery
 
 __all__ = [
     "AcceptanceCheck",
@@ -35,6 +40,7 @@ __all__ = [
     "CORE_LIFECYCLE_PACK_VERSION",
     "CORE_LIFECYCLE_PROFILE",
     "CORE_LIFECYCLE_SCENARIO",
+    "DURABLE_EFFECTS_SCENARIO",
     "EvidenceLevel",
     "EXIT_HARNESS_ERROR",
     "EXIT_INCOMPLETE",
@@ -48,7 +54,12 @@ __all__ = [
     "ModelAdapterContractReport",
     "PackExecution",
     "PackExecutionStatus",
+    "RUNTIME_BASELINE_PACK_VERSION",
+    "RUNTIME_BASELINE_PROFILE",
     "ScenarioEvidenceBundle",
     "core_lifecycle_manifest",
+    "runtime_baseline_manifest",
     "run_model_adapter_contract",
+    "reconcile_recovery_window",
+    "run_durable_effects_recovery",
 ]

@@ -68,10 +68,11 @@ Runner 隐式选择它。
 
 ## 与确定性 fake 的区分（禁止混淆）
 
-- `m_agent.DeterministicModelAdapter` / `DeterministicStreamingModelAdapter`
+- `m_agent.adapters.DeterministicModelAdapter` /
+  `DeterministicStreamingModelAdapter`
   是确定性 fake：`deterministic=True`，响应由构造参数决定，不访问任何
   网络，只用于测试、演示与离线示例。
-- `m_agent.provider.ChatCompletionsModelAdapter` /
+- `m_agent.adapters.provider.ChatCompletionsModelAdapter` /
   `ResponsesModelAdapter` 是 live 实现：`deterministic=False`，只有
   在调用方显式提供凭证后才会发出真实网络请求。
 - 契约测试通过 `m_agent` 公开 `Runner` seam（`create_run` →
@@ -112,7 +113,7 @@ uv pip install -e ".[dev,provider]"   # 或 pip install -e ".[dev,provider]"
 
 ### 公共离线 fixture 与第三方 Adapter kit
 
-`m_agent.provider` 提供 `chat_completion_fixture`、`responses_fixture`、
+`m_agent.adapters.provider` 提供 `chat_completion_fixture`、`responses_fixture`、
 `chat_stream_fixture`、`responses_stream_fixture` 与
 `provider_error_fixture` / `malformed_response_fixture`。它们返回可显式注入 Adapter 构造器 `transport=` 的
 `OfflineProviderTransport`，覆盖正常、stream、provider error 和 malformed

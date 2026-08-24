@@ -21,26 +21,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     ContextItem,
     DefinitionRegistry,
-    DeterministicContextProvider,
-    DeterministicModelAdapter,
-    DeterministicTool,
     FailureClassification,
-    InMemoryRunStore,
-    JsonlTelemetrySink,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
     ModelUsage,
-    PlaintextPayloadCodec,
     ResolutionAction,
     RunResolution,
     Runner,
     RunStatus,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     TelemetryEvent,
@@ -50,6 +43,21 @@ from m_agent import (
     ToolFailure,
     ToolOutcome,
     ToolRequest,
+)
+from m_agent.adapters import (
+    DeterministicContextProvider,
+    DeterministicModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    JsonlTelemetrySink,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode, UsageProvenance
 

@@ -24,23 +24,17 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    FakeClock,
-    InMemoryRunStore,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RetryPolicy,
     Runner,
     RunStatus,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     ToolCall,
@@ -48,6 +42,20 @@ from m_agent import (
     ToolOutcome,
     deserialize_model_response,
     deserialize_tool_outcome,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 

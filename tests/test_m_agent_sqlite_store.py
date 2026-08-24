@@ -13,12 +13,17 @@ import sqlite3
 import tempfile
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
+    RunStatus,
+    StaleRunVersionError,
+)
+from m_agent.adapters import (
     InMemoryRunStore,
     PlaintextPayloadCodec,
-    RunStatus,
     SQLiteRunStore,
-    StaleRunVersionError,
+)
+from m_agent import (
+    RunStatus,
 )
 
 from store_contract import RunStoreContractMixin, created_record, snapshot

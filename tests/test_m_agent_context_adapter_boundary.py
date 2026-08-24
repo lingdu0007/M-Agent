@@ -14,14 +14,22 @@ from unittest.mock import patch
 
 import httpx
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     ContextItem,
     DefinitionRegistry,
+    ModelCapabilities,
+    Runner,
+    RunStatus,
+)
+from m_agent.adapters import (
     DeterministicContextProvider,
     InMemoryRunStore,
-    ModelCapabilities,
     PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
     Runner,
     RunStatus,
 )
@@ -33,7 +41,7 @@ from m_agent.runtime import (
     StreamingMode,
     StructuredOutputMode,
 )
-from m_agent.provider import ChatCompletionsModelAdapter, ResponsesModelAdapter
+from m_agent.adapters.provider import ChatCompletionsModelAdapter, ResponsesModelAdapter
 
 
 _INSTRUCTIONS = "TRUSTED-DEFINITION-INSTRUCTIONS-04: answer the user request."

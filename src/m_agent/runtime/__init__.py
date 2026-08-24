@@ -75,6 +75,7 @@ from .._resolution import (
 )
 from .._run import RunInspection, RunRecord
 from .._runner import (
+    CrashPoint,
     DEFAULT_LEASE_TTL,
     ERROR_EFFECT_UNCONFIRMED,
     ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED,
@@ -84,6 +85,10 @@ from .._runner import (
     REASON_POLICY_RESOLUTION_REQUIRED,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     Runner,
+    deserialize_model_response,
+    serialize_model_response,
+    deserialize_tool_outcome,
+    serialize_tool_outcome,
 )
 from .._status import RunStatus, is_terminal
 from .._steps import (
@@ -116,6 +121,7 @@ __all__ = [
     "ALLOWED_FOR_DEFINITION_UNAVAILABLE",
     "ALLOWED_FOR_UNCERTAIN_NON_IDEMPOTENT",
     "Clock",
+    "CrashPoint",
     "ContextItem",
     "ContextProvider",
     "ContextRequest",
@@ -126,6 +132,8 @@ __all__ = [
     "DefinitionRegistry",
     "DefinitionSnapshot",
     "DuplicateRunError",
+    "deserialize_model_response",
+    "deserialize_tool_outcome",
     "ERROR_EFFECT_UNCONFIRMED",
     "ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED",
     "ERROR_OUTPUT_VALIDATION_FAILED",
@@ -181,6 +189,8 @@ __all__ = [
     "RunStore",
     "RunUpdate",
     "RunUpdateType",
+    "serialize_model_response",
+    "serialize_tool_outcome",
     "RevisionStability",
     "StreamingMode",
     "StaleRunVersionError",

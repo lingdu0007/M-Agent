@@ -28,26 +28,20 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-from m_agent import (
+from m_agent.runtime import (
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
     FailureClassification,
-    FakeClock,
-    InMemoryRunStore,
     ModelCapabilities,
     ModelFailure,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RetryPolicy,
     Runner,
     RunRecord,
     RunStatus,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     ToolCall,
@@ -55,6 +49,21 @@ from m_agent import (
     ToolFailure,
     ToolOutcome,
     ToolRequest,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunRecord,
+    RunStatus,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 

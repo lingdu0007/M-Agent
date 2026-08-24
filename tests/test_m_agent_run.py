@@ -7,20 +7,17 @@ from __future__ import annotations
 
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionConflictError,
     DefinitionNotFoundError,
     DefinitionRegistry,
-    DeterministicModelAdapter,
     IllegalRunTransitionError,
-    InMemoryRunStore,
     ModelAdapter,
     ModelCapabilities,
     ModelCapabilityError,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RunNotFoundError,
     Runner,
     RunStatus,
@@ -28,6 +25,17 @@ from m_agent import (
     StepType,
     deserialize_model_response,
     is_terminal,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 from m_agent.runtime import (
     ModelCapabilityCombination,

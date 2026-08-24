@@ -23,7 +23,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     ContextItem,
@@ -31,16 +31,24 @@ from m_agent import (
     ContextRequest,
     CrashPoint,
     DefinitionRegistry,
+    Runner,
+    RunStatus,
+    StepStatus,
+    StepType,
+)
+from m_agent.adapters import (
     DeterministicContextProvider,
     DeterministicModelAdapter,
     FakeClock,
     InMemoryRunStore,
     PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
     Runner,
     RunStatus,
-    SQLiteRunStore,
-    StepStatus,
-    StepType,
 )
 
 from fixtures.sentinel_payload_worker import SentinelPayloadCodec

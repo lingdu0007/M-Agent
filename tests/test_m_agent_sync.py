@@ -6,17 +6,13 @@ import asyncio
 import threading
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
     FailureClassification,
-    InMemoryRunStore,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RunResolution,
     RunStatus,
     Runner,
@@ -26,6 +22,19 @@ from m_agent import (
     ToolFailure,
     ToolOutcome,
     ToolRequest,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    RunStatus,
+    Runner,
+    SyncRunner,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 

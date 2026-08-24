@@ -35,14 +35,22 @@ _WORKER = os.path.join(_EXAMPLE_DIR, "worker.py")
 if _EXAMPLE_DIR not in sys.path:
     sys.path.insert(0, _EXAMPLE_DIR)
 
+from m_agent.runtime import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
 from m_agent import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    PlaintextPayloadCodec,
     Runner,
     RunStatus,
-    SQLiteRunStore,
 )
 from support_agent import TicketContextProvider
 

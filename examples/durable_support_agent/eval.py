@@ -56,22 +56,29 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from m_agent import (
+from m_agent.runtime import (
     ALLOWED_FOR_UNCERTAIN_NON_IDEMPOTENT,
     ERROR_EFFECT_UNCONFIRMED,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     ContextItem,
     DefinitionRegistry,
     FailureClassification,
-    PlaintextPayloadCodec,
     RunNotFoundError,
     RunStatus,
     Runner,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     ToolEffect,
     deserialize_tool_outcome,
+)
+from m_agent.adapters import (
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    DefinitionRegistry,
+    RunStatus,
+    Runner,
 )
 
 from support_agent import (

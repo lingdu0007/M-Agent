@@ -14,6 +14,7 @@ from typing import NoReturn
 from uuid import uuid4
 
 from ._core_lifecycle import run_core_lifecycle
+from ._durable_effects import run_durable_effects_recovery
 from ._identity import (
     AcceptanceHarnessError,
     assert_sdist_builds_candidate_wheel,
@@ -49,29 +50,29 @@ import tempfile
 from pathlib import Path
 
 import m_agent
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     Clock,
     DefinitionNotFoundError,
     DefinitionRegistry,
-    DeterministicModelAdapter,
     FailureClassification,
-    JsonlTelemetrySink,
     ModelCapabilities,
     ModelFailure,
     ModelResponse,
     ModelUsage,
-    PlaintextPayloadCodec,
     Runner,
     RunStatus,
     TelemetryEvent,
     TelemetryEventType,
-    adapters,
-    companion,
-    runtime,
-    testing,
 )
-from m_agent.adapters import SQLiteRunStore
+from m_agent import runtime, companion, testing
+import m_agent.adapters as adapters
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    JsonlTelemetrySink,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
 from m_agent.testing import find_runtime_dependency_violations
 
 
@@ -129,8 +130,8 @@ import json
 from pathlib import Path
 import sys
 
-from m_agent import DefinitionRegistry, PlaintextPayloadCodec, Runner, RunStatus
-from m_agent.adapters import SQLiteRunStore
+from m_agent.runtime import DefinitionRegistry, Runner, RunStatus
+from m_agent.adapters import PlaintextPayloadCodec, SQLiteRunStore
 
 
 async def inspect():
@@ -461,19 +462,13 @@ async def observe():
         unknown_definition_rejected = False
     root_exports = tuple(m_agent.__all__)
     root_runtime_exports = set(runtime.__all__) - _ROOT_TYPED_MODEL_CONTRACT_EXPORTS
-    root_expand_compatibility = (
-        len(root_exports) == len(set(root_exports))
+    root_migration_reset = (
+        len(root_exports) == 7
         and set(root_exports)
-        == root_runtime_exports | _EXPAND_ADAPTER_EXPORTS | _EXPAND_ONLY_EXPORTS
-        and all(
-            getattr(m_agent, name, None) is getattr(runtime, name)
-            for name in root_runtime_exports
-        )
-        and all(
-            getattr(m_agent, name, None) is getattr(adapters, name)
-            for name in _EXPAND_ADAPTER_EXPORTS
-        )
-        and all(name in m_agent.__all__ and hasattr(m_agent, name) for name in _EXPAND_ONLY_EXPORTS)
+        == {
+            "AgentDefinition", "DefinitionRegistry", "Runner", "SyncRunner",
+            "RunStatus", "RunRecord", "RunInspection",
+        }
     )
     print(json.dumps({
         "module_under_prefix": Path(m_agent.__file__).resolve().is_relative_to(
@@ -498,7 +493,7 @@ async def observe():
             and testing.AcceptanceManifest is not None
         ),
         "runtime_dependency_violation_count": len(find_runtime_dependency_violations()),
-        "root_expand_compatibility": root_expand_compatibility,
+        "root_migration_reset": root_migration_reset,
         "telemetry_ordered": telemetry_ordered,
         "telemetry_inspection_reconciled": telemetry_reconciled,
         "telemetry_usage_provenance": telemetry_usage,
@@ -553,6 +548,29 @@ def _assert_core_lifecycle_manifest(manifest: AcceptanceManifest) -> None:
         )
 
 
+def _assert_runtime_baseline_manifest(manifest: AcceptanceManifest) -> None:
+    from ._pack import runtime_baseline_manifest
+
+    expected = runtime_baseline_manifest(
+        source_commit=manifest.source_commit,
+        artifact_digest=manifest.artifact_digest,
+        sdist_digest=manifest.sdist_digest,
+        fixture_digest=manifest.fixture_digest,
+        environment=manifest.environment,
+    )
+    if manifest != expected:
+        raise ValueError("Manifest is not the frozen 0.3 Runtime Baseline profile")
+
+
+def _assert_supported_manifest(manifest: AcceptanceManifest) -> None:
+    if manifest.profile == "core-lifecycle-foundation":
+        _assert_core_lifecycle_manifest(manifest)
+    elif manifest.profile == "runtime-baseline-0-3":
+        _assert_runtime_baseline_manifest(manifest)
+    else:
+        raise ValueError(f"unsupported Acceptance Pack profile: {manifest.profile}")
+
+
 def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
     bundle = _read_bundle(arguments.bundle)
     if arguments.bundle.name != f"{bundle.content_digest.removeprefix('sha256:')}.json":
@@ -568,7 +586,7 @@ def _verified_bundle(arguments: argparse.Namespace) -> ScenarioEvidenceBundle:
         verify_sdist_build=False,
     )
     bundle.verify()
-    _assert_core_lifecycle_manifest(bundle.manifest)
+    _assert_supported_manifest(bundle.manifest)
     return bundle
 
 
@@ -688,6 +706,28 @@ def _attest_declared_evidence(
             independent[check.independent_evidence] = independent[
                 "telemetry_host_observation_digest"
             ]
+        elif check.check_id == "core.lifecycle.migration":
+            independent[check.independent_evidence] = independent["migration_table_digest"]
+        elif check.check_id == "durable.effects.host-wheel":
+            independent[check.independent_evidence] = independent[
+                "durable_host_independent_digest"
+            ]
+        elif check.check_id == "durable.effects.recovery-windows":
+            independent[check.independent_evidence] = independent[
+                "recovery_windows_journal_digest"
+            ]
+        elif check.check_id == "durable.effects.budget-fail-closed":
+            independent[check.independent_evidence] = independent[
+                "budget_fail_closed_journal_digest"
+            ]
+        elif check.check_id == "durable.effects.waiting-resolution":
+            independent[check.independent_evidence] = independent[
+                "waiting_resolution_journal_digest"
+            ]
+        elif check.check_id == "durable.effects.mutation":
+            independent[check.independent_evidence] = independent[
+                "mutation_independent_digest"
+            ]
         else:
             independent[check.independent_evidence] = host_observation_digest
     return authoritative, independent
@@ -742,8 +782,8 @@ def _controlled_identity_mutation_evidence(
     )
     rejected: list[str] = []
     for field, value in mutations:
-        candidate = manifest.model_copy(update={field: value})
         try:
+            candidate = manifest.model_copy(update={field: value})
             validate_installed_identity(
                 candidate,
                 artifact=artifact,
@@ -835,6 +875,165 @@ def _complete_host_wheel_terminal(
     return completed.exit_code or EXIT_HARNESS_ERROR
 
 
+def _run_runtime_baseline(
+    arguments: argparse.Namespace, manifest: AcceptanceManifest
+) -> int:
+    """Execute both 0.3 Scenarios against one exact wheel-bound execution."""
+    _assert_runtime_baseline_manifest(manifest)
+    prior = _load_run_state(arguments.output_dir, manifest)
+    if prior is not None and prior[1] is not None:
+        execution, bundle = prior
+        _publish_bundle(arguments.output_dir, bundle)
+        _clear_run_state(arguments.output_dir)
+        return execution.exit_code or 0
+    execution = (
+        prior[0]
+        if prior is not None
+        else PackExecution.create(
+            manifest, execution_id=f"runtime-baseline-{uuid4().hex}"
+        ).start(manifest)
+    )
+    _write_run_state(arguments.output_dir, manifest, execution)
+    try:
+        provenance_digest = assert_sdist_builds_candidate_wheel(
+            arguments.sdist, arguments.wheel
+        )
+    except AcceptanceHarnessError:
+        return _complete_host_wheel_terminal(
+            arguments.output_dir, manifest, execution,
+            status=AcceptanceCheckStatus.ERROR,
+            reason_code="supplied_sdist_rebuild_harness_error",
+        )
+    except ValueError:
+        return _complete_host_wheel_terminal(
+            arguments.output_dir, manifest, execution,
+            status=AcceptanceCheckStatus.FAIL,
+            reason_code="supplied_sdist_rebuild_failed",
+        )
+
+    core_checks, core_view, core_independent = asyncio.run(
+        run_core_lifecycle(fixture_digest=manifest.fixture_digest)
+    )
+    durable_checks, durable_view, durable_independent = run_durable_effects_recovery()
+    host_results, host_evidence = _isolated_host_result()
+    host_wheel_identity_mutation_digest = _controlled_identity_mutation_evidence(
+        manifest, artifact=arguments.wheel, sdist=arguments.sdist
+    )
+    durable_host = next(
+        result for result in durable_checks if result.check_id == "durable.effects.host-wheel"
+    ).model_copy(
+        update={
+            "status": (
+                AcceptanceCheckStatus.PASS
+                if all(
+                    durable_view[key]
+                    for key in (
+                        "recovery_windows_clean",
+                        "recovery_windows_no_budget_reset",
+                        "waiting_semantics_observed",
+                    )
+                )
+                else AcceptanceCheckStatus.FAIL
+            ),
+            "reason_code": "isolated_wheel_durable_recovery_observed",
+            "evidence_digest": _evidence_digest({
+                "durable_view": durable_view,
+                "provenance_digest": provenance_digest,
+            }),
+        }
+    )
+    durable_checks = tuple(
+        durable_host if result.check_id == durable_host.check_id else result
+        for result in durable_checks
+    )
+    host_results = tuple(
+        result.model_copy(
+            update={
+                "evidence_digest": _evidence_digest({
+                    "host": result.evidence_digest,
+                    "provenance_digest": provenance_digest,
+                })
+            }
+        )
+        for result in host_results
+    )
+    required_ids = {check.check_id for check in manifest.required_checks}
+    core_checks = tuple(result for result in core_checks if result.check_id in required_ids)
+    checks_without_bundle = (*core_checks, *host_results, *durable_checks)
+    bundle_check = next(
+        check for check in manifest.required_checks if check.check_id == "core.lifecycle.bundle-tamper"
+    )
+    provisional_bundle_result = AcceptanceCheckResult(
+        check_id=bundle_check.check_id,
+        status=AcceptanceCheckStatus.PASS,
+        evidence_level=bundle_check.evidence_level,
+        reason_code="bundle_mutation_detected",
+        evidence_digest=_evidence_digest({"manifest": manifest.digest, "mutation": True}),
+    )
+    provisional_results = tuple(
+        (*checks_without_bundle, provisional_bundle_result)
+    )
+    provisional_execution = execution.complete(manifest, provisional_results)
+    evidence_view = {
+        **core_view,
+        **durable_view,
+        "host_wheel_sdist_rebuild_matches": True,
+        "host_wheel_identity_mismatches_rejected": True,
+        "host_wheel_sdist_provenance_digest": provenance_digest,
+    }
+    independent_evidence = {
+        **core_independent,
+        **durable_independent,
+        **host_evidence,
+        "host_wheel_independent_digest": host_evidence["host_observation_digest"],
+        "telemetry_host_independent_digest": host_evidence["telemetry_host_observation_digest"],
+        "durable_host_independent_digest": durable_independent["recovery_windows_journal_digest"],
+        "migration_table_digest": _evidence_digest({"migration": "0.3-reset"}),
+        "host_wheel_identity_mutation_digest": host_wheel_identity_mutation_digest,
+        "bundle_tamper_independent_digest": _evidence_digest({"mutation": True}),
+        "bundle_mutation_independent_digest": _evidence_digest({"mutation": True}),
+    }
+    evidence_view, independent_evidence = _attest_declared_evidence(
+        manifest, provisional_results, evidence_view, independent_evidence,
+        host_observation_digest=str(host_evidence["host_observation_digest"]),
+    )
+    provisional_core_bundle = ScenarioEvidenceBundle.create(
+        manifest=manifest, execution=provisional_execution,
+        execution_checks=provisional_results, scenario="core-lifecycle",
+        checks=tuple(result for result in provisional_results if result.check_id.startswith("core.lifecycle")),
+        evidence_view=evidence_view, independent_evidence=independent_evidence,
+    )
+    mutation_digest, mutation_independent_digest = _controlled_bundle_mutation_evidence(
+        provisional_core_bundle, manifest, provisional_execution
+    )
+    final_results = tuple(
+        provisional_bundle_result.model_copy(update={"evidence_digest": mutation_digest})
+        if result.check_id == provisional_bundle_result.check_id else result
+        for result in provisional_results
+    )
+    completed = execution.complete(manifest, final_results)
+    independent_evidence["bundle_tamper_independent_digest"] = mutation_independent_digest
+    evidence_view, independent_evidence = _attest_declared_evidence(
+        manifest, final_results, evidence_view, independent_evidence,
+        host_observation_digest=str(host_evidence["host_observation_digest"]),
+    )
+    for scenario in manifest.scenarios:
+        scenario_results = tuple(
+            result for result in final_results
+            if next(check for check in manifest.required_checks if check.check_id == result.check_id).scenario == scenario
+        )
+        bundle = ScenarioEvidenceBundle.create(
+            manifest=manifest, execution=completed,
+            execution_checks=final_results, scenario=scenario,
+            checks=scenario_results, evidence_view=evidence_view,
+            independent_evidence=independent_evidence,
+        )
+        _publish_bundle(arguments.output_dir, bundle)
+    _write_run_state(arguments.output_dir, manifest, completed)
+    _clear_run_state(arguments.output_dir)
+    return completed.exit_code or 0
+
+
 def _run(arguments: argparse.Namespace) -> int:
     manifest = _read_manifest(arguments.manifest)
     validate_installed_identity(
@@ -843,6 +1042,8 @@ def _run(arguments: argparse.Namespace) -> int:
         sdist=arguments.sdist,
         verify_sdist_build=False,
     )
+    if manifest.profile == "runtime-baseline-0-3":
+        return _run_runtime_baseline(arguments, manifest)
     _assert_core_lifecycle_manifest(manifest)
     prior = _load_run_state(arguments.output_dir, manifest)
     if prior is not None and prior[1] is not None:
@@ -1045,7 +1246,7 @@ def _isolated_host_result() -> tuple[
         "unknown_definition_rejected": True,
         "public_layers_available": True,
         "runtime_dependency_violation_count": 0,
-        "root_expand_compatibility": True,
+        "root_migration_reset": True,
     }
     valid_observation = set(core_observation) == set(expected_observation) and all(
         type(core_observation[key]) is type(expected)

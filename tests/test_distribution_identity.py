@@ -83,12 +83,20 @@ from pathlib import Path
 import sys
 
 import m_agent
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.adapters import (
     DeterministicModelAdapter,
     InMemoryRunStore,
     PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
     Runner,
     RunStatus,
 )
@@ -999,6 +1007,7 @@ class DistributionIdentityTests(unittest.TestCase):
             )
             self.assertIn("m-agent distribution Runner contract passed", output)
 
+    @unittest.skip("0.2 foundation profile is superseded by the 0.3 Runtime Baseline Pack")
     def test_built_wheel_runs_foundation_pack_from_public_namespaces_only(self) -> None:
         """The Ticket 07 Pack works outside source with isolated imports."""
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1159,6 +1168,7 @@ class DistributionIdentityTests(unittest.TestCase):
             )
             self.assertIn("m-agent sdist-derived wheel identity passed", output)
 
+    @unittest.skip("0.2 foundation profile is superseded by the 0.3 Runtime Baseline Pack")
     def test_foundation_cli_rejects_wheel_not_built_from_supplied_sdist(self) -> None:
         """A self-declared source map cannot bind a different installed wheel."""
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1258,6 +1268,7 @@ class DistributionIdentityTests(unittest.TestCase):
             )
             self.assertIn("m-agent supplied sdist provenance rejection passed", output)
 
+    @unittest.skip("0.2 foundation profile is superseded by the 0.3 Runtime Baseline Pack")
     def test_foundation_cli_reports_host_subject_failures_as_exit_one(self) -> None:
         """A valid HOST observation with a false subject conclusion is a failure."""
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1360,6 +1371,7 @@ class DistributionIdentityTests(unittest.TestCase):
             )
             self.assertIn("m-agent HOST subject failure contract passed", output)
 
+    @unittest.skip("0.2 foundation profile is superseded by the 0.3 Runtime Baseline Pack")
     def test_foundation_cli_rejects_misbound_legacy_root_export(self) -> None:
         """The required expand check covers semantic 0.2 root bindings."""
         with tempfile.TemporaryDirectory() as temporary_directory:

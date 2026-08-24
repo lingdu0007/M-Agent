@@ -20,19 +20,15 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     Runner,
     RunInspection,
     RunStatus,
-    SQLiteRunStore,
     StepAttempt,
     StepCheckpoint,
     StepRecord,
@@ -41,7 +37,12 @@ from m_agent import (
     ToolCall,
     ToolEffect,
     ToolOutcome,
-    ToolRequest,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 
@@ -50,6 +51,49 @@ MEASURED_RUNS = 100
 DEFINITION_ID = "sqlite-benchmark"
 DEFINITION_VERSION = "1.0"
 EXPECTED_STEP_TYPES = (StepType.MODEL, StepType.TOOL, StepType.MODEL)
+
+
+def compare_with_baseline(
+    report: dict[str, Any], baseline: dict[str, Any]
+) -> dict[str, Any]:
+    """Compare only compatible correctness-validated local environments."""
+    report_env = report.get("environment", {})
+    baseline_env = baseline.get("environment", {})
+    report_identity = report.get("baseline_identity", {})
+    baseline_identity = baseline.get("baseline_identity", {})
+    compatible = (
+        report_env.get("python", {}).get("implementation")
+        == baseline_env.get("python", {}).get("implementation")
+        and report_env.get("python", {}).get("version")
+        == baseline_env.get("python", {}).get("version")
+        and report_env.get("os", {}).get("system")
+        == baseline_env.get("os", {}).get("system")
+        and report_env.get("cpu", {}).get("machine")
+        == baseline_env.get("cpu", {}).get("machine")
+        and report.get("validation", {}).get("status", "PASS") == "PASS"
+        and baseline.get("validation", {}).get("status", "PASS") == "PASS"
+        and report.get("measurement", {}).get("run_count")
+        == baseline.get("measurement", {}).get("run_count")
+        and bool(report_identity.get("artifact_digest"))
+        and bool(report_identity.get("manifest_digest"))
+        and report_identity == baseline_identity
+    )
+    result: dict[str, Any] = {
+        "status": "COMPARED" if compatible else "INCONCLUSIVE",
+        "qualification": "environment-qualified local evidence only",
+        "non_claim": "This comparison is not production QPS, SLA, or capacity evidence.",
+    }
+    if not compatible:
+        result["reason"] = "incompatible environment or correctness validation"
+        return result
+    current = report["metrics"]["throughput_runs_per_second"]
+    previous = baseline["metrics"]["throughput_runs_per_second"]
+    result["metrics"] = {
+        "throughput_delta_ratio": (current - previous) / previous
+        if previous
+        else None,
+    }
+    return result
 
 
 class BenchmarkValidationError(RuntimeError):
@@ -443,6 +487,10 @@ async def execute_benchmark(
     report = {
         "schema_version": 1,
         "environment": _environment(),
+        "baseline_identity": {
+            "artifact_digest": os.environ.get("M_AGENT_BENCHMARK_ARTIFACT_DIGEST", ""),
+            "manifest_digest": os.environ.get("M_AGENT_BENCHMARK_MANIFEST_DIGEST", ""),
+        },
         "warmup": {
             "run_count": 0,
             "definition": "SQLite schema initialization before measurement",

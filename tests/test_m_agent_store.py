@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from m_agent import InMemoryRunStore, PlaintextPayloadCodec
+from m_agent.adapters import InMemoryRunStore, PlaintextPayloadCodec
 
 from store_contract import RunStoreContractMixin
 

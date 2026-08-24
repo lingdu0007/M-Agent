@@ -30,22 +30,17 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    FakeClock,
     FailureClassification,
     IllegalRunTransitionError,
-    InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     REASON_DEFINITION_UNAVAILABLE,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     ResolutionAction,
@@ -53,7 +48,6 @@ from m_agent import (
     Runner,
     RunResolution,
     RunStatus,
-    SQLiteRunStore,
     StaleRunVersionError,
     StepStatus,
     StepType,
@@ -63,6 +57,20 @@ from m_agent import (
     ToolOutcome,
     allowed_resolutions,
     deserialize_tool_outcome,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 

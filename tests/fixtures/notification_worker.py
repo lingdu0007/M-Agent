@@ -36,25 +36,32 @@ _SRC = os.path.abspath(
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from m_agent import (  # noqa: E402
+from m_agent.runtime import (
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    FakeClock,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     ResolutionAction,
     RunResolution,
     Runner,
-    SQLiteRunStore,
     ToolCall,
     ToolEffect,
     ToolOutcome,
     allowed_resolutions,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
 )
 from m_agent.runtime import ModelRequirements, ToolCallingMode
 

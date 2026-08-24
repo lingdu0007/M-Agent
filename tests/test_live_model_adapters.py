@@ -43,29 +43,37 @@ httpx = pytest.importorskip(
     "live adapter contract tests skipped",
 )
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    InMemoryRunStore,
-    JsonlTelemetrySink,
     ModelAdapter,
     ModelCapabilities,
     ModelCapabilityError,
     ModelFailure,
-    PlaintextPayloadCodec,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     Runner,
     RunResolution,
     RunStatus,
     RunUpdateType,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     TelemetryEventType,
     ToolEffect,
     ToolOutcome,
     deserialize_model_response,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    InMemoryRunStore,
+    JsonlTelemetrySink,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 from m_agent.runtime import (
     ModelCapabilityCombination,
@@ -85,7 +93,7 @@ from m_agent.runtime import (
 )
 from m_agent._run import RunRecord
 from m_agent._tools import DeterministicTool
-from m_agent.provider import (
+from m_agent.adapters.provider import (
     CHAT_COMPLETIONS_CAPABILITIES,
     RESPONSES_CAPABILITIES,
     ChatCompletionsModelAdapter,
@@ -621,7 +629,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         )
 
     def test_strict_schema_allows_object_without_required_keyword(self) -> None:
-        from m_agent import ModelResponse
+        from m_agent.runtime import ModelResponse
 
         adapter = ChatCompletionsModelAdapter(
             structured_output_schema={
@@ -1569,7 +1577,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
 
     def test_usage_mapping_surfaces_and_represents_absence(self) -> None:
         # AC：provider 返回 usage 时透传；缺失时显式为 None（不伪造）。
-        from m_agent.provider import extract_usage
+        from m_agent.adapters.provider import extract_usage
 
         chat_usage = extract_usage(
             {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
@@ -2185,13 +2193,13 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
 
 
 def _request():
-    from m_agent import ModelRequest
+    from m_agent.runtime import ModelRequest
 
     return ModelRequest(input="hi", instructions="say hi")
 
 
 async def _generate_no_credentials(adapter) -> None:
-    from m_agent import ModelRequest
+    from m_agent.runtime import ModelRequest
 
     request = ModelRequest(input="hi", instructions="say hi")
     try:

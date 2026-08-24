@@ -30,19 +30,26 @@ _SRC = os.path.abspath(
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from m_agent import (  # noqa: E402
+from m_agent.runtime import (
     AgentDefinition,
     ContextItem,
     ContextRequest,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicContextProvider,
-    DeterministicModelAdapter,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     Runner,
+)
+from m_agent.adapters import (
+    DeterministicContextProvider,
+    DeterministicModelAdapter,
+    PlaintextPayloadCodec,
     SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
 )
 from m_agent.runtime import ModelExecutionBudget, RetryPolicy
 
