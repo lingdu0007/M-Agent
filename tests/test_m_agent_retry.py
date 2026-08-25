@@ -1,4 +1,4 @@
-"""Ticket 06 主行为测试：结构化失败分类与有界 Retry Policy 恢复。
+"""主行为测试：结构化失败分类与有界 Retry Policy 恢复。
 
 验收要求（.scratch/durable-run/issues/06-bounded-retry.md）：
 
@@ -17,8 +17,8 @@
 - 所有断言通过公开 Runner API（inspect_run / get_run）检查 attempt
   identifiers 与 stored outcomes，不断言私有循环细节（AC 9）。
 
-不在本 Ticket 实现四种应用 resolution；UNCERTAIN NON_IDEMPOTENT
-路径只安全停住（WAITING + 机器可读 reason），为 Ticket 07 留状态。
+不在本版本 实现四种应用 resolution；UNCERTAIN NON_IDEMPOTENT
+路径只安全停住（WAITING + 机器可读 reason），为 留状态。
 """
 
 from __future__ import annotations
@@ -513,7 +513,7 @@ class ToolRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_uncertain_non_idempotent_never_replayed(self) -> None:
         # AC 7：UNCERTAIN + NON_IDEMPOTENT Tool Step 绝不自动重放——
         # 即使配置了策略也进入 WAITING，工具只调用一次，等待应用处置
-        # （Ticket 07）；无自动重放 = 无重复外部副作用。
+        # ；无自动重放 = 无重复外部副作用。
         tool = UncertainTool(effect=ToolEffect.NON_IDEMPOTENT)
         model = RequestUncertainToolModel()
         runner, _, _ = make_runner(
@@ -528,7 +528,7 @@ class ToolRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool.call_count, 1)  # 无自动重放证据
         self.assertEqual(model.call_count, 1)  # 无后续模型调用
         inspection = await runner.inspect_run(created.run_id)
-        # WAITING 时 Step 未完成（无 StepRecord，Ticket 07 处置后补齐），
+        # WAITING 时 Step 未完成（无 StepRecord，处置后补齐），
         # 失败证据直接来自 Attempt 记录。
         failed = [a for a in inspection.attempts if a.status is StepStatus.FAILED]
         self.assertEqual(len(failed), 1)

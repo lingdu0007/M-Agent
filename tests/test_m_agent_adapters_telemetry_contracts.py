@@ -1,4 +1,4 @@
-"""Ticket 10 public adapter and telemetry contract seams.
+"""public adapter and telemetry contract seams.
 
 These tests intentionally use only public Runtime, Adapter, Provider and
 Testing imports.  They are the regression boundary for third-party adapters,

@@ -1,6 +1,6 @@
 """Session Companion 公共契约：SessionStore 端口与不可变数据模型。
 
-ADR 0018-0021 / PRD 0.4 Session 决策：
+ADR 0018-0021：
 
 - Session 是应用拥有的连续对话边界，不是 Core 对象；Core 保持
   sessionless，只消费冻结的 Conversation History。
@@ -19,7 +19,7 @@ ADR 0018-0021 / PRD 0.4 Session 决策：
 本模块只定义公开契约；InMemory 实现见
 :mod:`m_agent.companion._in_memory_session_store`，组合行为见
 :mod:`m_agent.companion._session_runner`。Session Payload 的独立保护
-（Session PayloadCodec）属于 Ticket 13，本契约不涉及。
+（Session PayloadCodec）由具体 Store 实现负责，本契约不涉及。
 """
 
 from __future__ import annotations
@@ -192,7 +192,7 @@ class SessionStore(Protocol):
     所有操作都要求 :class:`SessionScope`；跨 Scope 访问与"不存在"
     表现一致（fail-closed）。历史版本从零开始，每次成功提交恰好 +1；
     Turn 不可变、追加有序，以 ``run_id`` 幂等去重。InMemory 与 SQLite
-    实现共享同一份行为契约（PRD Store contract kits）。
+    实现共享同一份行为契约。
     """
 
     async def create_session(

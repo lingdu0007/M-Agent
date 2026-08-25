@@ -1,4 +1,4 @@
-"""Ticket 09 测试：Telemetry Sink 契约、本地 JSONL、payload 脱敏与失败隔离。
+"""测试：Telemetry Sink 契约、本地 JSONL、payload 脱敏与失败隔离。
 
 只通过公开 Runner 构造参数（``telemetry_sink``）驱动，断言外部可观测
 的 Telemetry 事件与落盘 JSONL；验证：

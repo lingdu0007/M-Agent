@@ -5,7 +5,7 @@ ADR 0009：Runner 采用 async-first 嵌入式模型，不内置后台 worker、
 （`start_run(run_id)` / `resume_run(run_id)`），绝不隐式扫描
 RunStore、排队或接管租约；进程部署与任务调度完全由上层应用负责。
 
-Ticket 02 恢复语义（ADR 0003 / PRD）：
+恢复语义（ADR 0003）：
 
 - 恢复复用已确认的 Checkpoint；Context 与可安全重放的 Tool 在
   Checkpoint 前中断时保持 at-least-once。Model Attempt 已在 dispatch
@@ -15,7 +15,7 @@ Ticket 02 恢复语义（ADR 0003 / PRD）：
   Definition（ADR 0023）；原版本不可用时 Run 进入 WAITING，reason
   为机器可读的 ``DEFINITION_UNAVAILABLE``，绝不回退到最新版本。
 
-Ticket 03 并发控制（ADR 0013 / PRD User Stories 21-23, 44）：
+并发控制（ADR 0013）：
 
 - Runner 在推进非终态 Run 前先从 RunStore 排他获取 Run Lease
   （``acquire_lease``）；无有效租约（被他人持有）时抛
@@ -29,7 +29,7 @@ Ticket 03 并发控制（ADR 0013 / PRD User Stories 21-23, 44）：
 - 不同 Run 的租约相互独立，可并发推进；运行时没有全局执行锁、
   后台扫描、自动 takeover、queue 或 scheduler。
 
-Ticket 07 不确定副作用处置（ADR 0008 / PRD US 13, 37-42）：
+不确定副作用处置（ADR 0008：
 
 - NON_IDEMPOTENT 工具的结果不确定（工具主动抛 UNCERTAIN 失败，或
   崩溃发生在外部效果之后、Tool Step checkpoint 提交之前）时，Run
@@ -43,7 +43,7 @@ Ticket 07 不确定副作用处置（ADR 0008 / PRD US 13, 37-42）：
 - resolution 命令受状态、Run Lease（ADR 0013）与乐观版本三重约束；
   重复、过期、非法命令以显式异常失败，绝不改动权威记录。
 
-Ticket 08 实时观察与协作式取消（ADR 0010 / 0011 / 0012）：
+实时观察与协作式取消（ADR 0010 / 0011 / 0012）：
 
 - Run Update 是稳定但**非权威**的实时契约：上层应用通过公开入口
   :meth:`subscribe_run` 订阅，模型流式增量携带 run_id / step_id /
@@ -57,7 +57,7 @@ Ticket 08 实时观察与协作式取消（ADR 0010 / 0011 / 0012）：
   （新 Step 开始前、流式 delta 之间）转 CANCELLED。取消只阻止后续
   Step 启动，**不宣称强制中断或撤销已经发出的模型 / 工具调用**——
   in-flight 调用正常完成并按需 checkpoint（外部副作用已经发生）。
-  跨进程取消不在本 Ticket 范围：取消请求是进程内协作信号，跨进程的
+  跨进程取消不在本版本 范围：取消请求是进程内协作信号，跨进程的
   取消编排由上层应用自行实现（本运行时不做消息队列 / 事件总线）。
 """
 
@@ -177,8 +177,8 @@ from ._updates import RunUpdate, RunUpdateType
 REASON_DEFINITION_UNAVAILABLE = "DEFINITION_UNAVAILABLE"
 
 #: UNCERTAIN NON_IDEMPOTENT Tool Step 进入 WAITING 的机器可读 reason
-#: （ADR 0007 / Ticket 06）：运行时绝不自动重放不确定的非幂等副作用，
-#: 等待上层应用通过显式 resolution（Ticket 07）处置。
+#: （ADR 0007）：运行时绝不自动重放不确定的非幂等副作用，
+#: 等待上层应用通过显式 resolution处置。
 REASON_UNCERTAIN_NON_IDEMPOTENT = "UNCERTAIN_NON_IDEMPOTENT"
 REASON_POLICY_RESOLUTION_REQUIRED = "POLICY_RESOLUTION_REQUIRED"
 ERROR_POLICY_ERROR = "POLICY_ERROR"
@@ -187,7 +187,7 @@ ERROR_OUTPUT_VALIDATION_FAILED = "OUTPUT_VALIDATION_FAILED"
 
 #: 恢复时发现未确认的 NON_IDEMPOTENT 工具调用（外部效果可能已在崩溃前
 #: 发生、但 checkpoint 未提交）的失败 Attempt 机器可读错误标识
-#: （Ticket 07）：与工具主动抛 UNCERTAIN 时使用同一标识，保证恢复路径
+#: ：与工具主动抛 UNCERTAIN 时使用同一标识，保证恢复路径
 #: 与执行路径产生一致的机器可读证据。
 ERROR_EFFECT_UNCONFIRMED = "effect_unconfirmed"
 
@@ -221,8 +221,7 @@ ERROR_FROZEN_TOOL_DECLARATION_UNAVAILABLE = (
     "FROZEN_TOOL_DECLARATION_UNAVAILABLE"
 )
 
-#: Compression 输出或压缩证据违反冻结的 Compression Contract（ADR 0040 /
-#: Ticket 15）：未知派生引用、无 provenance、item 冲突、超出输出约束、
+#: Compression 输出或压缩证据违反冻结的 Compression Contract（ADR 0040）：未知派生引用、无 provenance、item 冲突、超出输出约束、
 #: 非压缩（扩张）输出或恢复时 provenance 漂移。Runner 以本错误
 #: 确定性 fail closed，并保留原始与失败证据。
 ERROR_COMPRESSION_CONTRACT_VIOLATION = "COMPRESSION_CONTRACT_VIOLATION"
@@ -273,7 +272,7 @@ class Runner:
     :param crash_hook: 确定性崩溃注入回调（仅测试用，默认 None）。
         签名 ``crash_hook(point, run_id)``；在 :class:`CrashPoint`
         边界被调用，回调抛出的异常会终止推进。
-    :param telemetry_sink: 可选 Telemetry Sink（Ticket 09 / ADR 0035）。
+    :param telemetry_sink: 可选 Telemetry Sink（ADR 0035）。
         Runner 在 Run / Step / Attempt 生命周期事件上调用
         ``sink.emit(TelemetryEvent)``；事件只用于观测，不含 Run
         Payload，且 Sink 失败被隔离（捕获并继续推进），绝不覆盖或
@@ -303,11 +302,11 @@ class Runner:
         #: 因此每个 Runner 实例天然拥有不同的 owner，可被持久化、验证。
         self._owner = owner if owner is not None else f"runner-{new_id()}"
         self._lease_ttl = lease_ttl
-        #: 每个 Run 的 Run Update 订阅队列集合（Ticket 08 / ADR 0010）。
+        #: 每个 Run 的 Run Update 订阅队列集合（ADR 0010）。
         #: 进程内订阅：队列只在本 Runner 发布，订阅者断开即移除，
         #: 绝不改变 Run 执行与权威状态。
         self._subscribers: dict[str, set[asyncio.Queue[RunUpdate]]] = {}
-        #: 每个 Run 的协作取消请求（Ticket 08 / ADR 0012）。``cancel_run``
+        #: 每个 Run 的协作取消请求（ADR 0012）。``cancel_run``
         #: 在推进者持有租约时登记事件；推进者在安全边界检查并转 CANCELLED。
         #: 取消是进程内协作信号，跨进程取消由上层应用自行编排。
         self._cancel_events: dict[str, asyncio.Event] = {}
@@ -316,7 +315,7 @@ class Runner:
         #: 遗留 RUNNING"：``cancel_run`` 对活跃推进者只登记协作取消，
         #: 绝不因同 owner 续约而直接终结并释放租约。
         self._active_advancers: set[str] = set()
-        #: 可选 Telemetry Sink（Ticket 09 / ADR 0035）。事件只用于观测，
+        #: 可选 Telemetry Sink（ADR 0035）。事件只用于观测，
         #: 默认不含 Run Payload；Sink 失败被 :meth:`_emit_telemetry` 隔离。
         self._telemetry_sink = telemetry_sink
         #: Sink 异常的可观测回调（默认 None）：隔离捕获后调用，绝不
@@ -370,7 +369,7 @@ class Runner:
             snapshot=definition.frozen_snapshot(),
         )
         result = await self._store.create_run(run)
-        # Ticket 09：Run 生命周期从 CREATED 起即可观测（与 Run Store
+        # Run 生命周期从 CREATED 起即可观测（与 Run Store
         # 的权威 CREATED 记录一一对应；telemetry 不承载 payload）。
         self._emit_telemetry(
             TelemetryEvent(
@@ -390,7 +389,7 @@ class Runner:
         回到模型，直到最终响应）-> SUCCEEDED。租约被其他 Runner
         持有时抛 :class:`LeaseNotHeldError`；定义缺失时显式报错
         （创建时已解析过）。自动重试只依据冻结在 Definition Snapshot
-        中的显式 Retry Policy（Ticket 06 / ADR 0025），无策略不重试。
+        中的显式 Retry Policy（ADR 0025），无策略不重试。
         """
         run = await self._get_existing_run(run_id)
         if run.status is not RunStatus.CREATED:
@@ -558,7 +557,7 @@ class Runner:
         )
 
     async def subscribe_run(self, run_id: str) -> AsyncIterator[RunUpdate]:
-        """订阅一个 Run 的实时 Run Update 流（Ticket 08 / ADR 0010）。
+        """订阅一个 Run 的实时 Run Update 流（ADR 0010）。
 
         这是唯一的 Run Update 订阅入口，面向上层应用：订阅者不需要
         访问任何内部执行对象（AC 1）。用法：
@@ -594,7 +593,7 @@ class Runner:
         run_id: str,
         expected_version: int | None = None,
     ) -> RunRecord:
-        """提交协作式 Cancellation Request（Ticket 08 / ADR 0012）。
+        """提交协作式 Cancellation Request（ADR 0012）。
 
         Cancellation Request 是"停止继续推进该 Run"的意图（CONTEXT.md），
         不是强制中断：本方法**不承诺撤销或打断已经发出的模型 / 工具
@@ -726,11 +725,11 @@ class Runner:
         resolution: RunResolution,
         expected_version: int,
     ) -> RunRecord:
-        """对 WAITING Agent Run 提交显式应用 resolution（ADR 0008 / Ticket 07）。
+        """对 WAITING Agent Run 提交显式应用 resolution（ADR 0008）。
 
         这是**唯一**的 resolution 入口，只面向上层应用：模型契约
         （ModelRequest / ModelResponse）中不存在任何 resolution 通道，
-        模型无法发出或合成 resolution 命令（Ticket 07 AC 8）。
+        模型无法发出或合成 resolution 命令。
 
         - ``RETRY_STEP``：显式授权重试等待中的 Tool Step——创建新的
           Step Attempt（同一 step_id，历史 Attempt 保留）并重新执行
@@ -753,7 +752,7 @@ class Runner:
           ``expected_version``（ADR 0013）。权威版本已推进时（并发
           resolution / 其他推进者），命令抛
           :class:`StaleRunVersionError` 且不改动任何记录——过期命令
-          据此明确失败（Ticket 07 AC 9）。
+          据此明确失败。
         """
         run = await self._get_existing_run(run_id)
         if run.status is not RunStatus.WAITING:
@@ -954,7 +953,7 @@ class Runner:
         except (LeaseNotHeldError, RunNotFoundError, StaleRunVersionError):
             pass
 
-    # -- Ticket 08：Run Update 发布与协作式取消辅助 -------------------
+    # -- Run Update 发布与协作式取消辅助 -------------------
 
     def _publish(self, update: RunUpdate) -> None:
         """把一条 Run Update 投递给该 Run 的全部订阅者（尽力而为）。
@@ -994,12 +993,12 @@ class Runner:
         if status.is_terminal:
             self._clear_telemetry_timings(run_id)
 
-    # -- Ticket 09：Telemetry 发射与错误隔离 -------------------------
+    # -- Telemetry 发射与错误隔离 -------------------------
 
     def _emit_telemetry(self, event: TelemetryEvent) -> None:
         """尽力把一条 Telemetry 事件交给 Sink，失败完全隔离。
 
-        契约（Ticket 09 AC / ADR 0035）：
+        契约：
 
         - Sink 抛出的任何异常都被捕获并忽略（可选回调可观测），
           **绝不覆盖或伪造 RunStore 权威状态**、绝不改变 Run 推进；
@@ -1153,7 +1152,7 @@ class Runner:
     ) -> ModelResponse | None:
         """消费流式 Model Adapter，把增量发布为 ``MODEL_DELTA`` Run Update。
 
-        契约（ADR 0011 / Ticket 08 AC 2-4）：
+        契约（ADR 0011 / AC 2-4）：
 
         - 每个 :class:`ModelDelta` 作为带 run_id / step_id / attempt_id
           的 ``MODEL_DELTA`` 发布；增量**不写入 Run Store**；
@@ -1210,7 +1209,7 @@ class Runner:
             "yielding a complete ModelResponse"
         )
 
-    # -- Ticket 07：WAITING resolution 内部实现 ----------------------
+    # -- WAITING resolution 内部实现 ----------------------
 
     async def _resolve_uncertain_continue(
         self,
@@ -1231,7 +1230,7 @@ class Runner:
           重新执行工具（外部副作用只在此显式授权后发生）。
         """
         checkpoints = await self._store.get_checkpoints(run.run_id)
-        # 目标 Step 在 WAITING 记录中机器可读（Ticket 07 AC 4）。必须在
+        # 目标 Step 在 WAITING 记录中机器可读。必须在
         # 转回 RUNNING 之前保存：Store 保证 WAITING 字段只在 WAITING
         # 状态有效，转出时自动清空。
         target_step_id = run.waiting_step_id
@@ -1442,13 +1441,13 @@ class Runner:
     ) -> RunRecord:
         """基于 RUNNING 状态的持久化记录继续推进（已持有租约）。
 
-        Ticket 05：恢复基于 Run Store 的 checkpoint 精确重建执行位置：
+        恢复基于 Run Store 的 checkpoint 精确重建执行位置：
 
         - 已确认的 Model Step Checkpoint 复用、不重复调用模型；若该
           checkpoint 的响应已请求工具，则从缺失 Outcome 的工具调用
           继续顺序执行（已确认的 Tool Outcome 一律复用，不重复外部
           副作用），再回到模型循环，直到产生不含工具请求的最终响应。
-        - 未确认的 Tool 调用按 Tool Effect 区分（Ticket 07）：READ_ONLY
+        - 未确认的 Tool 调用按 Tool Effect 区分：READ_ONLY
           与 IDEMPOTENT 工具保持 at-least-once 重放语义（checkpoint 前
           中断 = 重新执行）；**NON_IDEMPOTENT 工具绝不自动重放**——
           checkpoint 未提交意味着外部副作用可能已在崩溃前发生，结果
@@ -1635,7 +1634,7 @@ class Runner:
             )
             if run.status is not RunStatus.RUNNING:
                 return run
-        # ADR 0040 / Ticket 15：compression checkpoint 是辅助 MODEL
+        # ADR 0040：compression checkpoint 是辅助 MODEL
         # Step，绝不承载业务最终响应；恢复推进只面向业务 Model
         # checkpoints，compression checkpoint 由聚合路径复用。
         compression_step = (
@@ -1735,7 +1734,7 @@ class Runner:
         for call in last_response.tool_calls:
             if call.call_id in confirmed_call_ids:
                 continue
-            # Ticket 07：未确认的 NON_IDEMPOTENT 工具调用——外部效果可能
+            # 未确认的 NON_IDEMPOTENT 工具调用——外部效果可能
             # 已在崩溃前发生、但 checkpoint 未提交（结果不确定）。绝不
             # 自动重放（ADR 0007 fail-closed），进入 WAITING 等待应用
             # 显式处置；READ_ONLY / IDEMPOTENT 保持 at-least-once 重放
@@ -1825,25 +1824,25 @@ class Runner:
     ) -> RunRecord:
         """按 Definition 声明推进一个 RUNNING Run 的全部步骤。
 
-        执行顺序（ADR 0015 / PRD User Story 25）：若 Definition 声明了
+        执行顺序（ADR 0015）：若 Definition 声明了
         Context Provider，先执行 Context Step 并完成 checkpoint，再执行
         Model Step——应用选择的上下文不依赖模型工具选择，且外部上下文
         的 checkpoint 先于依赖它的模型调用持久化。任一 Step 失败（Run
         到达 FAILED）即返回，不再继续后续 Step。
 
-        Ticket 08：入口即安全边界——已请求取消时不再启动任何 Step，
+        入口即安全边界——已请求取消时不再启动任何 Step，
         直接终结为 CANCELLED（ADR 0012 / AC 8）。
         """
         cancelled = await self._maybe_cancel(run, lease)
         if cancelled is not None:
             return cancelled
-        # ADR 0040 / Ticket 14：按冻结 Plan 执行 RUN_INPUT Scope Stage
+        # ADR 0040：按冻结 Plan 执行 RUN_INPUT Scope Stage
         #（无显式 Stage 时退化为 legacy Provider 路径，同样形成
         # 带 provenance 的 Stage checkpoint）。
         run = await self._run_input_context_stages(run, definition, lease)
         if run.status is not RunStatus.RUNNING:
             return run
-        # ADR 0040 / Ticket 15：显式 Semantic Compression 作为独立
+        # ADR 0040：显式 Semantic Compression 作为独立
         # MODEL Step 在 RUN_INPUT Stage 之后、业务 Model Step 之前执行；
         # 不递归触发 Pipeline，不调用业务 Tools。
         run, _ = await self._run_compression_step(run, definition, lease)
@@ -2049,7 +2048,7 @@ class Runner:
         step_id: str | None = None,
         recovery_replay: bool = False,
     ) -> tuple[RunRecord, CompressionResult | None]:
-        """执行显式 Semantic Compression（ADR 0040 / Ticket 15）。
+        """执行显式 Semantic Compression（ADR 0040）。
 
         幂等入口：已完成 compression checkpoint（step_id 由冻结契约
         确定性派生）被原样复用并重新校验，不重新 dispatch；未完成的
@@ -2194,7 +2193,7 @@ class Runner:
             tool_boundary=tool_boundary,
             model_boundary=model_boundary,
         )
-        # ADR 0040 / Ticket 15：已完成 compression checkpoint 在 Frame
+        # ADR 0040：已完成 compression checkpoint 在 Frame
         # 聚合后应用——被消费的原始 Item 被带 provenance 的派生 Item
         # 取代，未消费 Item（含受保护来源）原样保留。压缩证据与
         # dispatch 时同一确定性校验；篡改 / 漂移在此 fail closed。
@@ -2350,7 +2349,7 @@ class Runner:
             # metadata 是外部数据；序列化失败与 provider 异常一样形成可
             # 检查的 FAILED Attempt，绝不遗留 RUNNING identity。
             payload = serialize_context_items(items)
-            # ADR 0040 / Ticket 14 AC 3：一次 Stage invocation 的完整
+            # ADR 0040 / AC 3：一次 Stage invocation 的完整
             # 结构化输出——输入引用、输出 Items（带 direct-derivation
             # provenance：PROVIDE 原始 Item 无派生来源）、决策、计量
             # 与触发边界——作为 Checkpoint 载荷持久化（envelope），
@@ -2491,10 +2490,10 @@ class Runner:
         resumed_model_step_id: str | None = None,
         recovery_replay: bool = False,
     ) -> RunRecord:
-        """模型-工具循环：推进一个 RUNNING Run 直到最终响应（Ticket 05）。
+        """模型-工具循环：推进一个 RUNNING Run 直到最终响应。
 
         每次模型调用都是一个独立 Model Step（记录 Step / Attempt /
-        Checkpoint，checkpoint 携带完整响应，ADR 0004 / PRD US 14）；
+        Checkpoint，checkpoint 携带完整响应，ADR 0004）；
         若响应请求了工具，则同一响应内的每个工具调用**严格顺序**执行
         为一个独立 Tool Step（记录 Step / Attempt / Checkpoint），把
         Tool Outcome 作为外部数据追加进下一次模型请求（ADR 0017 /
@@ -2509,7 +2508,7 @@ class Runner:
         循环由模型响应决定终止（响应不再请求工具即结束）；本版本
         不引入隐藏的工具轮次上限，因此模型的持续工具请求会持续被
         顺序执行（自动重试只由冻结的 Retry Policy 驱动，见
-        Ticket 06 / ADR 0025）。
+        ADR 0025）。
         """
         tool_outcomes = tuple(prior_tool_outcomes)
         model_step_id = resumed_model_step_id
@@ -2518,7 +2517,7 @@ class Runner:
             cancelled = await self._maybe_cancel(run, lease)
             if cancelled is not None:
                 return cancelled
-            # ADR 0040 / Ticket 14：在声明的 lifecycle 点触发
+            # ADR 0040：在声明的 lifecycle 点触发
             # TOOL_OUTCOME / MODEL_STEP Scope Stage，并按 Frame 语义
             # 聚合全部 Context checkpoint 为本次 Model Step 的 Items
             #（已完成 invocation 原样复用，不重新读取外部事实）。
@@ -2551,8 +2550,7 @@ class Runner:
                 return await self._finalize_output(
                     run, definition, lease, response.content
                 )
-            # 同一响应内的多个工具调用严格顺序执行（ADR 0004 / PRD
-            # US 43）：上一个调用完成并 checkpoint 后才执行下一个。
+            # 同一响应内的多个工具调用严格顺序执行（ADR 0004）：上一个调用完成并 checkpoint 后才执行下一个。
             for call in response.tool_calls:
                 # 安全边界：每个 Tool Step 开始之前检查协作取消——
                 # 取消只阻止后续 Step，不打断已完成/已发出的调用。
@@ -2589,7 +2587,7 @@ class Runner:
         Agent Instruction（受信）与作为数据的 Context Items / Tool
         Outcomes（ADR 0017），Tool Outcome 绝不写入或替换 instructions。
 
-        Ticket 06 重试语义（ADR 0025）：失败分类是 Model Adapter
+        重试语义（ADR 0025）：失败分类是 Model Adapter
         结构化契约的一部分（:class:`StepFailure`，绝不解析异常消息）。
         只有冻结在 Definition Snapshot 中的显式 Retry Policy 允许
         自动重试只接受 TRANSIENT 且未超过 ``max_attempts`` 的失败，并
@@ -2599,7 +2597,7 @@ class Runner:
         每个失败 Attempt 都保留 classification / error_code / error /
         created_at 证据。
 
-        Ticket 08 流式（ADR 0011）：Adapter 声明 ``streaming=DELTA`` 时
+        流式（ADR 0011）：Adapter 声明 ``streaming=DELTA`` 时
         通过 :meth:`_stream_model` 消费流——每个增量发布为带
         run_id / step_id / attempt_id 的 ``MODEL_DELTA`` Run Update
         （AC 2），增量**不写入 Run Store**（AC 3）；只有流结束的完整
@@ -2708,7 +2706,7 @@ class Runner:
                     error_code=exc.code,
                 )
                 return await self._fail_run(run, lease, exc.code), None
-            # ADR 0040 / Ticket 14: Build the complete Context Frame and
+            # ADR 0040: Build the complete Context Frame and
             # enforce hard budget BEFORE any Model dispatch.  The Sizer
             # is resolved from the frozen Model Contract so its wire-format
             # semantics match.  If the complete request exceeds the budget,
@@ -3032,7 +3030,7 @@ class Runner:
                     step_type=StepType.MODEL,
                 )
             )
-            # Ticket 09：Model Step 完成事件携带 Adapter 提供的 usage
+            # Model Step 完成事件携带 Adapter 提供的 usage
             # （仅当响应实际携带 usage 时；绝不回填或猜测）。
             self._emit_telemetry(
                 TelemetryEvent(
@@ -3280,8 +3278,8 @@ class Runner:
     ) -> tuple[RunRecord, ToolOutcome | None]:
         """执行一次工具调用并记录独立 Tool Step / Attempt / Checkpoint。
 
-        每个工具调用形成一个独立 Tool Step（ADR 0004 / PRD US 16），
-        在下一个工具调用或模型调用之前完成 checkpoint（PRD US 18）。
+        每个工具调用形成一个独立 Tool Step（ADR 0004），
+        在下一个工具调用或模型调用之前完成 checkpoint。
 
         - 显式 ``SUCCESS`` / ``REJECTED`` Outcome 都是正常完成：记录
           SUCCEEDED Step + Attempt + Checkpoint（ADR 0024），Outcome
@@ -3290,19 +3288,19 @@ class Runner:
           + 时间证据），**绝不**把异常包装成自然语言工具结果交给模型
           （ADR 0024）。
 
-        ``step_id`` 可选（Ticket 07）：RETRY_STEP 显式授权重试时传入
+        ``step_id`` 可选：RETRY_STEP 显式授权重试时传入
         WAITING 记录的 step_id，从而在同一 Run Step 下创建**新的 Step
         Attempt**（历史 Attempt 保留）；默认生成全新 Step。
 
-        Ticket 06 重试语义（ADR 0025）：只有冻结的 Retry Policy 允许
+        重试语义（ADR 0025）：只有冻结的 Retry Policy 允许
         自动重试，且必须同时满足——分类为 TRANSIENT、未超过
         ``max_attempts``，以及 Tool Effect 允许（**UNCERTAIN
         NON_IDEMPOTENT 绝不自动重放**：Run 进入 WAITING，等待上层应用
-        显式处置，Ticket 07）。
+        显式处置）。
         每次重试都创建新的 Step Attempt（同一 step_id，新 attempt_id），
         历史 Attempt 保留。
 
-        Ticket 08：每次 attempt 发布 ``STEP_STARTED``，失败发布
+        每次 attempt 发布 ``STEP_STARTED``，失败发布
         ``ATTEMPT_FAILED``，checkpoint 后由 :meth:`_checkpoint_tool_outcome`
         发布 ``STEP_COMPLETED``；发起新 attempt 之前检查协作取消
         （ADR 0012 / AC 8）。in-flight 的工具调用**不会被取消打断**：
@@ -3509,9 +3507,8 @@ class Runner:
                     StepType.TOOL,
                     attempt_id=attempt_id,
                 )
-                # UNCERTAIN + NON_IDEMPOTENT：绝不自动重放（ADR 0007 /
-                # PRD US 37）。无论是否配置策略都进入 WAITING，把处置
-                # 权显式留给上层应用（Ticket 07）；Step 未完成，只保留
+                # UNCERTAIN + NON_IDEMPOTENT：绝不自动重放（ADR 0007）。无论是否配置策略都进入 WAITING，把处置
+                # 权显式留给上层应用；Step 未完成，只保留
                 # 失败 Attempt 证据。
                 if (
                     classification is FailureClassification.UNCERTAIN
@@ -3565,7 +3562,7 @@ class Runner:
         """把一次工具结果写成权威的 SUCCEEDED Step / Attempt / Checkpoint。
 
         成功路径（工具执行返回 outcome）与 CONFIRM_STEP（应用确认结果，
-        不执行工具）共用本 helper（Ticket 07 AC 5）：二者都产生完全一致
+        不执行工具）共用本 helper：二者都产生完全一致
         的持久化记录，后续恢复不区分来源。Checkpoint 先于后续工作落盘
         （ADR 0006），崩溃注入点 BEFORE/AFTER_TOOL_CHECKPOINT 在此边界。
 
@@ -3632,7 +3629,7 @@ class Runner:
             )
         )
 
-    # -- Ticket 06：结构化失败分类与有界重试辅助 ---------------------
+    # -- 结构化失败分类与有界重试辅助 ---------------------
 
     async def _record_failed_attempt(
         self,
@@ -3649,7 +3646,7 @@ class Runner:
 
         每次失败都生成新的 attempt_id，历史 Attempt 永不覆盖；同时发布
         ``ATTEMPT_FAILED`` Run Update（携带 attempt_id），供订阅者丢弃
-        或替换该 attempt 的部分输出（Ticket 08 / ADR 0011）。
+        或替换该 attempt 的部分输出（ADR 0011）。
 
         ``attempt_id`` 可选：调用方（Model / Tool / Context Step）在发起
         尝试时已生成 attempt_id 并发布 ``STEP_STARTED``，失败时必须传入
@@ -3683,7 +3680,7 @@ class Runner:
                 step_type=step_type,
             )
         )
-        # Ticket 09：失败 Attempt 事件携带结构化分类 + 机器可读错误码
+        # 失败 Attempt 事件携带结构化分类 + 机器可读错误码
         # + 耗时（分类来自 Adapter 契约，绝不解析异常文本）。
         self._emit_telemetry(
             TelemetryEvent(
@@ -3735,7 +3732,7 @@ class Runner:
         attempt_count: int,
         effect: ToolEffect | None = None,
     ) -> bool:
-        """判定一次失败是否允许自动重试（ADR 0025 / Ticket 06）。
+        """判定一次失败是否允许自动重试（ADR 0025）。
 
         - 无 Retry Policy：不自动重试（fail-closed）；
         - 只有 TRANSIENT 允许进入预算判断；PERMANENT、UNCERTAIN 与
@@ -3993,9 +3990,8 @@ class Runner:
     async def _enter_waiting_uncertain(
         self, run: RunRecord, lease: RunLease, step_id: str
     ) -> RunRecord:
-        """UNCERTAIN NON_IDEMPOTENT Tool Step -> WAITING（ADR 0007 / PRD
-        US 37）。reason 与目标 Step（``waiting_step_id``）机器可读，留给
-        上层应用显式处置（Ticket 07）；与 DEFINITION_UNAVAILABLE 的
+        """UNCERTAIN NON_IDEMPOTENT Tool Step -> WAITING（ADR 0007）。reason 与目标 Step（``waiting_step_id``）机器可读，留给
+        上层应用显式处置；与 DEFINITION_UNAVAILABLE 的
         WAITING 路径保持一致，不在此处释放租约——resolution 命令持有
         同一租约即可继续（同进程续约或租约过期后新 owner 接管）。
         """
@@ -4022,7 +4018,7 @@ class Runner:
         step_id: str | None = None,
         attempt_id: str | None = None,
     ) -> RunRecord:
-        """恢复时发现未确认的 NON_IDEMPOTENT 调用 -> WAITING（Ticket 07）。
+        """恢复时发现未确认的 NON_IDEMPOTENT 调用 -> WAITING。
 
         崩溃发生在工具外部效果之后、Tool Step checkpoint 提交之前：
         checkpoint 缺失 = 该副作用是否已发生无法确认。运行时**绝不自动

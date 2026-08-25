@@ -1,6 +1,6 @@
-"""Ticket 02/04 跨进程崩溃恢复测试。
+"""跨进程崩溃恢复测试。
 
-Ticket 02 验收要求：
+验收要求：
 
 - 崩溃测试启动真实子进程（``os._exit`` 硬退出），不以同进程异常冒充
   进程状态丢失；
@@ -14,7 +14,7 @@ Ticket 02 验收要求：
 - Context、Model 与可安全重放 Tool 的 checkpoint 前中断保持
   at-least-once；Model 重放创建新的、受冻结预算约束的 Attempt。
 
-Ticket 04 追加验收（:class:`ContextCrossProcessResumeTests`）：
+追加验收（:class:`ContextCrossProcessResumeTests`）：
 
 - Context Step checkpoint 后崩溃：第二进程复用原始 Context Items，
   provider 不再被调用（跨进程日志为硬证据）、外部数据变化不重写；
@@ -99,7 +99,7 @@ async def open_resume_store(
 ) -> tuple[SQLiteRunStore, FakeClock]:
     """重开数据库并返回恢复 store + 已越过崩溃遗留租约过期点的时钟。
 
-    Ticket 03 语义（ADR 0013）：崩溃进程的租约在 TTL 内仍有效，恢复
+    语义（ADR 0013）：崩溃进程的租约在 TTL 内仍有效，恢复
     Runner 必须等租约过期才能接管。本 helper 读取崩溃后持久化的
     ``lease_expires_at``，把 :class:`FakeClock` 确定性推进到过期之后，
     避免用真实 sleep 等待。
@@ -210,7 +210,7 @@ class CrashAfterCheckpointResumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(inspection.steps), 1)
                 self.assertEqual(len(inspection.attempts), 1)
                 self.assertEqual(len(inspection.checkpoints), 1)
-                # Ticket 05：checkpoint 携带完整序列化响应，内容可还原。
+                # checkpoint 携带完整序列化响应，内容可还原。
                 self.assertEqual(
                     deserialize_model_response(
                         inspection.checkpoints[0].output
@@ -470,7 +470,7 @@ class ResumeContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ContextCrossProcessResumeTests(unittest.IsolatedAsyncioTestCase):
-    """Ticket 04 跨进程：Context Step checkpoint 后崩溃，恢复复用 Items。
+    """跨进程：Context Step checkpoint 后崩溃，恢复复用 Items。
 
     第一进程带 Context Provider 执行并在 ``after_context_checkpoint``
     确定性崩溃；第二进程打开同一 SQLite、解析同一精确 Definition，

@@ -1,4 +1,4 @@
-"""Honest freshness labeling for PROVIDER evidence (Ticket 16 / ADR 0042).
+"""Honest freshness labeling for PROVIDER evidence (ADR 0042).
 
 PROVIDER 层证据是显式授权、凭据门控的 live endpoint 合同记录。本模块只做
 **离线的元数据标注**：按 Model Contract fingerprint 与 30 天规则把一条既有

@@ -1,10 +1,10 @@
 """InMemory SessionStore：Session Companion 契约的进程内参考实现。
 
-用于确定性测试、本地实验与 Ticket 12 的 scoped Session 对话。所有
+用于确定性测试、本地实验与 的 scoped Session 对话。所有
 方法体内没有 await 间隙，在 asyncio 事件循环下每个操作原子完成；
 Scope 以 ``(SessionScope, session_id)`` 复合键隔离，跨 Scope 访问与
 "不存在"不可区分。Session Payload 的独立保护与 SQLite 持久化属于
-Ticket 13，本实现不做 payload 编码。
+SQLiteSessionStore，本实现不做 payload 编码。
 """
 
 from __future__ import annotations

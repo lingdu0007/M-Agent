@@ -124,7 +124,7 @@ class UsageProvenance(str, enum.Enum):
 
 
 class _FrozenModelValue(BaseModel, frozen=True):
-    """Ticket 08 values reject unknown fields rather than silently weakening."""
+    """values reject unknown fields rather than silently weakening."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -875,7 +875,7 @@ class ModelRequest(_FrozenModelValue):
 
 
 class ModelDelta(_FrozenModelValue):
-    """一次模型流式输出增量（Ticket 08 / ADR 0011）。
+    """一次模型流式输出增量（ADR 0011）。
 
     增量只作为带 ``attempt_id`` 的 Run Update 发布（:class:`RunUpdate`
     的 ``MODEL_DELTA``），**绝不写入 Run Store、不构成 checkpoint**；
@@ -1164,7 +1164,7 @@ class ModelAdapter(ABC):
     async def stream(
         self, request: ModelRequest,
     ) -> AsyncIterator[ModelDelta | ModelResponse]:
-        """流式生成一次模型响应（Ticket 08 / ADR 0011）。
+        """流式生成一次模型响应（ADR 0011）。
 
         只有声明 ``capabilities.streaming=DELTA`` 的 Adapter 才会被
         Runner 调用本方法（ADR 0030：不静默降级）。契约：
@@ -1420,7 +1420,7 @@ class DeterministicModelAdapter(ModelAdapter):
 
 
 class DeterministicStreamingModelAdapter(DeterministicModelAdapter):
-    """确定性流式 fake Model Adapter（Ticket 08 / ADR 0011）。
+    """确定性流式 fake Model Adapter（ADR 0011）。
 
     与 live :class:`ModelAdapter` 和普通 :class:`DeterministicModelAdapter`
     明确区分：`deterministic` 恒为 True，`capabilities.streaming` 默认
@@ -1489,7 +1489,7 @@ def serialize_model_response(response: ModelResponse) -> str:
 
     运行时内部使用（Runner 写入 Model Step Checkpoint）；恢复时经
     :func:`deserialize_model_response` 还原，以判断该响应是否请求了
-    工具以及是否已产生最终内容（Ticket 05：checkpoint 必须携带完整
+    工具以及是否已产生最终内容（checkpoint 必须携带完整
     响应，恢复才能精确重建执行位置）。
     """
     return response.model_dump_json()

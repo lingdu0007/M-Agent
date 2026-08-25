@@ -1,4 +1,4 @@
-"""Ticket 01 主行为测试：只通过公开异步 Runner 的注册、创建、启动与
+"""主行为测试：只通过公开异步 Runner 的注册、创建、启动与
 查询路径驱动，断言外部可观测的 Run 记录、状态、Step Attempt 与
 Checkpoint，不触碰内部实现细节。
 """
@@ -249,7 +249,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         created = await runner.create_run("assistant", "1.0", input="hi")
         self.assertEqual(created.status, RunStatus.CREATED)
         self.assertFalse(created.status.is_terminal)
-        self.assertIsNotNone(created.snapshot)  # Ticket 08：创建时冻结
+        self.assertIsNotNone(created.snapshot) # 创建时冻结
         self.assertEqual(created.snapshot.definition_id, "assistant")
         self.assertEqual(adapter.call_count, 0)
 
@@ -313,7 +313,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         attempt = inspection.attempts[0]
         self.assertEqual(attempt.step_id, step.step_id)
         self.assertEqual(attempt.status, StepStatus.SUCCEEDED)
-        # Ticket 05：Model Step 的 Attempt/Checkpoint 携带完整序列化
+        # Model Step 的 Attempt/Checkpoint 携带完整序列化
         # 响应（含 tool_calls），供恢复精确重建执行位置；内容可还原。
         self.assertEqual(
             deserialize_model_response(attempt.output).content,

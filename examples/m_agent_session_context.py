@@ -1,4 +1,4 @@
-"""M-Agent scoped Session 与显式 Context 压缩示例（Ticket 16 / 0.4）。
+"""M-Agent scoped Session 与显式 Context 压缩示例。
 
 展示 Runtime Integrator 如何组合 0.4 的两个新能力：
 

@@ -44,9 +44,9 @@ TERMINAL_STATUSES: frozenset[RunStatus] = frozenset(
     }
 )
 
-#: 本 Ticket 明确的合法转换表。WAITING 的转出由 Ticket 07 resolution
+#: 本版本 明确的合法转换表。WAITING 的转出由 resolution
 #: （RETRY_STEP/CONFIRM_STEP -> RUNNING；FAIL_RUN -> FAILED；
-#: CANCEL_RUN -> CANCELLED）驱动；Ticket 08 增加协作式取消入口：
+#: CANCEL_RUN -> CANCELLED）驱动；增加协作式取消入口：
 #: CREATED -> CANCELLED（开始前取消）与 RUNNING -> CANCELLED（运行中
 #: 在安全边界取消，ADR 0012）。终态一律拒绝后续转换。
 _ALLOWED_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {

@@ -1,4 +1,4 @@
-"""Responses 风格 live Model Adapter（Ticket 10）。
+"""Responses 风格 live Model Adapter。
 
 适配 OpenAI 兼容的 Responses API 端点（``{base_url}{responses_path}``，
 默认 ``https://api.openai.com/v1/responses``；也兼容不带 ``/v1`` 前缀

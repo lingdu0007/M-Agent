@@ -1,4 +1,4 @@
-"""Foundation-release 0.4 profile probes and observers (Ticket 16).
+"""Foundation-release 0.4 profile probes and observers .
 
 本模块提供 0.4 发布 profile 的两段式 HOST 证据设施：
 

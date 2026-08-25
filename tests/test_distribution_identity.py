@@ -1,4 +1,4 @@
-"""Ticket 01 distribution contract through a built wheel and public Runner."""
+"""distribution contract through a built wheel and public Runner."""
 
 from __future__ import annotations
 
@@ -1117,7 +1117,7 @@ class DistributionIdentityTests(unittest.TestCase):
 
     @unittest.skip("0.2 foundation profile is superseded by the 0.3 Runtime Baseline Pack")
     def test_built_wheel_runs_foundation_pack_from_public_namespaces_only(self) -> None:
-        """The Ticket 07 Pack works outside source with isolated imports."""
+        """The Pack works outside source with isolated imports."""
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             dist_dir = temporary_root / "dist"
@@ -1195,7 +1195,7 @@ class DistributionIdentityTests(unittest.TestCase):
             for command in (
                 ["git", "init", "-q"],
                 ["git", "config", "user.email", "ticket07@example.invalid"],
-                ["git", "config", "user.name", "Ticket 07"],
+                ["git", "config", "user.name", "Acceptance Harness"],
                 ["git", "add", "--all"],
                 ["git", "commit", "-qm", "clean sdist provenance subject"],
             ):
@@ -1415,7 +1415,7 @@ class DistributionIdentityTests(unittest.TestCase):
             for command in (
                 ["git", "init", "-q"],
                 ["git", "config", "user.email", "ticket07@example.invalid"],
-                ["git", "config", "user.name", "Ticket 07"],
+                ["git", "config", "user.name", "Acceptance Harness"],
                 ["git", "add", "--all"],
                 ["git", "commit", "-qm", "controlled host subject failure"],
             ):
@@ -1510,7 +1510,7 @@ class DistributionIdentityTests(unittest.TestCase):
             for command in (
                 ["git", "init", "-q"],
                 ["git", "config", "user.email", "ticket07@example.invalid"],
-                ["git", "config", "user.name", "Ticket 07"],
+                ["git", "config", "user.name", "Acceptance Harness"],
                 ["git", "add", "--all"],
                 ["git", "commit", "-qm", "controlled expand incompatibility"],
             ):
@@ -1648,7 +1648,7 @@ class DistributionIdentityTests(unittest.TestCase):
             for command in (
                 ["git", "init", "-q"],
                 ["git", "config", "user.email", "ticket07@example.invalid"],
-                ["git", "config", "user.name", "Ticket 07"],
+                ["git", "config", "user.name", "Acceptance Harness"],
                 ["git", "add", ".gitignore", "marker"],
                 ["git", "commit", "-qm", "unrelated parent"],
             ):

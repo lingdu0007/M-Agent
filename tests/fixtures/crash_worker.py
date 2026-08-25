@@ -3,7 +3,7 @@
 在指定 CrashPoint 通过 ``os._exit`` 硬终止进程，模拟真实进程崩溃：
 不运行 finally / atexit、不回滚已提交的 SQLite 事务、不留存任何
 Python 对象供后续进程复用。已提交的 checkpoint 落盘，Run 终态尚未
-写入——这正是 Ticket 02 / 04 的确定性崩溃点。
+写入——这正是跨进程恢复窗口的确定性崩溃点。
 
 用法：``python tests/fixtures/crash_worker.py <db_path> <model_log_path>
 <crash_point> [<provider_log_path>]``
@@ -13,7 +13,7 @@ Python 对象供后续进程复用。已提交的 checkpoint 落盘，Run 终态
   ``after_model_checkpoint`` / ``none``（对应 :class:`CrashPoint`）。
 - 每次模型调用向 ``model_log_path`` 追加一行（跨进程调用计数证据）；
   传入 ``provider_log_path`` 时注册 Context Provider，每次 provider
-  调用也追加一行（Ticket 04 跨进程复用证据）。
+  调用也追加一行。
 - 崩溃前向 stdout 输出 ``RUN_ID=<run_id>``；正常完成时输出
   ``RUN_ID=`` / ``ATTEMPT_ID=`` / ``STATUS=`` 三行。
 """

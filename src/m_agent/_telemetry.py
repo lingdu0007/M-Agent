@@ -1,4 +1,4 @@
-"""Telemetry Sink 契约与官方本地 JSONL 实现（Ticket 09 / ADR 0035）。
+"""Telemetry Sink 契约与官方本地 JSONL 实现（ADR 0035）。
 
 CONTEXT.md：Telemetry Sink 是接收带 Run、Step 和 Attempt 关联标识的
 结构化 Trace 的轻量扩展边界，默认不接收 Run Payload。
@@ -7,7 +7,7 @@ CONTEXT.md：Telemetry Sink 是接收带 Run、Step 和 Attempt 关联标识的
 
 - :class:`TelemetryEvent` 是稳定的、逐行可解析的事件记录，携带
   ``run_id`` / ``step_id`` / ``attempt_id``、事件类型、时间 / 耗时、
-  生命周期状态、标准错误分类与可用 usage（ADR 0035 / PRD US 58-59）；
+  生命周期状态、标准错误分类与可用 usage（ADR 0035）；
 - :class:`TelemetrySink` 是轻量接收边界：同步 ``emit(event)``，不
   接收 Run Payload（模型内容、Context Item、Tool Outcome、resolution
   载荷、凭证一律不进事件）；
@@ -18,7 +18,7 @@ Telemetry 只用于观测（ADR 0006 / 0010）：RunStore 仍是唯一权威。
 Sink 自身失败由 Runner 隔离（捕获并继续推进，绝不覆盖或伪造
 RunStore 状态）。官方 OpenTelemetry projection lives in the Adapter layer,
 not this Core module; no Dashboard、集中日志服务、payload opt-in UI 或
-持久事件总线（PRD Out of Scope）。
+持久事件总线。
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ class TelemetryEvent(BaseModel, frozen=True):
 
 @runtime_checkable
 class TelemetrySink(Protocol):
-    """Telemetry 接收边界（PRD US 58 / ADR 0035）。
+    """Telemetry 接收边界。
 
     - ``emit(event)`` 是轻量同步接口，只接收 :class:`TelemetryEvent`，
       不接收 Run Payload；
@@ -137,7 +137,7 @@ class JsonlTelemetrySink:
       收集多个 Run 的 telemetry）；
     - 父目录不存在等写失败会抛异常——由 Runner 的错误隔离层处理，
       绝不改变 Run 执行与权威状态；
-    - 无需 observability 服务器或 Dashboard 即可使用（Ticket 09 AC）。
+    - 无需 observability 服务器或 Dashboard 即可使用。
     - 调用方拥有本地文件资源：使用 ``with JsonlTelemetrySink(path)``
       或在不再使用时显式调用幂等 ``close()``。
     """

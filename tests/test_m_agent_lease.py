@@ -1,6 +1,6 @@
-"""Ticket 03 并发租约测试：同一 Run 只允许一个有效推进者。
+"""并发租约测试：同一 Run 只允许一个有效推进者。
 
-验收对照（ADR 0013 / PRD User Stories 21-23, 44）：
+验收对照（ADR 0013）：
 
 - 同一 Run 双 Runner 争抢 -> 一个有效 lease owner（另一个被拒）；
 - 无有效租约的 Runner 不能开始下一 Step 或提交权威进度；
@@ -14,7 +14,7 @@
 - 运行时没有引入后台扫描、自动 takeover、queue 或 scheduler。
 
 模型调用计数：两个 Runner 的确定性 Adapter 把每次调用追加到同一个
-日志文件，断言文件行数即总模型调用次数（同 Ticket 02 的证据模式）。
+日志文件，断言文件行数即总模型调用次数（同 的证据模式）。
 """
 
 from __future__ import annotations
@@ -515,7 +515,7 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "run.db")
             clock = FakeClock()
-            # Ticket 08 的 request preflight 会在 telemetry 前拒绝不支持
+            # 的 request preflight 会在 telemetry 前拒绝不支持
             # 工具的模型；此处需使用支持工具的 Adapter，才会覆盖 lease
             # 在 STEP_STARTED hook 之后、真正 model dispatch 之前的守卫。
             model = ToolThenAnswerAdapter()

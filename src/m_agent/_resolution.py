@@ -1,4 +1,4 @@
-"""Run Resolution 契约（Ticket 07 / ADR 0008）。
+"""Run Resolution 契约（ADR 0008）。
 
 CONTEXT.md：Run Resolution 是上层应用针对 ``WAITING`` Agent Run 提交的
 显式控制决定，只能要求重试或确认当前 Tool Step，或将 Agent Run 终结为
@@ -6,7 +6,7 @@ CONTEXT.md：Run Resolution 是上层应用针对 ``WAITING`` Agent Run 提交�
 :class:`Runner.resolve_run` 的公开控制入口，Model Adapter 契约
 （ModelRequest / ModelResponse）中不存在任何 resolution 通道。
 
-四种 resolution（ADR 0008 / PRD User Stories 38-42）：
+四种 resolution（ADR 0008）：
 
 - ``RETRY_STEP``：应用依据外部证据判断重复执行是安全的，显式授权
   Runner 重新执行等待中的 Tool Step（创建**新的 Step Attempt**，同一
@@ -41,7 +41,7 @@ class ResolutionAction(str, enum.Enum):
 
 
 class RunResolution(BaseModel, frozen=True):
-    """一次显式的应用 resolution 命令（ADR 0008 / Ticket 07）。
+    """一次显式的应用 resolution 命令（ADR 0008）。
 
     - ``CONFIRM_STEP`` 必须携带 ``result``：应用提供的确认结果，作为
       工具结果写入 Checkpoint（绝不重新执行工具）；
@@ -132,7 +132,7 @@ def allowed_resolutions(run: RunRecord) -> tuple[ResolutionAction, ...]:
     由 ``waiting_reason`` 决定：UNCERTAIN NON_IDEMPOTENT 允许全部四种
     （重试 / 确认 / 失败 / 取消），DEFINITION_UNAVAILABLE 只允许终结。
     Runner 的 :meth:`resolve_run` 与上层应用共用本函数，保证"只暴露该
-    状态有效的 resolution actions"（Ticket 07 AC 4）。
+    状态有效的 resolution actions"。
     """
     from ._runner import (  # 延迟导入避免循环依赖
         REASON_DEFINITION_UNAVAILABLE,

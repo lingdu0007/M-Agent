@@ -1,6 +1,6 @@
-"""Ticket 13：durable SQLite SessionStore（共享 contract kit 绑定）。
+"""durable SQLite SessionStore（共享 contract kit 绑定）。
 
-本文件把 Ticket 12 的实现无关契约套件绑定到 SQLiteSessionStore，并
+本文件把 的实现无关契约套件绑定到 SQLiteSessionStore，并
 覆盖 SQLite 特有的持久化行为：
 
 - 共享 SessionStore 行为契约（Scope、version、pagination、claim、
@@ -117,7 +117,7 @@ class _SQLiteDirectory:
 class SQLiteSessionStoreContractTests(
     SessionStoreContractMixin, unittest.IsolatedAsyncioTestCase
 ):
-    """Ticket 13 AC 1：共享 SessionStore 契约套件的 SQLite 绑定。"""
+    """AC 1：共享 SessionStore 契约套件的 SQLite 绑定。"""
 
     def setUp(self) -> None:
         self._paths = _SQLiteDirectory(self)
@@ -133,7 +133,7 @@ class SQLiteSessionStoreContractTests(
 class SQLiteSessionConversationTests(
     SessionConversationContractMixin, unittest.IsolatedAsyncioTestCase
 ):
-    """Ticket 13 AC 1：共享组合行为契约套件的 SQLite 绑定。"""
+    """AC 1：共享组合行为契约套件的 SQLite 绑定。"""
 
     def setUp(self) -> None:
         self._paths = _SQLiteDirectory(self)
@@ -488,7 +488,7 @@ class _PlainModelAdapter(DeterministicModelAdapter):
 
 
 class SQLiteSessionPayloadProtectionTests(unittest.IsolatedAsyncioTestCase):
-    """Ticket 13 AC 6：Session Payload 独立保护与 fail-closed。"""
+    """AC 6：Session Payload 独立保护与 fail-closed。"""
 
     def setUp(self) -> None:
         self._paths = _SQLiteDirectory(self)

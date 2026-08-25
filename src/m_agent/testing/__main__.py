@@ -1,4 +1,4 @@
-"""Thin, offline-only CLI for the Ticket 07 Acceptance Pack foundation."""
+"""Thin, offline-only CLI for the Acceptance Pack foundation."""
 
 from __future__ import annotations
 
@@ -544,7 +544,7 @@ def _assert_core_lifecycle_manifest(manifest: AcceptanceManifest) -> None:
     )
     if manifest != expected:
         raise ValueError(
-            "Ticket 07 CLI supports only the frozen core-lifecycle foundation profile"
+            "CLI supports only the frozen core-lifecycle foundation profile"
         )
 
 

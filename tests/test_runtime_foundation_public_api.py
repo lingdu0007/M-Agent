@@ -373,7 +373,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             )
 
     def test_core_lifecycle_foundation_profile_freezes_coverage_declarations(self) -> None:
-        """The only Ticket 07 profile is not a substitute for foundation-release."""
+        """The only profile is not a substitute for foundation-release."""
         from m_agent.testing import core_lifecycle_manifest
 
         manifest = core_lifecycle_manifest(

@@ -1,4 +1,4 @@
-"""Durable Support Agent 旗舰示例一键运行入口（Ticket 11）。
+"""Durable Support Agent 旗舰示例一键运行入口。
 
 编排五个子进程完成确定性验收，退出码反映 acceptance 成败：
 

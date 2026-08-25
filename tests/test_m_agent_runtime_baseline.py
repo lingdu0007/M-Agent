@@ -1,4 +1,4 @@
-"""Ticket 11 release-gate contracts for the 0.3 Runtime Baseline.
+"""release-gate contracts for the 0.3 Runtime Baseline.
 
 These tests use only public seams. They freeze:
 

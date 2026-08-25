@@ -1,4 +1,4 @@
-"""Ticket 14 测试：可恢复 Context Plan 与硬预算控制。
+"""测试：可恢复 Context Plan 与硬预算控制。
 
 验收要求（.scratch/agent-runtime-foundation/issues/14-...md）：
 

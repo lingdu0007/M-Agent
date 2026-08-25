@@ -1,4 +1,4 @@
-"""Ticket 04 adapter-level instruction/data boundary tests.
+"""adapter-level instruction/data boundary tests.
 
 These tests drive the public Runner with real provider adapters and an
 ``httpx.MockTransport``. They inspect the actual provider request bodies, not

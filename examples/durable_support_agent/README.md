@@ -1,4 +1,4 @@
-# Durable Support Agent — 旗舰示例与确定性验收（Ticket 11）
+# Durable Support Agent — 旗舰示例与确定性验收
 
 M-Agent Durable Run 的**旗舰可执行示例**：把 runtime 已交付的能力组合
 成一条生产形态的垂直路径，并给出可重复的确定性验收证据。
@@ -30,7 +30,7 @@ checkpoint 尚未提交时第一进程退出，第二进程通过公开 `resume_
 重放该 `IDEMPOTENT` Step。原始与恢复 Attempt 都保留在该 RunStore 中，
 而外部 ledger 仍只有一次更新。
 
-这条路径覆盖 PRD User Stories 63–66 与 Ticket 11 的全部 Acceptance
+这条路径覆盖 –66 与 的全部 Acceptance
 criteria：ticket/policy Context Items → READ_ONLY 查询 → IDEMPOTENT
 更新 → NON_IDEMPOTENT 通知 → 通知后 checkpoint 前崩溃 → 第二进程
 WAITING → CONFIRM_STEP → SUCCEEDED。
@@ -111,7 +111,7 @@ NON_IDEMPOTENT 通知的副作用**不**记录在 RunStore 里，而是追加到
 
 它不参与 Runner 核心循环、不修改 RunStore；报告写入 `report/` 目录
 （`report.json` 机器可读 + `report.txt` 人类可读），位于 RunStore
-之外。11 项检查对照 Ticket 11 Acceptance criteria：
+之外。11 项检查对照 Acceptance criteria：
 
 1. `context_items_checkpointed` — ticket/policy Context Items 保留
    item_id/content/source/metadata；

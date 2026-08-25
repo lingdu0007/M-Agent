@@ -1,4 +1,4 @@
-"""Ticket 02 regression tests for protected snapshot and failure payloads."""
+"""regression tests for protected snapshot and failure payloads."""
 
 from __future__ import annotations
 

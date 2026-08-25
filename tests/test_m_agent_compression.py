@@ -1,4 +1,4 @@
-"""Ticket 15 测试：显式 Semantic Compression 与 Context 场景。
+"""测试：显式 Semantic Compression 与 Context 场景。
 
 验收要求（.scratch/agent-runtime-foundation/issues/15-...md）：
 

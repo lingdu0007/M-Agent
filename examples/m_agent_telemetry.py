@@ -1,4 +1,4 @@
-"""M-Agent 本地 JSONL Telemetry 示例（Ticket 09 / ADR 0035）。
+"""M-Agent 本地 JSONL Telemetry 示例（ADR 0035）。
 
 展示 Runtime Integrator 如何把官方 :class:`JsonlTelemetrySink` 附加到
 公开 :class:`Runner`：一次确定性 Run（Context Step + Model Step +

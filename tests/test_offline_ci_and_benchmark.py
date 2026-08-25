@@ -1,4 +1,4 @@
-"""Ticket 12 contracts for the offline CI gate and SQLite benchmark."""
+"""contracts for the offline CI gate and SQLite benchmark."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""凭证隔离测试（Ticket 02 AC：provider 凭证不进入任何持久化位置）。
+"""凭证隔离测试。
 
 ADR 0033：API Key、访问令牌等凭据始终由 Adapter 从外部配置读取，
 不进入 Definition Snapshot 或 Run Payload；Trace 默认只记录元数据。

@@ -33,7 +33,7 @@ class RunRecord(BaseModel):
     snapshot: DefinitionSnapshot | None = None
     output: str | None = None
     waiting_reason: str | None = None
-    #: WAITING 时目标 Step 的 step_id（Ticket 07 / ADR 0008）。
+    #: WAITING 时目标 Step 的 step_id（ADR 0008）。
     #: UNCERTAIN NON_IDEMPOTENT WAITING 指向等待处置的 Tool Step；
     #: DEFINITION_UNAVAILABLE WAITING 无目标 Step，为 None。
     waiting_step_id: str | None = None

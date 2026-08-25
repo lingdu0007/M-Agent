@@ -1,4 +1,4 @@
-"""Ticket 08 主行为测试：流式观察 Run Update 与协作式取消。
+"""主行为测试：流式观察 Run Update 与协作式取消。
 
 验收要求（.scratch/durable-run/issues/08-stream-and-cancel-run.md）：
 
@@ -914,7 +914,7 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_during_uncertain_non_idempotent_tool_stays_waiting(
         self,
     ) -> None:
-        # Ticket 07 边界：取消请求不能把已 dispatch、结果仍不确定的
+        # 边界：取消请求不能把已 dispatch、结果仍不确定的
         # NON_IDEMPOTENT Tool 伪造成 CANCELLED；只有 Resolution 才能处置。
         class RequestNotificationModel(DeterministicModelAdapter):
             def __init__(self) -> None:
@@ -1176,7 +1176,7 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_cancel_waiting_run_reuses_resolution(self) -> None:
-        # WAITING Run 的取消复用 CANCEL_RUN resolution（Ticket 07 语义）。
+        # WAITING Run 的取消复用 CANCEL_RUN resolution。
         from m_agent.runtime import (
             REASON_UNCERTAIN_NON_IDEMPOTENT,
             ToolFailure,

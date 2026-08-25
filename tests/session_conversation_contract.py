@@ -1,10 +1,10 @@
 """SessionRunner 组合行为共享契约测试（实现无关）。
 
-Ticket 12 AC 5-8 的组合层契约：Snapshot 一次性冻结为 Conversation
+AC 5-8 的组合层契约：Snapshot 一次性冻结为 Conversation
 History、claim 原子占用、非成功释放、WAITING 保留与禁止越过、幂等
 提交、Core Run Status 与 Session Commit Status 分离。本 mixin 只依赖
 公开 seam（SessionRunner / SessionStore / Runner 公开 API），子类只
-提供 ``make_session_store()``；Ticket 13 的 SQLite 实现直接复用。
+提供 ``make_session_store()``；的 SQLite 实现直接复用。
 """
 
 from __future__ import annotations
@@ -332,7 +332,7 @@ class SessionConversationContractMixin:
 
     async def test_committed_turn_schema_is_minimal(self) -> None:
         # Session Turn 只承载最小对话事实：不允许夹带任意 metadata、
-        # 中间输出或工具轨迹（PRD Session Turn schema）。
+        # 中间输出或工具轨迹。
         self.assertEqual(
             set(SessionTurn.model_fields),
             {

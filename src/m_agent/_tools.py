@@ -1,11 +1,11 @@
-"""Tool 契约与确定性实现（Ticket 05）。
+"""Tool 契约与确定性实现。
 
 CONTEXT.md / ADR 0007 / ADR 0024：
 
 - **Tool Effect**：每个工具声明 ``READ_ONLY``、``IDEMPOTENT`` 或
   ``NON_IDEMPOTENT`` 的重试安全性；未声明时按 ``NON_IDEMPOTENT``
   处理（fail-closed，ADR 0007）。Runner 只在 Retry Policy 与失败
-  分类（Ticket 06 / ADR 0025）同时允许时自动重试；UNCERTAIN +
+  分类（ADR 0025）同时允许时自动重试；UNCERTAIN +
   NON_IDEMPOTENT 绝不自动重放。
 - **Tool Outcome**：工具执行只以显式 ``SUCCESS(result)`` 与
   ``REJECTED(code, message)`` 结束；业务拒绝（REJECTED）是正常完成，

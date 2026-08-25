@@ -1,4 +1,4 @@
-"""Ticket 11: idempotent support-ticket updates have one external effect."""
+"""idempotent support-ticket updates have one external effect."""
 
 from __future__ import annotations
 

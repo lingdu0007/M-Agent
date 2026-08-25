@@ -1,4 +1,4 @@
-"""Ticket 07 确定性崩溃 / 恢复 / resolution 子进程（仅测试用）。
+"""确定性崩溃 / 恢复 / resolution 子进程（仅测试用）。
 
 核心场景：NON_IDEMPOTENT 通知工具把外部效果写入**独立于 RunStore 的
 journal 文件**（副作用证据，重复执行即可观测），进程在 Tool Step
@@ -86,7 +86,7 @@ class JournalNotifier(DeterministicTool):
     """NON_IDEMPOTENT fake 通知：把效果追加到外部 journal 文件。
 
     副作用证据存在 RunStore 之外的 journal（每次调用追加一行），
-    因此重复执行可被确定性观测——这正是 Ticket 07 的核心证据。
+    因此重复执行可被确定性观测——这正是 的核心证据。
     """
 
     deterministic: bool = True

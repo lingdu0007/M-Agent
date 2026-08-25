@@ -1,4 +1,4 @@
-"""Chat Completions 风格 live Model Adapter（Ticket 10）。
+"""Chat Completions 风格 live Model Adapter。
 
 适配 OpenAI 兼容的 ``POST {base_url}/chat/completions`` 端点
 （``{base_url}/chat/completions``，base_url 语义与官方

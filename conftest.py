@@ -1,6 +1,6 @@
-"""pytest 根配置（Ticket 10 live 契约测试的 opt-in 门控）。
+"""pytest 根配置。
 
-默认离线原则（PRD「Provider contract seam」）：live 契约测试
+默认离线原则：live 契约测试
 （``@pytest.mark.live``）**永不进入默认 CI / 默认 pytest 运行**——
 没有显式 ``-m live`` 时，本 hook 给它们打上 skip（原因明确：未
 opt-in），因此默认运行不发出任何网络请求，但报告仍显示这些测试

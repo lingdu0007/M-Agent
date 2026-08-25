@@ -1,4 +1,4 @@
-"""Ticket 12：一条 scoped Session 对话（InMemory SessionStore 绑定）。
+"""一条 scoped Session 对话（InMemory SessionStore 绑定）。
 
 本文件把实现无关的共享契约套件绑定到 InMemorySessionStore，并覆盖
 Core 侧 Conversation History seam 的最小修复：
@@ -64,7 +64,7 @@ class _RecordingAdapter(DeterministicModelAdapter):
 class InMemorySessionStoreContractTests(
     SessionStoreContractMixin, unittest.IsolatedAsyncioTestCase
 ):
-    """Ticket 12 AC 9：共享 SessionStore 契约套件的 InMemory 绑定。"""
+    """AC 9：共享 SessionStore 契约套件的 InMemory 绑定。"""
 
     def make_store(self, clock=None):
         return InMemorySessionStore(clock=clock)
@@ -73,7 +73,7 @@ class InMemorySessionStoreContractTests(
 class InMemorySessionConversationTests(
     SessionConversationContractMixin, unittest.IsolatedAsyncioTestCase
 ):
-    """Ticket 12 AC 5-8：共享组合行为契约套件的 InMemory 绑定。"""
+    """AC 5-8：共享组合行为契约套件的 InMemory 绑定。"""
 
     def make_session_store(self):
         return InMemorySessionStore()

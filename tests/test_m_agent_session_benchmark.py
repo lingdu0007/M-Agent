@@ -1,4 +1,4 @@
-"""Ticket 13 contracts for the durable Session conversation benchmark."""
+"""contracts for the durable Session conversation benchmark."""
 
 from __future__ import annotations
 

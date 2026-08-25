@@ -1,6 +1,6 @@
 # Live Model Adapter Contracts（Chat Completions 与 Responses）
 
-Ticket 10（Durable Run PRD User Stories 60–62）为 OpenAI 兼容的
+为 OpenAI 兼容的
 Chat Completions 与 Responses 风格 API 提供清晰的 live Model Adapter
 与凭证门控契约测试。本文档说明两个 Adapter 的**如实能力声明**、
 与确定性 fake 的区分、如何运行 live 契约测试，以及凭证安全边界。

@@ -1,4 +1,4 @@
-"""Durable Support Agent 确定性 Eval（Ticket 11 / ADR 0029，离线可重复）。
+"""Durable Support Agent 确定性 Eval（ADR 0029，离线可重复）。
 
 Eval 是 **Runtime Companion**：它不参与 Runner 核心循环，只通过公开
 产物（``Runner.inspect_run`` 等只读查询路径读取权威 RunStore）与 fake
@@ -6,7 +6,7 @@ external evidence（notify / ticket-update journal、model_request.log、
 provider.log、recovery_evidence.json）验证旗舰场景的确定性验收，报告
 写入 **RunStore 之外的独立目录**。
 
-验收检查（对照 Ticket 11 Acceptance criteria）：
+验收检查（对照 Acceptance criteria）：
 
 1. ``context_items_checkpointed``：ticket 与 policy Context Item 以带
    身份 / 内容 / 来源 / 元数据的结构保留在 Context Step checkpoint；
@@ -92,7 +92,7 @@ from support_agent import (
     journal_count,
 )
 
-#: 期望的 Step 类型轨迹（对照 Ticket 11 AC 4）。
+#: 期望的 Step 类型轨迹（对照 AC 4）。
 EXPECTED_TRAJECTORY = [
     "CONTEXT",
     "MODEL",
@@ -414,7 +414,7 @@ async def evaluate(
             )
         )
 
-        # -- 3. Provider not refetched on resume（AC 6 / Ticket 04） --
+        # -- 3. Provider not refetched on resume（AC 6） --
         provider_lines = _read_lines(os.path.join(logs_dir, "provider.log"))
         checks.append(
             Check(
@@ -497,7 +497,7 @@ async def evaluate(
 
         # -- 7. Uncertain non-idempotent effect recorded（AC 5/9） -----
         # ERROR_EFFECT_UNCONFIRMED 是 Tool Step 专属的机器可读错误标识
-        # （Ticket 07：恢复时未确认的 NON_IDEMPOTENT 调用）。
+        # 。
         uncertain = [
             a for a in attempts if a.error_code == ERROR_EFFECT_UNCONFIRMED
         ]

@@ -1,4 +1,4 @@
-"""Ticket 05 主行为测试：模型请求工具 -> Runner 顺序执行 -> checkpoint
+"""主行为测试：模型请求工具 -> Runner 顺序执行 -> checkpoint
 Tool Outcome -> 回到模型形成最终结果的完整路径。
 
 验收要求（.scratch/durable-run/issues/05-sequential-tool-run.md）：
@@ -20,7 +20,7 @@ Tool Outcome -> 回到模型形成最终结果的完整路径。
   私有编排方法（AC 9）。
 
 本文件不引入 shell、写文件、代码执行或任何高权限工具；不使用
-Retry / WAITING resolution（后续 Ticket 范围）。
+Retry / WAITING resolution（后续版本 范围）。
 """
 
 from __future__ import annotations
@@ -498,7 +498,7 @@ class ToolCallSuccessTests(unittest.IsolatedAsyncioTestCase):
             "order-42",
         )
         # checkpoint 按 MODEL -> TOOL -> MODEL 顺序持久化：工具在
-        # Runner 前进到下一步之前完成 checkpoint（ADR 0006 / PRD US 18）。
+        # Runner 前进到下一步之前完成 checkpoint（ADR 0006）。
         self.assertEqual(
             [c.step_type for c in inspection.checkpoints],
             [StepType.MODEL, StepType.TOOL, StepType.MODEL],

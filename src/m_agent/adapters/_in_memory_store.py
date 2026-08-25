@@ -261,7 +261,7 @@ class InMemoryRunStore:
         if lease_owner is not None:
             self._check_lease(current, lease_owner)
         validate_transition(current.status, status)
-        # WAITING 字段只在 WAITING 状态有效（Ticket 07）：转入 WAITING
+        # WAITING 字段只在 WAITING 状态有效：转入 WAITING
         # 用参数写入 reason / 目标 Step；转出 WAITING（RUNNING / 终态）
         # 一律清空，保证权威记录里不会残留过期目标。
         if status is RunStatus.WAITING:

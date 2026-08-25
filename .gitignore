@@ -13,3 +13,7 @@ build/
 DESIGN.md
 # 本地 telemetry 示例产物（examples/m_agent_telemetry.py 运行时生成）
 examples/telemetry-example.jsonl
+
+# local agent workflow docs (internal, not published)
+AGENTS.md
+docs/agents/

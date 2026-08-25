@@ -1,23 +1,23 @@
-# Durable Run — Ticket 01/02/03/04/05/06/07/08/10 运行时边界、恢复、并发控制、实时更新与协作取消
+# Durable Run — 运行时边界、恢复、并发控制、实时更新与协作取消
 
 本文档面向 Runtime Integrator，说明 M-Agent 新公共包 `m_agent` 中
 Durable Run 垂直切片的职责边界、恢复语义、并发控制与可观测契约。
 领域词汇以根目录 `CONTEXT.md` 为准。
 
-- Ticket 01：first versioned Model Run（公开 Runner tracer bullet）；
-- Ticket 02：从 SQLite 崩溃恢复 Model Run（跨进程恢复、Metadata/
+- first versioned Model Run（公开 Runner tracer bullet）；
+- 从 SQLite 崩溃恢复 Model Run（跨进程恢复、Metadata/
   Payload 分离、Payload Codec、DEFINITION_UNAVAILABLE）；
-- Ticket 03：Run Lease + 乐观版本控制，同一 Run 只允许一个有效推进者；
-- Ticket 04：Context Provider 注入与 checkpoint 复用（Context Step、
+- Run Lease + 乐观版本控制，同一 Run 只允许一个有效推进者；
+- Context Provider 注入与 checkpoint 复用（Context Step、
   Context Item 溯源、外部数据变化防护、指令边界）。
-- Ticket 05：模型请求的单个工具调用形成顺序 Tool Step，dispatch 前持久化
+- 模型请求的单个工具调用形成顺序 Tool Step，dispatch 前持久化
   Step / Attempt 身份，SUCCESS / REJECTED outcome checkpoint 后再继续。
-- Ticket 06：结构化失败分类与冻结的有界 Retry Policy；恢复从同一
+- 结构化失败分类与冻结的有界 Retry Policy；恢复从同一
   Step 的已持久化 Attempt 计算预算，不以新进程的循环计数或当前 Tool
   声明改变重试、WAITING 决策。
-- Ticket 07：不确定的非幂等副作用只能由应用通过显式 resolution
+- 不确定的非幂等副作用只能由应用通过显式 resolution
   处置；真实进程崩溃后的通知绝不被恢复过程自动重放。
-- Ticket 08：Runner 通过非权威 Run Update 暴露流式 Model 进展，并在
+- Runner 通过非权威 Run Update 暴露流式 Model 进展，并在
   不伪造外部调用撤销的前提下，以公开 `cancel_run` 协作停止后续 Step。
 
 ## 职责边界
@@ -37,7 +37,7 @@ Durable Run 垂直切片的职责边界、恢复语义、并发控制与可观�
   不实现并行工具调度。
 - `Runner.resolve_run` 是上层应用提交不确定副作用 resolution 的唯一
   控制入口；Runner 不为模型、Tool Outcome 或 Context Item 提供该命令
-  通道（ADR 0008）。Context Step 自 Ticket 04 起已实现。
+  通道（ADR 0008）。Context Step 已实现。
 - `Runner.cancel_run(run_id, expected_version=None)` 是 Cancellation Request
   的公开控制入口；`Runner.subscribe_run(run_id)` 是 Runtime Integrator
   订阅实时 Run Update 的唯一入口。两者不引入后台 worker、消息队列或
@@ -69,7 +69,7 @@ Ticket 扩展。
 
 ## Run Update 与协作式取消
 
-Ticket 08（ADR 0010 / 0011 / 0012）为 Runtime Integrator 提供实时进度和
+（ADR 0010 / 0011 / 0012）为 Runtime Integrator 提供实时进度和
 协作式控制，但 RunStore 仍是唯一权威事实来源。
 
 - **订阅与重连**：应用只通过 `Runner.subscribe_run(run_id)` 异步订阅
@@ -104,7 +104,7 @@ exactly-once**：
 - 模型调用完成但结果尚未 checkpoint 的崩溃（或任何未确认完成的
   Step）会在恢复时重新执行，因此模型调用可能发生不止一次；
 - 外部副作用的安全由 Tool Effect 声明、失败分类、Retry Policy 与
-  显式应用处置表达（后续 Ticket）；运行时不为外部系统承诺
+  显式应用处置表达（后续版本）；运行时不为外部系统承诺
   exactly-once。
 
 跨进程恢复测试（`tests/test_m_agent_resume.py`）启动真实子进程，
@@ -117,7 +117,7 @@ TTL 内仍有效，恢复 Runner 必须先等租约过期才能接管（测试�
 
 ## Run Lease 与并发控制
 
-ADR 0013 / PRD User Stories 21-23, 44：同一 Run 只允许一个有效推进者，
+ADR 0013：同一 Run 只允许一个有效推进者，
 不同 Run 可并发推进，运行时只提供协调原语，不做调度。
 
 - **租约原语**：
@@ -178,7 +178,7 @@ ADR 0013 / PRD User Stories 21-23, 44：同一 Run 只允许一个有效推进�
 - `PlaintextPayloadCodec` 是显式的开发/测试 Codec，编码带
   `m-agent-plaintext:` 标记；**它不是生产默认**，也不宣称提供任何
   保密性。生产集成必须选择符合自身安全要求的受保护 Codec
-  （security extras，后续 Ticket）；
+  （security extras，后续版本）；
 - provider 凭证（API Key、访问令牌）只存在于 Adapter 外部配置，
   不进入 Definition Snapshot、Run Payload、Checkpoint、Attempt 诊断或
   存储 Metadata（`tests/test_m_agent_credentials.py` 对 InMemory 与
@@ -198,7 +198,7 @@ ADR 0013 / PRD User Stories 21-23, 44：同一 Run 只允许一个有效推进�
 - `DeterministicModelAdapter` 是确定性 fake（`deterministic=True`），
   仅用于测试、演示与离线示例——任何确定性测试都不会被误认为
   供应商兼容性验证；
-- **Live provider Adapters**（Ticket 10，ADR 0030 / 0038）：OpenAI
+- **Live provider Adapters**（ADR 0030 / 0038）：OpenAI
   兼容 Chat Completions 与 Responses 风格 API 的 live Adapter 位于
   可选 `m_agent.adapters.provider` 子包（`provider` extra，依赖 `httpx`）。
   两者都如实声明 streaming / tool calling / native structured
@@ -209,7 +209,7 @@ ADR 0013 / PRD User Stories 21-23, 44：同一 Run 只允许一个有效推进�
 
 ## Context Provider 与上下文注入
 
-Ticket 04（ADR 0014 / 0015 / 0016 / 0017）：
+（ADR 0014 / 0015 / 0016 / 0017）：
 
 - Definition 可声明一个应用选择的 `context_provider`（ADR 0014）。
   Runner 在依赖它的 Model Step **之前**确定性执行它（ADR 0015）：
@@ -245,7 +245,7 @@ Ticket 04（ADR 0014 / 0015 / 0016 / 0017）：
 
 ## 顺序 Tool Step
 
-Ticket 05（ADR 0004 / 0007 / 0024）把模型请求的每个工具调用作为独立的
+（ADR 0004 / 0007 / 0024）把模型请求的每个工具调用作为独立的
 Tool Step：
 
 - dispatch 前，Runner 使用稳定的 `step_id` 与 `attempt_id` 记录
@@ -264,7 +264,7 @@ Tool Step：
 
 ## 有界 Retry Policy
 
-Ticket 06（ADR 0007 / 0025）为 Model 与 Tool Adapter 的失败提供结构化
+（ADR 0007 / 0025）为 Model 与 Tool Adapter 的失败提供结构化
 `TRANSIENT`、`PERMANENT`、`UNCERTAIN` 分类和稳定 `error_code`；原始异常
 文本不进入可查询 metadata。失败 Attempt 保留分类、错误码、时间和
 `attempt_id`，每次重试只创建新的 Attempt，绝不覆盖已有证据。
@@ -287,7 +287,7 @@ Ticket 06（ADR 0007 / 0025）为 Model 与 Tool Adapter 的失败提供结构�
 
 ## 不确定副作用的应用处置
 
-Ticket 07（ADR 0007 / 0008）处理非幂等 Tool 已产生外部效果、但成功
+（ADR 0007 / 0008）处理非幂等 Tool 已产生外部效果、但成功
 checkpoint 尚未提交时的安全边界。测试中的通知把效果写入独立 journal，
 第一进程在 `BEFORE_TOOL_CHECKPOINT` 硬退出；第二进程只打开同一 SQLite、
 外部 journal 和精确重注册的 Definition。
@@ -352,10 +352,9 @@ checkpoint 尚未提交时的安全边界。测试中的通知把效果写入独
   Runner、RunStore 和 inspection/update 公共 seam 断言权威 Step / Attempt /
   Checkpoint、status、updates 与外部调用计数。
 
-## Ticket 11：Durable Support Agent 旗舰示例与确定性 Eval
+## Durable Support Agent 旗舰示例与确定性 Eval
 
-旗舰示例把前序 Ticket 的能力组合成一条可执行的验收路径（PRD
-User Stories 63–66）：ticket/policy Context Items → READ_ONLY
+旗舰示例把前序版本的能力组合成一条可执行的验收路径：ticket/policy Context Items → READ_ONLY
 order lookup → IDEMPOTENT ticket update → NON_IDEMPOTENT
 notification → 通知后 checkpoint 前崩溃 → 第二进程恢复 WAITING →
 应用 CONFIRM_STEP → SUCCEEDED。它还单独执行 ticket update 的崩溃窗口：

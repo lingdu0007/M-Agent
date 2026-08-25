@@ -183,8 +183,7 @@ class RunStore(Protocol):
     Run transition 的每个权威 mutation 都必须携带 ``expected_version``；
     Runner 写入还会原子校验调用方仍持有**未过期**的租约。dispatch 前
     的 ``assert_lease`` 执行相同 guard，杜绝过期 owner 启动新 Step。
-    ``prepare_model_dispatch`` 与 ``reserve_model_attempt`` 是 Ticket 08
-    typed Model Contract 的可选增强：内置 Store 实现它们以原子预留预算
+    ``prepare_model_dispatch`` 与 ``reserve_model_attempt`` 是 typed Model Contract 的可选增强：内置 Store 实现它们以原子预留预算
     并在无 await 间隙内执行最终 guard。0.2 自定义 Store 不需要实现它们；
     只有仍使用旧 Definition 路径的 Run 可以走兼容 dispatch。
     """

@@ -1,4 +1,4 @@
-"""Ticket 04 主行为测试：Context Provider 注入与 checkpoint 复用。
+"""主行为测试：Context Provider 注入与 checkpoint 复用。
 
 验收要求（.scratch/durable-run/issues/04-checkpoint-context-items.md）：
 
@@ -196,7 +196,7 @@ class ContextStepContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_identity_is_authoritative_before_provider_dispatch(
         self,
     ) -> None:
-        # Ticket 04：Provider 外部调用前已经存在权威 CONTEXT Step / Attempt
+        # Provider 外部调用前已经存在权威 CONTEXT Step / Attempt
         # identity。Provider 只读取 RunStore 的公开查询面，不接触 Runner
         # 私有状态。
         store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
@@ -474,7 +474,7 @@ class ContextPayloadSecurityTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertTrue(payloads)
                 self.assertTrue(
-                    any(payload.startswith(b"ticket02-sentinel:") for payload in payloads)
+                    any(payload.startswith(b"protected-payload-sentinel:") for payload in payloads)
                 )
                 self.assertTrue(
                     all(sensitive_content.encode() not in payload for payload in payloads)
@@ -622,7 +622,7 @@ class ContextCrashRecoveryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         # 恢复行为以冻结 Snapshot 为准：第二进程注册同 id+version 但
         # 无 provider 的定义时，已 checkpoint 的 Context Items 仍被复用，
-        # 而不是静默降级为空上下文（ADR 0022/0023，PRD US 6/7）。
+        # 而不是静默降级为空上下文（ADR 0022/0023）。
         def hook(p: CrashPoint, run_id: str) -> None:
             if p is CrashPoint.AFTER_CONTEXT_CHECKPOINT:
                 raise RuntimeError("injected crash")

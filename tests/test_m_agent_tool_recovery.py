@@ -1,6 +1,6 @@
-"""Ticket 05 恢复测试：工具执行过程中断后，从 Run Store 精确恢复。
+"""恢复测试：工具执行过程中断后，从 Run Store 精确恢复。
 
-恢复语义（ADR 0003 at-least-once / Ticket 02 既有契约）扩展到 Tool
+恢复语义（ADR 0003 at-least-once / 既有契约）扩展到 Tool
 Step：
 
 - 已确认的 Tool Step checkpoint 复用：恢复**不重复执行**外部副作用，

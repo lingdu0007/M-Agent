@@ -1,4 +1,4 @@
-"""Public contract tests for Ticket 09 deterministic Run Policy gates."""
+"""Public contract tests for deterministic Run Policy gates."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Ticket 08 public Runner contracts for typed model bindings."""
+"""public Runner contracts for typed model bindings."""
 
 from __future__ import annotations
 

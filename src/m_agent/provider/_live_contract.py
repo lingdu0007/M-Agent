@@ -1,4 +1,4 @@
-"""Live provider contract-test preflight (Ticket 10).
+"""Live provider contract-test preflight .
 
 The preflight is intentionally independent from pytest collection.  Live
 contract cases use it from their public ``setUp`` path, so direct unittest

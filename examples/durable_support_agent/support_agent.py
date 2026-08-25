@@ -1,4 +1,4 @@
-"""Durable Support Agent 旗舰示例的共享组件（Ticket 11）。
+"""Durable Support Agent 旗舰示例的共享组件。
 
 本模块把 M-Agent 已有 runtime 能力组装成可执行验收场景所需的
 确定性组件，全部离线、可重复：
@@ -15,7 +15,7 @@
 - :class:`NotifyTool`：``NON_IDEMPOTENT`` 通知（独立 journal 记录
   通知次数，作为外部副作用证据——与 RunStore 分离，重复执行可观测）。
 
-外部证据文件与 RunStore 分离（PRD「Side-effect evidence」）：notify /
+外部证据文件与 RunStore 分离：notify /
 ticket-update 的效果只写入各自的 journal 文件，跨进程后仍可计数；
 模型请求与 Context Provider 调用也各写一个日志文件，供确定性 Eval
 读取。**本模块不包含 RAG / Session / Workflow / MultiAgent / LLM
@@ -70,7 +70,7 @@ DEFINITION_ID = "durable-support-agent"
 DEFINITION_VERSION = "1.0"
 
 #: 应用在第二进程对等待中的通知 Tool Step 提交的确认结果
-#: （ADR 0008 / Ticket 07：CONFIRM_STEP 由应用显式提供）。
+#: （ADR 0008：CONFIRM_STEP 由应用显式提供）。
 CONFIRM_RESULT = "notification-confirmed-by-app"
 
 #: 模型所需的 tool calling 能力（ADR 0030：注册时校验，无静默降级）。
@@ -114,7 +114,7 @@ def journal_count(path: str) -> int:
     """外部 journal 文件的行数（= 该副作用累计发生次数）。
 
     journal 是独立于 RunStore 的外部证据：重复执行即可确定性观测
-    （Ticket 07 AC 2 / PRD「Side-effect evidence」）。
+    。
     """
     if not os.path.exists(path):
         return 0
@@ -188,7 +188,7 @@ class TicketContextProvider(DeterministicContextProvider):
 
     返回带稳定标识与溯源的 Context Item；每次调用向 provider 日志追加
     一行，跨进程调用次数因此可观测（恢复必须复用 checkpoint，不再
-    查询外部数据源，Ticket 04）。
+    查询外部数据源）。
     """
 
     deterministic: bool = True
@@ -285,7 +285,7 @@ class SupportModel(DeterministicModelAdapter):
                 )
             )
         # 三个工具结果齐备：给出确定性最终结构化结果（JSON 文本）。
-        # 这是普通模型输出，不是 Output Repair（Ticket 11 AC 8）。
+        # 这是普通模型输出，不是 Output Repair。
         result = {
             "ticket_id": TICKET_ID,
             "status": "resolved",
@@ -372,7 +372,7 @@ class NotifyTool(DeterministicTool):
     """NON_IDEMPOTENT 通知：重复执行会产生不同外部效果（ADR 0007）。
 
     每次调用向独立 journal 追加一行——通知是否发生、发生几次都由
-    这个 RunStore 之外的外部证据确定性证明（Ticket 07 / 11 AC）。
+    这个 RunStore 之外的外部证据确定性证明。
     结果不确定时运行时绝不自动重放，进入 WAITING 等待应用处置。
     """
 
@@ -408,7 +408,7 @@ def build_registry(
     """按精确 id + version 注册旗舰场景的 Agent Definition。
 
     全部适配器都是确定性 fake（``deterministic=True``），示例默认
-    离线且可重复（Ticket 11 AC 1）。
+    离线且可重复。
     """
     os.makedirs(logs_dir, exist_ok=True)
     registry = DefinitionRegistry()
@@ -430,7 +430,7 @@ def build_registry(
                 TicketUpdateTool(ticket_update_journal),
                 NotifyTool(notify_journal),
             ),
-            # Ticket 06 requires an explicit frozen bound before recovery may
+            # requires an explicit frozen bound before recovery may
             # replay an effect-safe Step.  TicketUpdateTool's external ledger
             # makes its second attempt idempotent; NON_IDEMPOTENT notify still
             # enters WAITING on an uncertain crash regardless of this policy.

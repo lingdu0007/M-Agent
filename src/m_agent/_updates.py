@@ -1,4 +1,4 @@
-"""Run Update 契约（Ticket 08 / ADR 0010 / ADR 0011）。
+"""Run Update 契约（ADR 0010 / ADR 0011）。
 
 CONTEXT.md：Run Update 是 Runner 面向上层应用发布的稳定实时通知，
 用于呈现 Agent Run 的状态、步骤和输出进展；它不是权威状态，丢失后
@@ -7,9 +7,9 @@ CONTEXT.md：Run Update 是 Runner 面向上层应用发布的稳定实时通知
 本模块定义唯一的公开 Run Update 数据契约：
 
 - 订阅只通过公开 Runner API（:meth:`Runner.subscribe_run`），订阅者
-  无需访问任何内部执行对象（Ticket 08 AC 1）；
+  无需访问任何内部执行对象；
 - 模型流式增量（``MODEL_DELTA``）携带 ``run_id`` / ``step_id`` /
-  ``attempt_id``（ADR 0011 / Ticket 08 AC 2），消费者按 Attempt 渲染、
+  ``attempt_id``（ADR 0011 / AC 2），消费者按 Attempt 渲染、
   替换或丢弃部分输出；
 - 增量（delta）**不是 checkpoint**：只有完整模型响应持久化后才发布
   ``STEP_COMPLETED``（ADR 0011 / AC 3-4），断线后的权威事实必须从

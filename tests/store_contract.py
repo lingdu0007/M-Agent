@@ -1,6 +1,6 @@
 """InMemoryRunStore 与 SQLiteRunStore 共享的行为契约测试。
 
-PRD Testing Decisions：两种 RunStore 实现必须通过同一份生命周期、
+两种 RunStore 实现必须通过同一份生命周期、
 Step 记录、乐观版本控制与 Payload 处理契约；本模块以 mixin 形式
 提供，具体 Store 实现各自继承（须同时继承
 ``unittest.IsolatedAsyncioTestCase``）并只提供 ``make_store()``
@@ -275,7 +275,7 @@ class RunStoreContractMixin:
     async def test_inflight_step_and_attempt_update_by_stable_identity(
         self,
     ) -> None:
-        # Ticket 05：dispatch 前的 RUNNING Step/Attempt 与 outcome 后的
+        # dispatch 前的 RUNNING Step/Attempt 与 outcome 后的
         # SUCCEEDED 记录必须使用同一稳定 identity，而不是追加第二份记录。
         store = self.make_store()
         await store.create_run(created_record())
@@ -414,7 +414,7 @@ class RunStoreContractMixin:
         self.assertEqual(await store.get_checkpoints("run-1"), [])
 
     async def test_failed_attempt_classification_roundtrip(self) -> None:
-        # Ticket 06：失败 Attempt 的分类 / 错误标识 / 时间证据作为
+        # 失败 Attempt 的分类 / 错误标识 / 时间证据作为
         # metadata 持久化，InMemory 与 SQLite 都必须在 roundtrip 后
         # 原样还原（分类绝不依赖异常消息字符串）。
         store = self.make_store()
@@ -451,7 +451,7 @@ class RunStoreContractMixin:
         self.assertIsNone(by_id["attempt-ok"].error_code)
 
     async def test_checkpoint_step_type_roundtrip(self) -> None:
-        # Ticket 04：checkpoint 携带 step_type（MODEL / CONTEXT），
+        # checkpoint 携带 step_type（MODEL / CONTEXT），
         # 恢复时据此区分已确认的 Context 与 Model Step。
         store = self.make_store()
         await store.create_run(created_record())
@@ -481,7 +481,7 @@ class RunStoreContractMixin:
     async def test_run_enters_waiting_with_machine_readable_reason(
         self,
     ) -> None:
-        # Ticket 02：RUNNING -> WAITING 合法，waiting_reason 持久化。
+        # RUNNING -> WAITING 合法，waiting_reason 持久化。
         store = self.make_store()
         created = await store.create_run(created_record())
         running = await store.transition_run(

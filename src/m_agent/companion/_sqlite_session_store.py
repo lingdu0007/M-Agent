@@ -1,6 +1,6 @@
 """SQLiteSessionStore：跨进程 durable 的 SessionStore 参考实现。
 
-Ticket 13 / ADR 0018-0021：Session 对话历史的权威持久化边界，与
+ADR 0018-0021：Session 对话历史的权威持久化边界，与
 InMemorySessionStore 共享同一份 :class:`~m_agent.companion.SessionStore`
 行为契约（Scope 隔离、exact-version read、cursor pagination、原子
 claim、CAS commit、run identity 幂等去重）。

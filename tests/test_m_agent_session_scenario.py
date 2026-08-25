@@ -1,4 +1,4 @@
-"""Ticket 13 acceptance contracts for the session-conversation Scenario.
+"""acceptance contracts for the session-conversation Scenario.
 
 这些测试只用公共 seam。冻结内容：
 

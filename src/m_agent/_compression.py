@@ -1,4 +1,4 @@
-"""Semantic Compression 契约、结果与校验（ADR 0040 / Ticket 15）。
+"""Semantic Compression 契约、结果与校验（ADR 0040）。
 
 ADR 0040：任何调用模型的 Semantic Compression 都是
 ``purpose=CONTEXT_COMPRESSION`` 的独立、可追踪、可计费 Model Step，

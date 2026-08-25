@@ -56,7 +56,7 @@ class RetryPolicy(BaseModel, frozen=True):
 
     未配置 Retry Policy 时 Runner 不做任何自动重试（fail-closed）。
     策略在 Run 启动时冻结进 Definition Snapshot，运行中修改 Agent
-    Definition 不能改变已有 Run 的重试行为（Ticket 06 AC 8）。
+    Definition 不能改变已有 Run 的重试行为。
     """
 
     max_attempts: int = Field(ge=1)
@@ -87,7 +87,7 @@ class DefinitionSnapshot(BaseModel, frozen=True):
     #: 不序列化工具实现。恢复行为由启动时冻结的声明决定；后续重试 /
     #: WAITING 决策依赖 Tool Effect（ADR 0007）。
     tool_declarations: tuple[ToolDeclaration, ...] = Field(default_factory=tuple)
-    #: 冻结的 Retry Policy（ADR 0025 / Ticket 06）：Run 的重试决策只
+    #: 冻结的 Retry Policy（ADR 0025）：Run 的重试决策只
     #: 依据本快照中的策略，运行中修改 Agent Definition 不影响已有 Run
     #: （ADR 0022/0023）。None 表示该 Run 不自动重试。
     retry_policy: RetryPolicy | None = None
@@ -97,11 +97,11 @@ class DefinitionSnapshot(BaseModel, frozen=True):
         default_factory=lambda: AllowAllRunPolicy().identity
     )
     output_contract: OutputContract | None = None
-    #: 冻结的 Context Plan（ADR 0040 / Ticket 14）：有序 Stage 序列及其
+    #: 冻结的 Context Plan（ADR 0040）：有序 Stage 序列及其
     #: 作用域。空 Plan 表示不使用 Context Pipeline。恢复时 Runner 按
     #: Plan 顺序复用已完成 checkpoint，不重新读取外部事实。
     context_plan: ContextPlan = Field(default_factory=ContextPlan)
-    #: 冻结的 Compression Contract（ADR 0040 / Ticket 15）：显式、有损的
+    #: 冻结的 Compression Contract（ADR 0040）：显式、有损的
     #: Semantic Compression 声明。None 表示该 Run 不执行压缩；非空时
     #: Runner 在 RUN_INPUT Stage 之后、业务 Model Step 之前执行一次
     #: ``purpose=CONTEXT_COMPRESSION`` 的独立 Model Step。
@@ -132,7 +132,7 @@ class AgentDefinition(BaseModel, frozen=True):
     version: str
     instructions: str
     model_requirements: ModelRequirements = Field(default_factory=ModelRequirements)
-    #: Temporary 0.2 alias. Ticket 11 removes this at the explicit 0.3
+    #: Temporary 0.2 alias. removes this at the explicit 0.3
     #: contract transition; typed requirements remain the internal source.
     required_capabilities: ModelCapabilities = Field(
         default_factory=ModelCapabilities
@@ -156,12 +156,12 @@ class AgentDefinition(BaseModel, frozen=True):
     #: Provider（ADR 0014）。None 表示该 Run 不注入外部上下文。
     #: 与 model_adapter 一样从不随 Definition 序列化（ADR 0023）。
     context_provider: ContextProvider | None = Field(default=None, exclude=True)
-    #: 模型可调用的工具（ADR 0004 / Ticket 05）。每个工具声明
+    #: 模型可调用的工具（ADR 0004）。每个工具声明
     #: Tool Effect（ADR 0007，未声明默认 NON_IDEMPOTENT）；工具实现
     #: 与 model_adapter / context_provider 一样从不随 Definition
     #: 序列化（ADR 0023：不持久化 callable），快照只记录能力标识。
     tools: tuple[Tool, ...] = Field(default_factory=tuple, exclude=True)
-    #: Run Step 的有界重试规则（ADR 0025 / Ticket 06）。None 表示不
+    #: Run Step 的有界重试规则（ADR 0025）。None 表示不
     #: 自动重试。与 model_adapter 不同，Retry Policy 是纯数据声明，
     #: 随 Snapshot 一起冻结、持久化（不 exclude），恢复决策只读快照。
     retry_policy: RetryPolicy | None = None
@@ -170,12 +170,11 @@ class AgentDefinition(BaseModel, frozen=True):
     run_policy: RunPolicy = Field(default_factory=AllowAllRunPolicy, exclude=True)
     #: Versioned final-output semantics, frozen into every created Run.
     output_contract: OutputContract | None = None
-    #: Agent Definition 声明并冻结的有序 Context Plan（ADR 0040 /
-    #: Ticket 14）。None 或空 Plan 表示不使用 Context Pipeline；
+    #: Agent Definition 声明并冻结的有序 Context Plan（ADR 0040）。None 或空 Plan 表示不使用 Context Pipeline；
     #: 非空 Plan 不随 Snapshot 序列化 Stage 实现对象（ADR 0023：
     #: 不持久化 callable），只冻结纯数据 Plan。
     context_plan: ContextPlan = Field(default_factory=ContextPlan)
-    #: 版本化的 Compression Contract（ADR 0040 / Ticket 15）：纯数据，
+    #: 版本化的 Compression Contract（ADR 0040）：纯数据，
     #: 随 Snapshot 冻结。恢复时按 (contract_id, version) 精确复用已
     #: 完成 compression checkpoint，不用最新契约重算旧 Run。
     compression_contract: CompressionContract | None = None

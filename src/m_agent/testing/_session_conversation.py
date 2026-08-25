@@ -1,6 +1,6 @@
-"""Offline session-conversation recovery scenario for Ticket 13.
+"""Offline session-conversation recovery scenario.
 
-Ticket 13 / ADR 0018-0021 / ADR 0042：durable Session 对话的真实子进程
+ADR 0018-0021 / ADR 0042：durable Session 对话的真实子进程
 崩溃恢复证据。三个已决议的跨 Store crash window——**Claim 后 Run 创建
 前**、**Core 成功后 Session 提交前**、**Turn 追加与 Claim 清理原子
 边界**——各连续重复三次：真实子进程只用公开 API 驱动会话，在公共

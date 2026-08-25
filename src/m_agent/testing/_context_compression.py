@@ -1,6 +1,6 @@
-"""Offline context-budget-compression scenario for Ticket 15.
+"""Offline context-budget-compression scenario.
 
-Ticket 15 / ADR 0040 / ADR 0042：显式 Semantic Compression 的完整离线
+ADR 0040 / ADR 0042：显式 Semantic Compression 的完整离线
 证明。Scenario 只用公开 seam（``Runner`` / ``DefinitionRegistry`` /
 ``inspect_run`` / 公开 Context 契约类型 / ``InMemoryRunStore`` /
 ``PayloadCodec``）驱动七个运行：

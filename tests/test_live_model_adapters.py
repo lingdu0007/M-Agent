@@ -1,6 +1,6 @@
-"""Live Chat Completions / Responses Model Adapter 契约测试（Ticket 10）。
+"""Live Chat Completions / Responses Model Adapter 契约测试。
 
-本文件分两部分，报告语义严格区分（PRD「Provider contract seam」）：
+本文件分两部分，报告语义严格区分：
 
 **离线部分**（无 ``live`` 标记，默认 CI 运行，不触网、不要求凭证）：
 - 两类 Adapter 如实声明 streaming / tool calling / native structured

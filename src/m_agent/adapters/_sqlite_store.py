@@ -1,13 +1,13 @@
 """SQLiteRunStore：可跨进程恢复的 SQLite RunStore 实现。
 
-ADR 0006 / PRD User Story 53：SQLiteRunStore 是本地与单服务部署的
+ADR 0006：SQLiteRunStore 是本地与单服务部署的
 持久化参考实现，必须支持进程重启后的恢复。Run 权威状态、Step、
 Step Attempt、Checkpoint、乐观版本号、Run Lease（owner / 期限）与
 定义引用都持久化在 SQLite；Run Payload（input / output / checkpoint
 内容）只经配置的 :class:`PayloadCodec` 编码后存入 ``run_payloads``
 表，metadata 表不含任何内容字段（ADR 0033）。
 
-部署边界（Ticket 03 起）：
+部署边界：
 
 - 每个进程实例持有自己的连接；写入操作同步执行并在返回前 commit，
   因此 checkpoint 一旦返回即已落盘，进程崩溃（含 ``os._exit``）不会
@@ -248,7 +248,7 @@ class SQLiteRunStore:
             self._conn.execute(
                 "ALTER TABLE step_attempts ADD COLUMN usage_json TEXT"
             )
-        # Ticket 02 旧版本把完整 DefinitionSnapshot 直接写进
+        # 旧版本把完整 DefinitionSnapshot 直接写进
         # ``snapshot_json``，Step Attempt 的诊断也落在 ``error`` 列。
         # 打开时迁移到受保护 payload，确保重开后 metadata 不继续泄漏。
         snapshots = self._conn.execute(
@@ -602,7 +602,7 @@ class SQLiteRunStore:
                 f"{current.version}; run record was not mutated"
             )
         validate_transition(current.status, status)
-        # WAITING 字段只在 WAITING 状态有效（Ticket 07）：转出 WAITING
+        # WAITING 字段只在 WAITING 状态有效：转出 WAITING
         # 一律清空，避免权威记录残留过期目标 Step。
         if status is RunStatus.WAITING:
             new_waiting_reason = waiting_reason

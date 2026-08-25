@@ -2,7 +2,7 @@
 
 与 SQLiteRunStore 共享同一份 RunStore 行为契约（见
 ``tests/store_contract.py`` 的 ``RunStoreContractMixin``），
-由 Ticket 01 引入、Ticket 02 扩展为两种实现共用的契约套件。
+由 引入、扩展为两种实现共用的契约套件。
 """
 
 from __future__ import annotations

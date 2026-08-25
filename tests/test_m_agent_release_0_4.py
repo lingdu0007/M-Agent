@@ -1,4 +1,4 @@
-"""Ticket 16 release-gate contracts for the 0.4 Session/Context candidate.
+"""release-gate contracts for the 0.4 Session/Context candidate.
 
 这些测试只用公共 seam。冻结内容：
 

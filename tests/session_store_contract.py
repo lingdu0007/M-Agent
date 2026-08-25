@@ -1,9 +1,9 @@
 """InMemorySessionStore 与未来 SQLiteSessionStore 共享的行为契约测试。
 
-PRD Testing Decisions / Ticket 12 AC 9：SessionStore 的两种实现必须
+SessionStore 的两种实现必须
 通过同一份实现无关的公共契约套件；本模块以 mixin 形式提供，具体
 实现各自继承（须同时继承 ``unittest.IsolatedAsyncioTestCase``）并只
-提供 ``make_store()`` 工厂。Ticket 13 的 SQLite 实现直接复用本套件。
+提供 ``make_store()`` 工厂。的 SQLite 实现直接复用本套件。
 
 断言只通过 SessionStore 公开接口驱动（SessionScope、SessionRecord、
 SessionSnapshot、SessionRunClaim、SessionTurn、SessionCommitResult），

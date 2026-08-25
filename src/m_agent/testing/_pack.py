@@ -369,7 +369,7 @@ def core_lifecycle_manifest(
     fixture_digest: str,
     environment: Mapping[str, str],
 ) -> AcceptanceManifest:
-    """Build the complete, one-scenario Ticket 07 foundation declaration."""
+    """Build the complete, one-scenario foundation declaration."""
     return AcceptanceManifest(
         pack_version=CORE_LIFECYCLE_PACK_VERSION,
         profile=CORE_LIFECYCLE_PROFILE,
@@ -589,7 +589,7 @@ def session_conversation_manifest(
     fixture_digest: str,
     environment: Mapping[str, str],
 ) -> AcceptanceManifest:
-    """Freeze the Ticket 13 durable Session recovery Scenario declaration.
+    """Freeze the durable Session recovery Scenario declaration.
 
     HOST wheel 证据与 0.4 release profile（ADR 0042）由后续发行票补充；
     本 Manifest 冻结当前可离线重复验证的五个 required CONTRACT 检查。
@@ -704,7 +704,7 @@ def context_compression_manifest(
     fixture_digest: str,
     environment: Mapping[str, str],
 ) -> AcceptanceManifest:
-    """Freeze the Ticket 15 Semantic Compression Scenario declaration.
+    """Freeze the Semantic Compression Scenario declaration.
 
     Six required CONTRACT checks cover plan order / scopes, Stage / Frame
     checkpoint recovery, hard budget, protected channels, no-recursion,
@@ -728,7 +728,7 @@ def context_compression_manifest(
 FOUNDATION_RELEASE_0_4_PACK_VERSION = "foundation-release-0-4-v1"
 FOUNDATION_RELEASE_0_4_PROFILE = "foundation-release-0-4"
 
-# Ticket 16 / ADR 0042：0.4 发布 profile 在同一 RC 身份下重跑 0.3 两个
+# ADR 0042：0.4 发布 profile 在同一 RC 身份下重跑 0.3 两个
 # required Scenario 并新增 Session / Context 场景。Session / Context 检查
 # 相对单场景 Manifest 使用带前缀的证据槽位（``session_`` / ``context_``），
 # 避免与 durable 检查的同名槽位（如 ``recovery_windows_*``）在合并后的

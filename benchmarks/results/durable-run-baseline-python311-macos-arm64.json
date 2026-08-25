@@ -8,7 +8,7 @@
       "checkpoints_without_step": 0,
       "steps_without_run": 0
     },
-    "path": "benchmarks/results/ticket12-local.sqlite",
+    "path": "benchmarks/results/durable-run-baseline.sqlite",
     "row_counts": {
       "runs": 100,
       "step_attempts": 300,

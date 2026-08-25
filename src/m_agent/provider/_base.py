@@ -1,4 +1,4 @@
-"""Live provider Model Adapter 共享基础（Ticket 10 / ADR 0030 / ADR 0038）。
+"""Live provider Model Adapter 共享基础（ADR 0030 / ADR 0038）。
 
 本子包提供访问真实供应商 HTTP API 的 live Model Adapter。它是
 :class:`m_agent.ModelAdapter` 的**扩展实现**，与核心
@@ -10,7 +10,7 @@ False，且只在调用方显式提供凭证后才会发起网络请求。
 安装（``pip install ".[provider]"``）。核心 ``m_agent`` 包不依赖
 ``httpx``，默认安装也不会导入本子包。
 
-凭证边界（ADR 0033 / Ticket 10 AC）：
+凭证边界（ADR 0033 / AC）：
 
 - 凭证（API Key）只从 embedding environment 读取，**永不写入**
   Definition Snapshot、Run Payload、Checkpoint、Run Update、
@@ -163,7 +163,7 @@ def _strip_endpoint_path(path: str) -> str:
 
 
 def classify_provider_status(status_code: int) -> tuple[FailureClassification, str]:
-    """把 provider HTTP 状态归一为结构化分类（Ticket 06 / ADR 0025）。
+    """把 provider HTTP 状态归一为结构化分类（ADR 0025）。
 
     - 429 / 5xx：瞬时（可能恢复），分类 ``TRANSIENT``；
     - 其余 4xx：请求本身被拒绝，分类 ``PERMANENT``（不自动重试）。
