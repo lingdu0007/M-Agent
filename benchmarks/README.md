@@ -81,3 +81,50 @@ journal/synchronous settings, and the exact measurement definition.
 
 Results are comparative local evidence only. They are not universal thresholds
 or production QPS, latency, scalability, availability, or capacity claims.
+
+---
+
+# Explicit Context compression workload benchmark
+
+Run the benchmark from the repository root:
+
+```bash
+uv run python benchmarks/context_workload.py \
+  --database benchmarks/results/context-workload-local.sqlite \
+  --json-output benchmarks/results/context-workload-local.json
+```
+
+The command refuses to overwrite an existing database. It executes 30
+sequential Agent Runs through the public `Runner.create_run` and
+`Runner.start_run` API. Every Run freezes its own deterministic RUN_INPUT
+`ContextPlan` (one PROVIDE stage, per-Run stage identity and compression
+contract revision, because Step ids are deterministic and SQLite checkpoints
+key on them) whose PROVIDE stage yields two compressible articles plus one
+protected item, then one explicit `ModelPurpose.CONTEXT_COMPRESSION` Model
+Step, then the business `PRIMARY` Model Step. Neither adapter uses
+credentials, provider clients, network services, or external databases.
+
+Before calculating metrics, the command inspects every Run through
+`Runner.inspect_run` and requires `SUCCEEDED` status, the exact
+`CONTEXT -> MODEL(CONTEXT_COMPRESSION) -> MODEL(PRIMARY)` checkpoint order,
+the frozen compression contract id, and derived provenance that only
+references consumed source items (no phantom references). It also requires
+the expected `runs` row count and a successful SQLite `integrity_check`.
+Validation failure exits nonzero and emits no `metrics` object or apparently
+valid performance numbers.
+
+The measured interval covers every public `Runner.start_run` call; Run
+creation, inspection, and validation are excluded. Per-Run persistence
+overhead is the summed wall time of `create_run`, `transition_run`,
+`record_step`, `record_attempt`, `record_checkpoint`, and
+`record_policy_decision` attributed to each Run (timed via the
+`TimedSQLiteRunStore` subclass). SQLite schema initialization occurs before
+measurement; warmup is therefore reported as zero Runs. The report also
+records Python, OS, CPU, the database path, and the exact measurement
+definition. Baseline comparison (`compare_with_baseline`) reports relative
+change only for identical artifact/manifest identity, identical Python/OS/CPU,
+identical Run counts, and passing validation on both sides; every other case
+is `INCONCLUSIVE`.
+
+Results are comparative local evidence only. They are not universal thresholds
+or production QPS, latency, scalability, availability, or capacity claims.

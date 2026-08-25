@@ -1,12 +1,16 @@
 # Acceptance Coverage Matrix
 
-This matrix is the frozen contract index for the 0.3 Runtime Baseline. Its
-release profile is `runtime-baseline-0-3` at Pack version `runtime-baseline-v1`
-and it freezes both required Scenarios. Every row, including its
-owner, public seam, positive/negative assertion, evidence, milestone, and
-non-claim, is frozen in a passing `core-lifecycle` Manifest. The Testing CLI
+This matrix is the frozen contract index for the 0.4 Session and Context
+candidate. Its release profile is `foundation-release-0-4` at Pack version
+`foundation-release-0-4-v1` and it freezes all four required Scenarios: the
+0.3 Runtime Baseline (`core-lifecycle` and `durable-effects-recovery`) is rerun
+under the same release-candidate identity, and `session-conversation` and
+`context-budget-compression` add CONTRACT and HOST evidence. Every row,
+including its owner, public seam, positive/negative assertion, evidence,
+milestone, and non-claim, is frozen in a passing Manifest. The Testing CLI
 rejects a Manifest that differs from this complete set; a row cannot be
-omitted based on an execution result.
+omitted based on an execution result, and an older release-candidate Bundle
+cannot attest this candidate.
 
 The same Manifest freezes `required_cli_commands` as `run`, `inspect`,
 `verify`, and `render`. This is a required public command mapping, rather than
@@ -30,7 +34,34 @@ therefore never attests to its own later verification or rendering.
 | `durable.effects.waiting-resolution` | Runtime Core | `durable-effects-recovery`; `RunResolution.confirm_step` | Uncertain non-idempotent effect remains `WAITING` until explicit resolution, repeated three times; auto-success is `FAIL`. | Public `WAITING`/resolution view and independent sentinel/journal evidence. | CONTRACT / 0.3 | Does not claim business approval semantics. |
 | `durable.effects.mutation` | Testing | `durable-effects-recovery`; `reconcile_recovery_window` | A controlled duplicate-effect mutation must fail reconciliation. | Runtime reconciliation result and independent mutation digest. | CONTRACT / 0.3 | Does not prove external ledger integrity. |
 | `durable.effects.host-wheel` | Testing | Clean external venv; installed wheel and `SQLiteRunStore` | Exact wheel runs the durable crash/reopen probe; source or artifact mismatch is `FAIL`. | Installed-wheel observation and independent journal/sentinel digest. | HOST / 0.3 | Does not prove live provider or production effect behavior. |
+| `session.conversation.recovery-windows` | Session Companion | `session-conversation`; `SessionRunner.resume`, `SQLiteSessionStore`, `Runner.get_run` | Three deterministic cross-store crash windows (after claim, after partial turn commit, after core terminal) reopen and recover repeatedly; a partial commit or a rewritten core terminal is `FAIL`. | Public session/run view digest and independent recovery journal digest. | CONTRACT / 0.4 | Does not prove exactly-once external effects. |
+| `session.conversation.claim-no-ttl` | Session Companion | `session-conversation`; `SessionStore.claim_run`, `SessionStore.get_claim` | Restart and stale owner keep exactly one active session claim; a silent second run admission is `FAIL`. | Public claim view digest and independent journal digest. | CONTRACT / 0.4 | Does not claim time-based claim recovery. |
+| `session.conversation.payload-protection` | Session Companion | `session-conversation`; `SQLiteSessionStore`, `PayloadCodec` | An independent session codec protects history bytes at rest and a wrong key fails closed; plaintext history or a silently decoded wrong key is `FAIL`. | Public protection observation digest and independent database byte scan. | CONTRACT / 0.4 | Does not prove encryption strength or key management. |
+| `session.conversation.scope-isolation` | Session Companion | `session-conversation`; `SessionScope`, `SessionStore` | Cross-scope access fails closed without side effects; cross-scope visibility or mutation is `FAIL`. | Public isolation observation digest and independent scope-row scan. | CONTRACT / 0.4 | Does not claim authorization or multitenant isolation. |
+| `session.conversation.mutation` | Testing | `session-conversation`; `reconcile_session_recovery`, `reconcile_session_protection`, `ScenarioEvidenceBundle` | Controlled tamper, wrong-scope, wrong-key, and duplicate-submit mutations are all detected; an undetected mutation is a Harness error. | Runtime reconciliation result and independent mutation digest. | CONTRACT / 0.4 | Does not prove external ledger integrity. |
+| `session.conversation.host-wheel` | Session Companion | Clean external venv; `python -I -m m_agent.testing` | The installed wheel runs the cross-store crash windows and the InMemory/SQLite store contract kit in one isolated process; source import or artifact identity mismatch is `FAIL`. | Installed-wheel probe observation digest and independent probe stdout digest. | HOST / 0.4 | Does not prove live provider or remote session store. |
+| `context.compression.plan-order` | Runtime | `context-budget-compression`; `Runner.start_run`, `Runner.inspect_run` | The frozen Context Plan runs its RUN_INPUT stage first, the explicit `CONTEXT_COMPRESSION` model step in the middle, and the business model step last; a MODEL_STEP-scope stage triggered for compression is `FAIL`. | Public checkpoint order digest and independent sentinel digest. | CONTRACT / 0.4 | Does not prove nested compression. |
+| `context.compression.frame-checkpoints` | Runtime | `context-budget-compression`; `Runner.inspect_run`, `CompressionResult` | Stage checkpoints preserve original items and derived items carry contract provenance; compression recomputed or an external source reread after recovery is `FAIL`. | Public checkpoint/provenance digest and independent sentinel digest. | CONTRACT / 0.4 | Does not claim lossless transform. |
+| `context.compression.hard-budget` | Runtime | `context-budget-compression`; `check_frame_budget`, `ModelInputSizer` | An over-limit frame fails closed with zero business dispatch, and the public full-sizing recomputation agrees with the runtime verdict; an under-counting sizer admitting an over-limit frame is `FAIL`. | Public budget observation digest and independent sentinel digest. | CONTRACT / 0.4 | Does not claim soft budget or best-effort compression. |
+| `context.compression.protected-channels` | Runtime | `context-budget-compression`; `Runner.start_run`, `CompressionContract` | Protected sources, conversation history, run input, and instructions never enter the compression request; canaries leaking into the compression input is `FAIL`. | Public channel observation digest and independent sentinel digest. | CONTRACT / 0.4 | Does not claim all context channels are compressible. |
+| `context.compression.no-recursion` | Runtime | `context-budget-compression`; `Runner.start_run`, `ModelPurpose.CONTEXT_COMPRESSION` | Compression tool calls fail closed with zero business dispatch and compression never triggers the pipeline, tools, or repair; recursion is `FAIL`. | Public recursion observation digest and independent sentinel digest. | CONTRACT / 0.4 | Does not claim compression is a business step. |
+| `context.compression.mutation` | Runtime | `context-budget-compression`; `reconcile_compression_observation` | Controlled stale-source, tampered-provenance, under-counting-sizer, and recursion mutations are all detected; a silently accepted mutation is a Harness error. | Runtime reconciliation result and independent mutation digest. | CONTRACT / 0.4 | Does not claim single-source verification. |
+| `context.compression.host-wheel` | Runtime | Clean external venv; `python -I -m m_agent.testing` | The installed wheel runs the budget compression and recovery probes in one isolated process; source import or artifact identity mismatch is `FAIL`. | Installed-wheel probe observation digest and independent probe stdout digest. | HOST / 0.4 | Does not prove live provider or business context quality. |
 
 The 0.3 migration table is part of the `core.lifecycle.migration` contract. Its
 complete 0.2 root-export mapping, including `Clock`, is kept in
 [`migrating-to-0.3.md`](migrating-to-0.3.md).
+
+## 0.4 non-goals
+
+The 0.4 candidate deliberately does not ship long-term memory: session history
+is per-session, versioned, and protected at rest, but nothing is retained or
+recalled across sessions. It does not ship history compression: conversation
+history and other protected channels are passed through verbatim, and
+compression applies only to explicitly contracted context items. It does not
+ship a remote store: `SessionStore` and `RunStore` ship the InMemory and
+SQLite implementations only, and no network storage, replication, or
+cross-process coordination contract is claimed. PROVIDER evidence is labeled
+`VALID`, `STALE`, or `NOT_RUN` by Model Contract fingerprint and a 30-day
+freshness rule; CONTRACT and HOST results are never presented as live or
+FIELD conclusions.

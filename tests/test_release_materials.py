@@ -14,7 +14,7 @@ class ReleaseMaterialTests(unittest.TestCase):
     def test_identity_python_and_dependencies(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
         self.assertEqual(project["name"], "m-agent")
-        self.assertEqual(project["version"], "0.3.0")
+        self.assertEqual(project["version"], "0.4.0")
         self.assertEqual(project["description"], "An embeddable Agent Application Runtime for Python")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], ["pydantic>=2"])

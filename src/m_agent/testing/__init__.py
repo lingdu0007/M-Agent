@@ -6,6 +6,9 @@ from ._pack import (
     AcceptanceCheckStatus,
     AcceptanceManifest,
     BundleIntegrityError,
+    CONTEXT_COMPRESSION_PACK_VERSION,
+    CONTEXT_COMPRESSION_PROFILE,
+    CONTEXT_COMPRESSION_SCENARIO,
     CORE_LIFECYCLE_PACK_VERSION,
     CORE_LIFECYCLE_PROFILE,
     CORE_LIFECYCLE_SCENARIO,
@@ -17,16 +20,20 @@ from ._pack import (
     EXIT_INVALID_INVOCATION,
     EXIT_SUBJECT_FAILURE,
     EXIT_SUCCESS,
+    FOUNDATION_RELEASE_0_4_PACK_VERSION,
+    FOUNDATION_RELEASE_0_4_PROFILE,
     PackExecution,
     PackExecutionStatus,
-    ScenarioEvidenceBundle,
-    core_lifecycle_manifest,
     RUNTIME_BASELINE_PACK_VERSION,
     RUNTIME_BASELINE_PROFILE,
-    runtime_baseline_manifest,
+    ScenarioEvidenceBundle,
     SESSION_CONVERSATION_PACK_VERSION,
     SESSION_CONVERSATION_PROFILE,
     SESSION_CONVERSATION_SCENARIO,
+    context_compression_manifest,
+    core_lifecycle_manifest,
+    foundation_release_0_4_manifest,
+    runtime_baseline_manifest,
     session_conversation_manifest,
 )
 from ._dependencies import find_runtime_dependency_violations
@@ -42,6 +49,18 @@ from ._session_conversation import (
 from ._context_compression import (
     reconcile_compression_observation,
     run_context_budget_compression,
+)
+from ._provider_evidence import (
+    PROVIDER_EVIDENCE_MAX_AGE_DAYS,
+    ProviderEvidenceStatus,
+    provider_evidence_status,
+)
+from ._release import (
+    CONTEXT_HOST_EXPECTATION,
+    CONTEXT_HOST_PROBE,
+    SESSION_HOST_EXPECTATION,
+    SESSION_HOST_PROBE,
+    observe_isolated_scenario_probe,
 )
 
 __all__ = [
@@ -76,10 +95,13 @@ __all__ = [
     "CONTEXT_COMPRESSION_PACK_VERSION",
     "CONTEXT_COMPRESSION_PROFILE",
     "CONTEXT_COMPRESSION_SCENARIO",
+    "CONTEXT_HOST_EXPECTATION",
+    "CONTEXT_HOST_PROBE",
     "core_lifecycle_manifest",
     "runtime_baseline_manifest",
     "session_conversation_manifest",
     "context_compression_manifest",
+    "foundation_release_0_4_manifest",
     "run_model_adapter_contract",
     "reconcile_recovery_window",
     "reconcile_session_protection",
@@ -88,4 +110,12 @@ __all__ = [
     "run_durable_effects_recovery",
     "run_session_conversation",
     "run_context_budget_compression",
+    "FOUNDATION_RELEASE_0_4_PACK_VERSION",
+    "FOUNDATION_RELEASE_0_4_PROFILE",
+    "PROVIDER_EVIDENCE_MAX_AGE_DAYS",
+    "ProviderEvidenceStatus",
+    "provider_evidence_status",
+    "SESSION_HOST_EXPECTATION",
+    "SESSION_HOST_PROBE",
+    "observe_isolated_scenario_probe",
 ]

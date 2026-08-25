@@ -725,6 +725,258 @@ def context_compression_manifest(
     )
 
 
+FOUNDATION_RELEASE_0_4_PACK_VERSION = "foundation-release-0-4-v1"
+FOUNDATION_RELEASE_0_4_PROFILE = "foundation-release-0-4"
+
+# Ticket 16 / ADR 0042：0.4 发布 profile 在同一 RC 身份下重跑 0.3 两个
+# required Scenario 并新增 Session / Context 场景。Session / Context 检查
+# 相对单场景 Manifest 使用带前缀的证据槽位（``session_`` / ``context_``），
+# 避免与 durable 检查的同名槽位（如 ``recovery_windows_*``）在合并后的
+# Evidence View 中发生覆盖——这是发布 profile 的冻结声明，不回写单场景
+# Manifest。
+_RELEASE_0_4_SESSION_CHECKS = (
+    AcceptanceCheck(
+        check_id="session.conversation.recovery-windows",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam=(
+            "m_agent.companion.SessionRunner.resume,"
+            "m_agent.companion.SQLiteSessionStore,m_agent.runtime.Runner.get_run"
+        ),
+        positive_check="three_cross_store_crash_windows_reopen_and_recover_repeatedly",
+        negative_check="partial_commit_or_rewritten_core_terminal_is_fail",
+        authoritative_evidence="session_recovery_windows_authoritative_digest",
+        independent_evidence="session_recovery_windows_journal_digest",
+        milestone="0_4",
+        non_claim="exactly_once_external_effect",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.claim-no-ttl",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam=(
+            "m_agent.companion.SessionStore.claim_run,"
+            "m_agent.companion.SessionStore.get_claim"
+        ),
+        positive_check="restart_and_stale_owner_keep_exactly_one_active_session_claim",
+        negative_check="silent_second_run_admission_is_fail",
+        authoritative_evidence="session_claim_no_ttl_authoritative_digest",
+        independent_evidence="session_claim_no_ttl_journal_digest",
+        milestone="0_4",
+        non_claim="time_based_claim_recovery",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.payload-protection",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam=(
+            "m_agent.companion.SQLiteSessionStore,m_agent.runtime.PayloadCodec"
+        ),
+        positive_check=(
+            "independent_session_codec_protects_history_and_wrong_key_fails_closed"
+        ),
+        negative_check="plaintext_history_or_silent_wrong_key_decode_is_fail",
+        authoritative_evidence="session_payload_protection_authoritative_digest",
+        independent_evidence="session_payload_protection_independent_digest",
+        milestone="0_4",
+        non_claim="encryption_strength_or_key_management",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.scope-isolation",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam="m_agent.companion.SessionScope,m_agent.companion.SessionStore",
+        positive_check="cross_scope_access_fails_closed_without_side_effects",
+        negative_check="cross_scope_visibility_or_mutation_is_fail",
+        authoritative_evidence="session_scope_isolation_authoritative_digest",
+        independent_evidence="session_scope_isolation_independent_digest",
+        milestone="0_4",
+        non_claim="authorization_or_multitenant_isolation",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.mutation",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Testing",
+        public_seam=(
+            "m_agent.testing.reconcile_session_recovery,"
+            "m_agent.testing.reconcile_session_protection,"
+            "m_agent.testing.ScenarioEvidenceBundle"
+        ),
+        positive_check=(
+            "tamper_wrong_scope_wrong_key_and_duplicate_submit_mutations_detected"
+        ),
+        negative_check="undetected_mutation_is_harness_error",
+        authoritative_evidence="session_mutation_authoritative_digest",
+        independent_evidence="session_mutation_independent_digest",
+        milestone="0_4",
+        non_claim="external_ledger_integrity",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.host-wheel",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam="python -I -m m_agent.testing",
+        positive_check=(
+            "installed_wheel_runs_cross_store_crash_windows_and_store_contract_kit"
+        ),
+        negative_check="source_import_or_artifact_identity_mismatch_is_fail",
+        authoritative_evidence="session_host_authoritative_digest",
+        independent_evidence="session_host_independent_digest",
+        milestone="0_4",
+        non_claim="live_provider_or_remote_session_store",
+        evidence_level=EvidenceLevel.HOST,
+    ),
+)
+
+_RELEASE_0_4_CONTEXT_CHECKS = (
+    AcceptanceCheck(
+        check_id="context.compression.plan-order",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.Runner.start_run,m_agent.runtime.Runner.inspect_run"
+        ),
+        positive_check="plan_order_and_scopes_match_frozen_context_plan",
+        negative_check="model_step_scope_never_triggered_for_compression",
+        authoritative_evidence="context_plan_order_authoritative_digest",
+        independent_evidence="context_plan_order_sentinel_digest",
+        milestone="0_4",
+        non_claim="nested_compression",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.frame-checkpoints",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.Runner.inspect_run,m_agent.runtime.CompressionResult"
+        ),
+        positive_check="source_items_preserved_and_derived_provenance_intact",
+        negative_check="compression_recomputed_or_external_source_reread_after_recovery",
+        authoritative_evidence="context_frame_checkpoints_authoritative_digest",
+        independent_evidence="context_frame_checkpoints_sentinel_digest",
+        milestone="0_4",
+        non_claim="lossless_transform",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.hard-budget",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.check_frame_budget,m_agent.runtime.ModelInputSizer"
+        ),
+        positive_check="over_limit_frame_fails_closed_with_zero_business_dispatch",
+        negative_check="under_counting_sizer_would_admit_over_limit_frame",
+        authoritative_evidence="context_hard_budget_authoritative_digest",
+        independent_evidence="context_hard_budget_sentinel_digest",
+        milestone="0_4",
+        non_claim="soft_budget_or_best_effort_compression",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.protected-channels",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.Runner.start_run,m_agent.runtime.CompressionContract"
+        ),
+        positive_check="protected_sources_history_run_input_instructions_never_compressed",
+        negative_check="canaries_leaked_into_compression_input",
+        authoritative_evidence="context_protected_channels_authoritative_digest",
+        independent_evidence="context_protected_channels_sentinel_digest",
+        milestone="0_4",
+        non_claim="all_context_channels_are_compressible",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.no-recursion",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.Runner.start_run,m_agent.runtime.ModelPurpose.CONTEXT_COMPRESSION"
+        ),
+        positive_check="compression_tool_calls_fail_closed_with_zero_business_dispatch",
+        negative_check="compression_triggers_pipeline_or_tools_or_repair",
+        authoritative_evidence="context_no_recursion_authoritative_digest",
+        independent_evidence="context_no_recursion_sentinel_digest",
+        milestone="0_4",
+        non_claim="compression_is_a_business_step",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.mutation",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.testing.reconcile_compression_observation"
+        ),
+        positive_check="stale_tampered_undercounting_recursion_mutations_all_detected",
+        negative_check="mutation_accepted_silently",
+        authoritative_evidence="context_mutation_authoritative_digest",
+        independent_evidence="context_mutation_independent_digest",
+        milestone="0_4",
+        non_claim="single_source_verification",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.host-wheel",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam="python -I -m m_agent.testing",
+        positive_check=(
+            "installed_wheel_runs_budget_compression_and_recovery_probes"
+        ),
+        negative_check="source_import_or_artifact_identity_mismatch_is_fail",
+        authoritative_evidence="context_host_authoritative_digest",
+        independent_evidence="context_host_independent_digest",
+        milestone="0_4",
+        non_claim="live_provider_or_business_context_quality",
+        evidence_level=EvidenceLevel.HOST,
+    ),
+)
+
+
+def foundation_release_0_4_manifest(
+    *,
+    source_commit: str,
+    artifact_digest: str,
+    sdist_digest: str,
+    fixture_digest: str,
+    environment: Mapping[str, str],
+) -> AcceptanceManifest:
+    """Freeze the four required 0.4 Scenarios for one exact RC candidate.
+
+    0.3 基线（``core-lifecycle`` 与 ``durable-effects-recovery``）在同一
+    RC 身份下原样重跑；``session-conversation`` 与
+    ``context-budget-compression`` 追加 CONTRACT 与 HOST required 证据。
+    不同 RC（artifact / sdist digest 或环境不同）的 Manifest digest 必然
+    不同，任何旧 RC Bundle 都无法通过本 Manifest 的执行验证。
+    """
+    core_checks = tuple(
+        _RUNTIME_BASELINE_MIGRATION_CHECK
+        if check.check_id == "core.lifecycle.expand-compatibility"
+        else check
+        for check in _CORE_LIFECYCLE_REQUIRED_CHECKS
+    )
+    return AcceptanceManifest(
+        pack_version=FOUNDATION_RELEASE_0_4_PACK_VERSION,
+        profile=FOUNDATION_RELEASE_0_4_PROFILE,
+        source_commit=source_commit,
+        artifact_digest=artifact_digest,
+        sdist_digest=sdist_digest,
+        fixture_digest=fixture_digest,
+        environment=environment,
+        scenarios=(
+            CORE_LIFECYCLE_SCENARIO,
+            DURABLE_EFFECTS_SCENARIO,
+            SESSION_CONVERSATION_SCENARIO,
+            CONTEXT_COMPRESSION_SCENARIO,
+        ),
+        required_checks=(
+            *core_checks,
+            *_DURABLE_EFFECTS_REQUIRED_CHECKS,
+            *_RELEASE_0_4_SESSION_CHECKS,
+            *_RELEASE_0_4_CONTEXT_CHECKS,
+        ),
+        required_cli_commands=("run", "inspect", "verify", "render"),
+    )
+
+
 class PackExecution(BaseModel, frozen=True):
     """An execution bound to exactly one Manifest identity."""
 

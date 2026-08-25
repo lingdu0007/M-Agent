@@ -1,6 +1,6 @@
 # M-Agent
 
-M-Agent 0.3.0 is an embeddable Agent Application Runtime for Python. Install
+M-Agent 0.4.0 is an embeddable Agent Application Runtime for Python. Install
 the `m-agent` distribution and import `m_agent`.
 
 ```bash
@@ -70,6 +70,20 @@ application resolution without credentials or network access:
 python examples/durable_support_agent/run_acceptance.py
 ```
 
+## Scoped Sessions and Explicit Context Compression
+
+The 0.4 candidate adds two composition capabilities on the same durable
+foundation. `m_agent.companion.SessionRunner` drives scoped Session
+conversations with versioned, claim-gated, codec-protected history in
+`SQLiteSessionStore`; `CompressionContract` plus a `ContextPlan` make
+semantic compression an explicit, budget-checked, provenance-carrying
+pipeline stage with its own `ModelPurpose.CONTEXT_COMPRESSION` binding.
+Run the offline demonstration:
+
+```bash
+python examples/m_agent_session_context.py
+```
+
 ## Evidence Boundaries
 
 - The deterministic fake adapters and flagship example are offline demonstrations; they do not establish provider compatibility.
@@ -81,7 +95,7 @@ python examples/durable_support_agent/run_acceptance.py
 Supported Python is 3.11 or newer. CONTRACT coverage targets Linux Python
 3.11-3.14; HOST evidence is Linux Python 3.11. macOS and Windows gaps are
 recorded in the Coverage Matrix, and Windows is not supported. The 0.1
-`agent_framework` path is removed in 0.3.0; see [the migration table](docs/migrating-to-0.3.md).
+`agent_framework` path is removed in 0.4.0; see [the migration table](docs/migrating-to-0.3.md).
 
 ## Project Material
 
