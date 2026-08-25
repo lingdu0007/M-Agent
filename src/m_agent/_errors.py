@@ -56,6 +56,17 @@ class LeaseNotHeldError(MAgentError):
     """
 
 
+class ContextBudgetExceededError(MAgentError):
+    """完整 Model Request 超过冻结的 Context Budget 硬上限。
+
+    超限发生在 Model Step dispatch 之前，产生零 model dispatch
+    （ADR 0040）。Runner 不隐式裁剪、压缩或等待，而是以
+    ``CONTEXT_BUDGET_EXCEEDED`` 确定性失败。
+    """
+
+    code = "CONTEXT_BUDGET_EXCEEDED"
+
+
 class ResolutionNotAllowedError(MAgentError):
     """提交的 resolution action 对当前 WAITING Run 不合法。
 

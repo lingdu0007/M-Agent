@@ -74,8 +74,25 @@ from datetime import timedelta
 from ._context import (
     ContextItem,
     ContextRequest,
-    deserialize_context_items,
     serialize_context_items,
+)
+from ._context_plan import (
+    ContextBudget,
+    ContextFrame,
+    ContextItemWithProvenance,
+    ContextPlan,
+    ContextScope,
+    ContextStage,
+    ContextStageResult,
+    ContextTransformType,
+    LEGACY_PROVIDER_STAGE_ID,
+    ModelInputSizer,
+    ProvenanceSource,
+    aggregate_frame_items,
+    legacy_provider_stage,
+    parse_stage_result,
+    stage_invocation_step_id,
+    check_frame_budget,
 )
 from ._definition import AgentDefinition, DefinitionRegistry, RetryPolicy
 from ._history import ConversationMessage
@@ -166,6 +183,17 @@ ERROR_EFFECT_UNCONFIRMED = "effect_unconfirmed"
 
 #: Frozen Model Execution Budget exhausted before a further provider call.
 ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED = "MODEL_EXECUTION_BUDGET_EXCEEDED"
+
+#: Complete Model Request exceeds the frozen Context Budget hard limit
+#: before dispatch. Zero model dispatch (ADR 0040).
+ERROR_CONTEXT_BUDGET_EXCEEDED = "CONTEXT_BUDGET_EXCEEDED"
+
+#: A frozen Context Plan declares a Stage the Core cannot execute at its
+#: declared lifecycle point（ADR 0040：Core 只执行 Stage 边界，SELECT/
+#: TRIM/BUDGET_SELECT 算法属于 Context Companion；Provider 缺失时
+#: PROVIDE 也无法执行）。Runner 绝不静默跳过声明的 Stage，而是以
+#: 本错误确定性失败。
+ERROR_CONTEXT_STAGE_UNSUPPORTED = "CONTEXT_STAGE_UNSUPPORTED"
 
 #: A durable Model Attempt reservation has no corresponding checkpoint after
 #: recovery. The provider call may have happened; its failed record retains
@@ -1196,15 +1224,8 @@ class Runner:
                 f"cannot {resolution.action.value} run {run.run_id}: "
                 "no waiting step recorded"
             )
-        context_items: list[ContextItem] = []
-        if run.snapshot is not None and run.snapshot.has_context_provider:
-            context_checkpoints = [
-                c for c in checkpoints if c.step_type is StepType.CONTEXT
-            ]
-            if context_checkpoints:
-                context_items = deserialize_context_items(
-                    context_checkpoints[-1].output
-                )
+        # Context Frame Items 在模型循环内按 Context checkpoint 聚合
+        # （_prepare_model_step_context）；Resolution 路径不再单独重建。
         model_checkpoints = [
             c for c in checkpoints if c.step_type is StepType.MODEL
         ]
@@ -1275,7 +1296,6 @@ class Runner:
                 run,
                 definition,
                 lease,
-                context_items=context_items,
                 prior_tool_outcomes=(*confirmed, outcome),
             )
         # RETRY_STEP：同一 step_id 下创建新 Attempt 并重新执行工具。
@@ -1293,7 +1313,6 @@ class Runner:
             run,
             definition,
             lease,
-            context_items=context_items,
             prior_tool_outcomes=(*confirmed, outcome),
         )
 
@@ -1577,18 +1596,13 @@ class Runner:
             )
         # 是否注入外部上下文以冻结 Snapshot 的 has_context_provider 为准
         # （ADR 0022/0023：恢复行为由 Run 启动时冻结的定义决定，后续注册
-        # 的同 id+version 定义不能改变恢复行为）。已确认的 Context Step
-        # 直接复用其 Items，不重新查询外部数据源。
-        context_items: list[ContextItem] = []
+        # 的同 id+version 定义不能改变恢复行为）。已确认的 Context Stage
+        # invocation 直接复用其 Checkpoint，不重新查询外部数据源。
         if run.snapshot is not None and run.snapshot.has_context_provider:
             context_checkpoints = [
                 c for c in checkpoints if c.step_type is StepType.CONTEXT
             ]
-            if context_checkpoints:
-                context_items = deserialize_context_items(
-                    context_checkpoints[-1].output
-                )
-            else:
+            if not context_checkpoints:
                 # 上次执行在 Context checkpoint 落盘前中断
                 # （at-least-once：Context Step 重新执行）。
                 if definition.context_provider is None:
@@ -1600,11 +1614,11 @@ class Runner:
                         "provider but the resolved definition has none; "
                         "refusing to silently change recovery behavior"
                     )
-                run, context_items = await self._run_context_step(
-                    run, definition, lease
-                )
-                if run.status is not RunStatus.RUNNING:
-                    return run
+            run = await self._run_input_context_stages(
+                run, definition, lease
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
         if recovery_model_step_id is not None:
             if (
                 inflight_model_attempt is not None
@@ -1622,7 +1636,6 @@ class Runner:
                 run,
                 definition,
                 lease,
-                context_items=context_items,
                 prior_tool_outcomes=tuple(
                     deserialize_tool_outcome(checkpoint.output)
                     for checkpoint in tool_checkpoints
@@ -1637,7 +1650,6 @@ class Runner:
                 run,
                 definition,
                 lease,
-                context_items=context_items,
                 resumed_model_step_id=(
                     inflight_model_step.step_id
                     if inflight_model_step is not None
@@ -1727,7 +1739,6 @@ class Runner:
             run,
             definition,
             lease,
-            context_items=context_items,
             prior_tool_outcomes=prior_outcomes,
         )
 
@@ -1766,36 +1777,210 @@ class Runner:
         cancelled = await self._maybe_cancel(run, lease)
         if cancelled is not None:
             return cancelled
-        context_items: list[ContextItem] = []
-        if definition.context_provider is not None:
-            run, context_items = await self._run_context_step(
-                run, definition, lease
-            )
-            if run.status is not RunStatus.RUNNING:
-                return run
+        # ADR 0040 / Ticket 14：按冻结 Plan 执行 RUN_INPUT Scope Stage
+        #（无显式 Stage 时退化为 legacy Provider 路径，同样形成
+        # 带 provenance 的 Stage checkpoint）。
+        run = await self._run_input_context_stages(run, definition, lease)
+        if run.status is not RunStatus.RUNNING:
+            return run
         return await self._run_agent_loop(
-            run, definition, lease, context_items=context_items
+            run, definition, lease, prior_tool_outcomes=()
         )
 
-    async def _run_context_step(
+    @staticmethod
+    def _frozen_plan(run: RunRecord) -> ContextPlan:
+        """Return the Context Plan frozen into the Run Snapshot.
+
+        恢复行为由启动时冻结的 Plan 决定（ADR 0022/0023）；空 Plan
+        表示不使用 Context Pipeline（0.3 兼容）。
+        """
+        if run.snapshot is None:
+            return ContextPlan()
+        return run.snapshot.context_plan
+
+    @staticmethod
+    def _stage_checkpoint(
+        checkpoints: Sequence[StepCheckpoint],
+        stage: ContextStage,
+        boundary: int,
+    ) -> StepCheckpoint | None:
+        """Return the completed checkpoint of one Stage invocation.
+
+        依据 Checkpoint 载荷中的 Stage Result envelope（stage_id、
+        scope、boundary）定位；不存在则返回 None（该 invocation
+        尚未完成，需要执行或重新执行）。
+        """
+        for checkpoint in checkpoints:
+            if checkpoint.step_type is not StepType.CONTEXT:
+                continue
+            parsed = parse_stage_result(checkpoint.output)
+            if (
+                parsed is not None
+                and parsed.stage_id == stage.identity.stage_id
+                and parsed.scope is stage.identity.scope
+                and parsed.boundary == boundary
+            ):
+                return checkpoint
+        return None
+
+    async def _run_input_context_stages(
         self,
         run: RunRecord,
         definition: AgentDefinition,
         lease: RunLease,
-    ) -> tuple[RunRecord, list[ContextItem]]:
-        """执行一个 Context Step 并返回 (最新 Run 记录, 本次 Context Items)。
+    ) -> RunRecord:
+        """在 RUN_INPUT 生命周期点执行冻结 Plan 的 Stage（ADR 0040）。
 
-        成功：记录 CONTEXT Step + Step Attempt + Checkpoint（输出为
-        Context Items 的序列化载荷），Run 保持 RUNNING；调用方随后
-        把 Items 作为数据交给 Model Step。
-        失败：记录 FAILED Step + FAILED Step Attempt（可检查，绝不
-        压平成模型可见的上下文字符串），Run 到达终态 FAILED 并释放
-        租约，不继续执行 Model Step。
+        显式 RUN_INPUT Stage 优先；Plan 未声明时若 Definition 声明了
+        Context Provider，则执行隐式 legacy PROVIDE Stage（0.3 兼容）。
+        已完成的 (stage, boundary=0) Checkpoint 被原样跳过——恢复时
+        绝不重新读取外部事实。
         """
+        plan = self._frozen_plan(run)
+        stages = plan.stages_for_scope(ContextScope.RUN_INPUT)
+        if plan.is_empty() and definition.context_provider is not None:
+            # 仅当未声明任何显式 Plan 时才合成 legacy PROVIDE Stage；
+            # 显式 Plan（即使没有 RUN_INPUT Stage）就是完整声明。
+            stages = (legacy_provider_stage(),)
+        for stage in stages:
+            checkpoints = await self._store.get_checkpoints(run.run_id)
+            if self._stage_checkpoint(checkpoints, stage, 0) is not None:
+                continue
+            if (
+                stage.identity.stage_id == LEGACY_PROVIDER_STAGE_ID
+                and any(
+                    checkpoint.step_type is StepType.CONTEXT
+                    and parse_stage_result(checkpoint.output) is None
+                    for checkpoint in checkpoints
+                )
+            ):
+                # 跨版本恢复（0.3 -> T14）：旧格式的裸 Context Item 列表
+                # 载荷就是该隐式 PROVIDE Stage 已完成的证据——恢复时
+                # 直接复用，不重新读取外部事实（ADR 0040 AC 8）。
+                continue
+            run, _ = await self._run_context_stage(
+                run, definition, lease, stage, boundary=0
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
+        return run
+
+    async def _prepare_model_step_context(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        tool_outcomes: Sequence[ToolOutcome],
+    ) -> tuple[RunRecord, tuple[ContextItem, ...]]:
+        """在每次 Model Step 前按 Scope 触发 Stage 并聚合 Frame Items。
+
+        - ``TOOL_OUTCOME`` Scope：仅在已有 Tool Outcome（boundary>0）
+          时触发，boundary = 已完成 Tool checkpoint 数；
+        - ``MODEL_STEP`` Scope：每次 Model Step 前触发，boundary =
+          已完成 Model checkpoint 数；
+        已完成的 (stage, boundary) Checkpoint 被跳过（恢复复用，不
+        重新读取外部事实）。Frame Items 由全部 Context checkpoint
+        按 Frame 语义聚合（基础项 + 累积增量项 + 当前步骤项）。
+        """
+        plan = self._frozen_plan(run)
+        tool_stages = plan.stages_for_scope(ContextScope.TOOL_OUTCOME)
+        model_stages = plan.stages_for_scope(ContextScope.MODEL_STEP)
+        has_context = (
+            run.snapshot is not None and run.snapshot.has_context_provider
+        )
+        if not tool_stages and not model_stages and not has_context:
+            return run, ()
+        checkpoints = await self._store.get_checkpoints(run.run_id)
+        tool_boundary = sum(
+            1 for c in checkpoints if c.step_type is StepType.TOOL
+        )
+        model_boundary = sum(
+            1 for c in checkpoints if c.step_type is StepType.MODEL
+        )
+        if tool_stages and tool_boundary > 0:
+            for stage in tool_stages:
+                if (
+                    self._stage_checkpoint(
+                        checkpoints, stage, tool_boundary
+                    )
+                    is not None
+                ):
+                    continue
+                run, _ = await self._run_context_stage(
+                    run, definition, lease, stage, boundary=tool_boundary
+                )
+                if run.status is not RunStatus.RUNNING:
+                    return run, ()
+                checkpoints = await self._store.get_checkpoints(run.run_id)
+        for stage in model_stages:
+            if (
+                self._stage_checkpoint(checkpoints, stage, model_boundary)
+                is not None
+            ):
+                continue
+            run, _ = await self._run_context_stage(
+                run, definition, lease, stage, boundary=model_boundary
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run, ()
+            checkpoints = await self._store.get_checkpoints(run.run_id)
+        items = aggregate_frame_items(
+            [
+                checkpoint.output
+                for checkpoint in checkpoints
+                if checkpoint.step_type is StepType.CONTEXT
+            ],
+            tool_boundary=tool_boundary,
+            model_boundary=model_boundary,
+        )
+        return run, items
+
+    async def _run_context_stage(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        stage: ContextStage,
+        *,
+        boundary: int,
+        input_item_ids: Sequence[str] = (),
+    ) -> tuple[RunRecord, list[ContextItem]]:
+        """执行一次可恢复的 Context Stage invocation（ADR 0040）。
+
+        成功：记录 CONTEXT Step + Step Attempt + Checkpoint；Checkpoint
+        载荷是完整 :class:`ContextStageResult` envelope（输入引用、
+        Context Items、决策、measurement 与 direct-derivation provenance，
+        AC 3），step_id 由 (stage identity, scope, boundary) 确定性
+        派生，恢复时据此复用。失败：记录 FAILED Step（必要时 FAILED
+        Attempt），Run 到达终态 FAILED 并释放租约，不继续 Model Step。
+
+        Core 只执行 PROVIDE 边界（调用 Definition 声明的 Context
+        Provider）；SELECT/TRIM/BUDGET_SELECT 算法属于 Context
+        Companion，Provider 缺失时 PROVIDE 也无法执行——两者都以
+        :data:`ERROR_CONTEXT_STAGE_UNSUPPORTED` fail closed，绝不
+        静默跳过声明的 Stage。
+        """
+        step_id = stage_invocation_step_id(stage, boundary)
         provider = definition.context_provider
-        if provider is None:  # 防御：仅由有 provider 的路径调用
-            raise RuntimeError("definition declares no context provider")
-        step_id = new_id()
+        if (
+            stage.identity.transform_type is not ContextTransformType.PROVIDE
+            or provider is None
+        ):
+            # Fail closed：声明的 Stage 在其 lifecycle 点无法被执行，
+            # 绝不静默跳过或降级（ADR 0040 / ADR 0007 同一原则）。
+            await self._record_failed_step(
+                run,
+                lease,
+                step_id,
+                StepType.CONTEXT,
+                error_code=ERROR_CONTEXT_STAGE_UNSUPPORTED,
+            )
+            return (
+                await self._fail_run(
+                    run, lease, ERROR_CONTEXT_STAGE_UNSUPPORTED
+                ),
+                [],
+            )
         cancelled = await self._maybe_cancel(run, lease)
         if cancelled is not None:
             return cancelled, []
@@ -1878,6 +2063,41 @@ class Runner:
             # metadata 是外部数据；序列化失败与 provider 异常一样形成可
             # 检查的 FAILED Attempt，绝不遗留 RUNNING identity。
             payload = serialize_context_items(items)
+            # ADR 0040 / Ticket 14 AC 3：一次 Stage invocation 的完整
+            # 结构化输出——输入引用、输出 Items（带 direct-derivation
+            # provenance：PROVIDE 原始 Item 无派生来源）、决策、计量
+            # 与触发边界——作为 Checkpoint 载荷持久化（envelope），
+            # 恢复时据此重建 Items 与证据。
+            stage_result = ContextStageResult(
+                stage_id=stage.identity.stage_id,
+                scope=stage.identity.scope,
+                transform_type=stage.identity.transform_type,
+                input_item_ids=tuple(input_item_ids),
+                boundary=boundary,
+                output_items=tuple(
+                    ContextItemWithProvenance(
+                        item=item,
+                        provenance=ProvenanceSource(
+                            stage_id=stage.identity.stage_id,
+                            transform_type=stage.identity.transform_type,
+                            source_item_ids=(),
+                        ),
+                    )
+                    for item in items
+                ),
+                decisions={
+                    "provider": type(provider).__name__,
+                    "stage_key": stage.identity.stable_key,
+                },
+                measurement={
+                    "item_count": len(items),
+                    "output_tokens_estimate": sum(
+                        ModelInputSizer.estimate_text(item.content)
+                        for item in items
+                    ),
+                },
+            )
+            stage_payload = stage_result.serialize()
         except (LeaseNotHeldError, StaleRunVersionError):
             raise
         except Exception as exc:  # Provider 失败：可检查的失败 Attempt
@@ -1932,7 +2152,7 @@ class Runner:
             step_id=step_id,
             run_id=run.run_id,
             status=StepStatus.SUCCEEDED,
-            output=payload,
+            output=stage_payload,
         )
         await self._store.record_attempt(
             attempt,
@@ -1945,7 +2165,7 @@ class Runner:
                 step_id=step_id,
                 attempt_id=attempt.attempt_id,
                 step_type=StepType.CONTEXT,
-                output=payload,
+                output=stage_payload,
             ),
             expected_version=run.version,
             lease_owner=lease.owner,
@@ -1980,7 +2200,6 @@ class Runner:
         run: RunRecord,
         definition: AgentDefinition,
         lease: RunLease,
-        context_items: Sequence[ContextItem] = (),
         prior_tool_outcomes: Sequence[ToolOutcome] = (),
         resumed_model_step_id: str | None = None,
         recovery_replay: bool = False,
@@ -2012,11 +2231,20 @@ class Runner:
             cancelled = await self._maybe_cancel(run, lease)
             if cancelled is not None:
                 return cancelled
+            # ADR 0040 / Ticket 14：在声明的 lifecycle 点触发
+            # TOOL_OUTCOME / MODEL_STEP Scope Stage，并按 Frame 语义
+            # 聚合全部 Context checkpoint 为本次 Model Step 的 Items
+            #（已完成 invocation 原样复用，不重新读取外部事实）。
+            run, frame_items = await self._prepare_model_step_context(
+                run, definition, lease, tool_outcomes
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
             run, response = await self._run_single_model_step(
                 run,
                 definition,
                 lease,
-                context_items,
+                frame_items,
                 tool_outcomes,
                 step_id=model_step_id,
                 recovery_replay=recovery_replay,
@@ -2182,6 +2410,40 @@ class Runner:
                     error_code=exc.code,
                 )
                 return await self._fail_run(run, lease, exc.code), None
+            # ADR 0040 / Ticket 14: Build the complete Context Frame and
+            # enforce hard budget BEFORE any Model dispatch.  The Sizer
+            # is resolved from the frozen Model Contract so its wire-format
+            # semantics match.  If the complete request exceeds the budget,
+            # the Run fails with CONTEXT_BUDGET_EXCEEDED and zero dispatch.
+            frame = ContextFrame(
+                instructions=request.instructions,
+                run_input=request.input,
+                history=request.history,
+                context_items=request.context_items,
+                tool_outcomes=request.tool_outcomes,
+                tools=request.tools,
+                structured_output=request.structured_output,
+                usage_reporting=request.usage_reporting,
+            )
+            budget = ContextBudget.from_model_limits(
+                model_contract.limits,
+            )
+            sizer = ModelInputSizer.for_contract(model_contract)
+            sizing = check_frame_budget(frame, budget, sizer)
+            if sizing.total_tokens > budget.total_token_limit:
+                await self._record_failed_step(
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=ERROR_CONTEXT_BUDGET_EXCEEDED,
+                )
+                return (
+                    await self._fail_run(
+                        run, lease, ERROR_CONTEXT_BUDGET_EXCEEDED
+                    ),
+                    None,
+                )
             attempt_id = new_id()
             self._publish(
                 RunUpdate(

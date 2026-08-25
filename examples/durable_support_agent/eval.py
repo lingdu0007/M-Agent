@@ -65,11 +65,12 @@ from m_agent.runtime import (
     FailureClassification,
     RunNotFoundError,
     RunStatus,
-    Runner,
-    StepStatus,
-    StepType,
-    ToolEffect,
-    deserialize_tool_outcome,
+Runner,
+StepStatus,
+StepType,
+ToolEffect,
+context_items_from_payload,
+deserialize_tool_outcome,
 )
 from m_agent.adapters import (
     PlaintextPayloadCodec,
@@ -357,10 +358,11 @@ async def evaluate(
             )
         else:
             try:
-                checkpointed_context_items = [
-                    ContextItem.model_validate(obj)
-                    for obj in json.loads(context_ckpts[0].output)
-                ]
+                # T14（ADR 0040）：Checkpoint 载荷是 ContextStageResult
+                # envelope；公开 seam 同时兼容 0.3 裸 Item 列表载荷。
+                checkpointed_context_items = list(
+                    context_items_from_payload(context_ckpts[0].output)
+                )
             except (json.JSONDecodeError, TypeError, ValueError):
                 checkpointed_context_items = []
             item_ids = [i.item_id for i in checkpointed_context_items]

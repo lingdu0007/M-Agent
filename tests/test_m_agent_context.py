@@ -497,9 +497,22 @@ class ContextPayloadSecurityTests(unittest.IsolatedAsyncioTestCase):
                 for checkpoint in checkpoints
                 if checkpoint.step_type is StepType.CONTEXT
             )
+            # T14（ADR 0040 AC 3）：Checkpoint 载荷是 ContextStageResult
+            # envelope（输入引用、Items、决策、measurement、provenance），
+            # Item 完整嵌套于 output_items[0].item 并保留全部敏感字段。
+            envelope = json.loads(context_checkpoint.output)
+            self.assertEqual(envelope["stage_id"], "context-provider")
+            self.assertEqual(envelope["scope"], "RUN_INPUT")
+            self.assertEqual(envelope["boundary"], 0)
             self.assertEqual(
-                json.loads(context_checkpoint.output), [item.model_dump(mode="json")]
+                envelope["output_items"][0]["item"],
+                item.model_dump(mode="json"),
             )
+            self.assertEqual(
+                envelope["output_items"][0]["provenance"]["stage_id"],
+                "context-provider",
+            )
+            self.assertEqual(envelope["measurement"]["item_count"], 1)
 
 
 class ContextCrashRecoveryTests(unittest.IsolatedAsyncioTestCase):

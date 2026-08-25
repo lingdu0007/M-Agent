@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ._context import ContextProvider
+from ._context_plan import ContextPlan
 from ._errors import (
     DefinitionConflictError,
     DefinitionNotFoundError,
@@ -95,6 +96,10 @@ class DefinitionSnapshot(BaseModel, frozen=True):
         default_factory=lambda: AllowAllRunPolicy().identity
     )
     output_contract: OutputContract | None = None
+    #: 冻结的 Context Plan（ADR 0040 / Ticket 14）：有序 Stage 序列及其
+    #: 作用域。空 Plan 表示不使用 Context Pipeline。恢复时 Runner 按
+    #: Plan 顺序复用已完成 checkpoint，不重新读取外部事实。
+    context_plan: ContextPlan = Field(default_factory=ContextPlan)
 
     @model_validator(mode="after")
     def _validate_model_snapshot_shape(self) -> "DefinitionSnapshot":
@@ -159,6 +164,11 @@ class AgentDefinition(BaseModel, frozen=True):
     run_policy: RunPolicy = Field(default_factory=AllowAllRunPolicy, exclude=True)
     #: Versioned final-output semantics, frozen into every created Run.
     output_contract: OutputContract | None = None
+    #: Agent Definition 声明并冻结的有序 Context Plan（ADR 0040 /
+    #: Ticket 14）。None 或空 Plan 表示不使用 Context Pipeline；
+    #: 非空 Plan 不随 Snapshot 序列化 Stage 实现对象（ADR 0023：
+    #: 不持久化 callable），只冻结纯数据 Plan。
+    context_plan: ContextPlan = Field(default_factory=ContextPlan)
 
     @model_validator(mode="before")
     @classmethod
@@ -384,6 +394,7 @@ class AgentDefinition(BaseModel, frozen=True):
             retry_policy=self.retry_policy,
             policy_identity=self.run_policy.identity,
             output_contract=self.output_contract,
+            context_plan=self.context_plan,
         )
 
 
