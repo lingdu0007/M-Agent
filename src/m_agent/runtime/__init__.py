@@ -7,6 +7,18 @@ should import those from :mod:`m_agent.adapters` instead.
 
 from .._clock import Clock
 from .._codec import PayloadCodec
+from .._compression import (
+    CompressedContextItem,
+    CompressionContract,
+    CompressionContractViolationError,
+    CompressionProvenance,
+    CompressionResult,
+    apply_compression,
+    compression_step_id,
+    compression_task_input,
+    parse_compression_output,
+    validate_compression_result,
+)
 from .._context import ContextItem, ContextProvider, ContextRequest
 from .._context_plan import (
     ContextBudget,
@@ -146,6 +158,11 @@ from .._updates import RunUpdate, RunUpdateType
 __all__ = [
     "AgentDefinition",
     "AllowAllRunPolicy",
+    "CompressedContextItem",
+    "CompressionContract",
+    "CompressionContractViolationError",
+    "CompressionProvenance",
+    "CompressionResult",
     "ALLOWED_FOR_DEFINITION_UNAVAILABLE",
     "ALLOWED_FOR_UNCERTAIN_NON_IDEMPOTENT",
     "aggregate_frame_items",
@@ -267,13 +284,18 @@ __all__ = [
     "ToolRequest",
     "ToolSpec",
     "allowed_resolutions",
+    "apply_compression",
     "check_frame_budget",
     "context_items_from_payload",
+    "compression_step_id",
+    "compression_task_input",
     "is_terminal",
     "legacy_provider_stage",
+    "parse_compression_output",
     "parse_stage_result",
     "stage_invocation_step_id",
     "UsageFieldGuarantee",
     "UsageProvenance",
     "UsageReportingMode",
+    "validate_compression_result",
 ]

@@ -39,6 +39,10 @@ from ._session_conversation import (
     reconcile_session_recovery,
     run_session_conversation,
 )
+from ._context_compression import (
+    reconcile_compression_observation,
+    run_context_budget_compression,
+)
 
 __all__ = [
     "AcceptanceCheck",
@@ -69,13 +73,19 @@ __all__ = [
     "SESSION_CONVERSATION_PACK_VERSION",
     "SESSION_CONVERSATION_PROFILE",
     "SESSION_CONVERSATION_SCENARIO",
+    "CONTEXT_COMPRESSION_PACK_VERSION",
+    "CONTEXT_COMPRESSION_PROFILE",
+    "CONTEXT_COMPRESSION_SCENARIO",
     "core_lifecycle_manifest",
     "runtime_baseline_manifest",
     "session_conversation_manifest",
+    "context_compression_manifest",
     "run_model_adapter_contract",
     "reconcile_recovery_window",
     "reconcile_session_protection",
     "reconcile_session_recovery",
+    "reconcile_compression_observation",
     "run_durable_effects_recovery",
     "run_session_conversation",
+    "run_context_budget_compression",
 ]

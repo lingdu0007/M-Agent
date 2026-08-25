@@ -76,6 +76,16 @@ from ._context import (
     ContextRequest,
     serialize_context_items,
 )
+from ._compression import (
+    CompressionContract,
+    CompressionContractViolationError,
+    CompressionResult,
+    apply_compression,
+    compression_step_id,
+    compression_task_input,
+    parse_compression_output,
+    validate_compression_result,
+)
 from ._context_plan import (
     ContextBudget,
     ContextFrame,
@@ -210,6 +220,12 @@ ERROR_MODEL_DISPATCH_CANCELLED = "MODEL_DISPATCH_CANCELLED"
 ERROR_FROZEN_TOOL_DECLARATION_UNAVAILABLE = (
     "FROZEN_TOOL_DECLARATION_UNAVAILABLE"
 )
+
+#: Compression 输出或压缩证据违反冻结的 Compression Contract（ADR 0040 /
+#: Ticket 15）：未知派生引用、无 provenance、item 冲突、超出输出约束、
+#: 非压缩（扩张）输出或恢复时 provenance 漂移。Runner 以本错误
+#: 确定性 fail closed，并保留原始与失败证据。
+ERROR_COMPRESSION_CONTRACT_VIOLATION = "COMPRESSION_CONTRACT_VIOLATION"
 
 #: 默认租约有效期（ADR 0013）。上层应用可通过 Runner 构造参数覆盖；
 #: 租约过期后其他 Runner 才能接管。
@@ -1619,6 +1635,15 @@ class Runner:
             )
             if run.status is not RunStatus.RUNNING:
                 return run
+        # ADR 0040 / Ticket 15：compression checkpoint 是辅助 MODEL
+        # Step，绝不承载业务最终响应；恢复推进只面向业务 Model
+        # checkpoints，compression checkpoint 由聚合路径复用。
+        compression_step = (
+            compression_step_id(run.snapshot.compression_contract)
+            if run.snapshot is not None
+            and run.snapshot.compression_contract is not None
+            else None
+        )
         if recovery_model_step_id is not None:
             if (
                 inflight_model_attempt is not None
@@ -1632,6 +1657,31 @@ class Runner:
                     step_id=recovery_model_step_id,
                     model_checkpoints=model_checkpoints,
                 )
+            if (
+                compression_step is not None
+                and recovery_model_step_id == compression_step
+            ):
+                # 未确认的 compression dispatch：以 CONTEXT_COMPRESSION
+                # purpose 重放该辅助 Step（与 _execute_steps 相同顺序），
+                # 绝不进入业务 agent loop 冒充 PRIMARY purpose。
+                run, _ = await self._run_compression_step(
+                    run,
+                    definition,
+                    lease,
+                    step_id=compression_step,
+                    recovery_replay=True,
+                )
+                if run.status is not RunStatus.RUNNING:
+                    return run
+                return await self._run_agent_loop(
+                    run,
+                    definition,
+                    lease,
+                    prior_tool_outcomes=tuple(
+                        deserialize_tool_outcome(checkpoint.output)
+                        for checkpoint in tool_checkpoints
+                    ),
+                )
             return await self._run_agent_loop(
                 run,
                 definition,
@@ -1643,9 +1693,15 @@ class Runner:
                 resumed_model_step_id=recovery_model_step_id,
                 recovery_replay=True,
             )
-        if not model_checkpoints:
-            # 上次执行在模型结果持久化前中断（at-least-once：重新执行
-            # 模型循环）。
+        business_model_checkpoints = [
+            checkpoint
+            for checkpoint in model_checkpoints
+            if compression_step is None
+            or checkpoint.step_id != compression_step
+        ]
+        if not business_model_checkpoints:
+            # 上次执行在业务模型结果持久化前中断（at-least-once：重新
+            # 执行模型循环）。
             return await self._run_agent_loop(
                 run,
                 definition,
@@ -1653,11 +1709,15 @@ class Runner:
                 resumed_model_step_id=(
                     inflight_model_step.step_id
                     if inflight_model_step is not None
+                    and (
+                        compression_step is None
+                        or inflight_model_step.step_id != compression_step
+                    )
                     else None
                 ),
             )
         # 最后一个已确认的 Model Step checkpoint：解析其完整响应。
-        last = model_checkpoints[-1]
+        last = business_model_checkpoints[-1]
         last_response = deserialize_model_response(last.output)
         if not last_response.tool_calls:
             # A checkpointed final response still goes through the frozen
@@ -1783,6 +1843,12 @@ class Runner:
         run = await self._run_input_context_stages(run, definition, lease)
         if run.status is not RunStatus.RUNNING:
             return run
+        # ADR 0040 / Ticket 15：显式 Semantic Compression 作为独立
+        # MODEL Step 在 RUN_INPUT Stage 之后、业务 Model Step 之前执行；
+        # 不递归触发 Pipeline，不调用业务 Tools。
+        run, _ = await self._run_compression_step(run, definition, lease)
+        if run.status is not RunStatus.RUNNING:
+            return run
         return await self._run_agent_loop(
             run, definition, lease, prior_tool_outcomes=()
         )
@@ -1865,6 +1931,201 @@ class Runner:
                 return run
         return run
 
+    @staticmethod
+    def _compression_base_items(
+        checkpoints: Sequence[StepCheckpoint],
+    ) -> tuple[ContextItem, ...]:
+        """Aggregate the RUN_INPUT base Items compression may consume.
+
+        压缩只消费 RUN_INPUT 生命周期的基础 Items：TOOL_OUTCOME 增量项
+        与 MODEL_STEP 工作项不进入压缩输入（boundary=0 语义）。
+        """
+        return aggregate_frame_items(
+            [
+                checkpoint.output
+                for checkpoint in checkpoints
+                if checkpoint.step_type is StepType.CONTEXT
+            ],
+            tool_boundary=0,
+            model_boundary=0,
+        )
+
+    @staticmethod
+    def _compression_checkpoint(
+        checkpoints: Sequence[StepCheckpoint], step_id: str
+    ) -> StepCheckpoint | None:
+        """Return the completed compression Model Step checkpoint."""
+        return next(
+            (
+                checkpoint
+                for checkpoint in checkpoints
+                if checkpoint.step_type is StepType.MODEL
+                and checkpoint.step_id == step_id
+            ),
+            None,
+        )
+
+    def _load_compression_result(
+        self,
+        contract: CompressionContract,
+        checkpoints: Sequence[StepCheckpoint],
+        checkpoint: StepCheckpoint,
+    ) -> CompressionResult:
+        """Load + re-validate one completed compression checkpoint.
+
+        校验与 dispatch 时完全一致（确定性）：重新计算契约允许的压缩
+        输入集并验证 Result 的 provenance 与输出约束。篡改 / 漂移的
+        压缩证据在此 fail closed（抛
+        :class:`CompressionContractViolationError`）。
+        """
+        base_items = self._compression_base_items(checkpoints)
+        compressible = tuple(
+            item for item in base_items if contract.allows_item(item)
+        )
+        response = deserialize_model_response(checkpoint.output)
+        result = CompressionResult.deserialize(response.content or "")
+        validate_compression_result(
+            result, contract=contract, source_items=compressible
+        )
+        return result
+
+    async def _fail_compression_evidence(
+        self,
+        run: RunRecord,
+        lease: RunLease,
+        checkpoint: StepCheckpoint,
+    ) -> RunRecord:
+        """Compression checkpoint 证据违反冻结契约：fail closed。
+
+        保留原始与失败证据：被篡改的 checkpoint 原样保留，其 Attempt
+        以 ``COMPRESSION_CONTRACT_VIOLATION`` 归一为 FAILED，Step 到达
+        终态 FAILED，Run 到达终态 FAILED。
+        """
+        attempts = await self._store.get_attempts(run.run_id)
+        attempt = next(
+            (
+                item
+                for item in attempts
+                if item.attempt_id == checkpoint.attempt_id
+            ),
+            None,
+        )
+        await self._record_failed_attempt(
+            run,
+            lease,
+            checkpoint.step_id,
+            (
+                FailureClassification.PERMANENT,
+                ERROR_COMPRESSION_CONTRACT_VIOLATION,
+                "compression checkpoint evidence violates the frozen "
+                "Compression Contract",
+            ),
+            StepType.MODEL,
+            attempt_id=checkpoint.attempt_id,
+            model_purpose=(
+                attempt.model_purpose
+                if attempt is not None
+                else ModelPurpose.CONTEXT_COMPRESSION
+            ),
+            usage=attempt.usage if attempt is not None else None,
+        )
+        await self._record_failed_step(
+            run,
+            lease,
+            checkpoint.step_id,
+            StepType.MODEL,
+            error_code=ERROR_COMPRESSION_CONTRACT_VIOLATION,
+        )
+        return await self._fail_run(
+            run, lease, ERROR_COMPRESSION_CONTRACT_VIOLATION
+        )
+
+    async def _run_compression_step(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        *,
+        step_id: str | None = None,
+        recovery_replay: bool = False,
+    ) -> tuple[RunRecord, CompressionResult | None]:
+        """执行显式 Semantic Compression（ADR 0040 / Ticket 15）。
+
+        幂等入口：已完成 compression checkpoint（step_id 由冻结契约
+        确定性派生）被原样复用并重新校验，不重新 dispatch；未完成的
+        invocation 以同一 identity 执行 / at-least-once 重放。
+
+        - 压缩输入只包含契约允许的 RUN_INPUT 基础 Items；Conversation
+          History、instructions、run input、Tool Outcomes 与 protected
+          evidence 永不进入压缩请求（受保护通道不改写）。
+        - 压缩请求不携带业务 Tools（无递归、不执行 Tool / Output
+          Repair / 另一层压缩）；instructions 来自冻结的 Compression
+          Contract，与业务 Agent Instruction 完全独立。
+        - 压缩请求自身必须通过完整硬预算检查（独立 binding 的 Model
+          Contract 窗口）；压缩输出经完整契约校验（provenance / 输出
+          约束 / 非扩张）后才作为 checkpoint 载荷持久化，attempt 独立
+          记账（usage / 预算）。
+        """
+        if run.snapshot is None:
+            return run, None
+        contract = run.snapshot.compression_contract
+        if contract is None:
+            return run, None
+        step_id = (
+            step_id if step_id is not None else compression_step_id(contract)
+        )
+        checkpoints = await self._store.get_checkpoints(run.run_id)
+        checkpoint = self._compression_checkpoint(checkpoints, step_id)
+        if checkpoint is not None:
+            try:
+                result = self._load_compression_result(
+                    contract, checkpoints, checkpoint
+                )
+            except CompressionContractViolationError:
+                return (
+                    await self._fail_compression_evidence(
+                        run, lease, checkpoint
+                    ),
+                    None,
+                )
+            return run, result
+        base_items = self._compression_base_items(checkpoints)
+        compressible = tuple(
+            item for item in base_items if contract.allows_item(item)
+        )
+        if not compressible:
+            # 契约允许范围内没有可压缩 Item：压缩为显式空操作（零
+            # dispatch），全部 Item 原样传递，不创建 compression Step。
+            return run, None
+
+        def transform(response: ModelResponse) -> ModelResponse:
+            # 压缩输出在 checkpoint 前完成完整契约校验；校验失败即
+            # PERMANENT 契约违约（fail closed，可由冻结策略重试）。
+            result = parse_compression_output(
+                response.content, contract=contract, source_items=compressible
+            )
+            return response.model_copy(update={"content": result.serialize()})
+
+        run, response = await self._run_single_model_step(
+            run,
+            definition,
+            lease,
+            compressible,
+            (),
+            step_id=step_id,
+            recovery_replay=recovery_replay,
+            purpose=ModelPurpose.CONTEXT_COMPRESSION,
+            input_override=compression_task_input(contract),
+            instructions_override=contract.instructions,
+            history_override=(),
+            allow_tools=False,
+            response_transform=transform,
+        )
+        if response is None:
+            return run, None
+        result = CompressionResult.deserialize(response.content or "")
+        return run, result
+
     async def _prepare_model_step_context(
         self,
         run: RunRecord,
@@ -1933,6 +2194,32 @@ class Runner:
             tool_boundary=tool_boundary,
             model_boundary=model_boundary,
         )
+        # ADR 0040 / Ticket 15：已完成 compression checkpoint 在 Frame
+        # 聚合后应用——被消费的原始 Item 被带 provenance 的派生 Item
+        # 取代，未消费 Item（含受保护来源）原样保留。压缩证据与
+        # dispatch 时同一确定性校验；篡改 / 漂移在此 fail closed。
+        contract = (
+            run.snapshot.compression_contract
+            if run.snapshot is not None
+            else None
+        )
+        if contract is not None:
+            compression_checkpoint = self._compression_checkpoint(
+                checkpoints, compression_step_id(contract)
+            )
+            if compression_checkpoint is not None:
+                try:
+                    result = self._load_compression_result(
+                        contract, checkpoints, compression_checkpoint
+                    )
+                    items = apply_compression(items, result)
+                except CompressionContractViolationError:
+                    return (
+                        await self._fail_compression_evidence(
+                            run, lease, compression_checkpoint
+                        ),
+                        (),
+                    )
         return run, items
 
     async def _run_context_stage(
@@ -2291,6 +2578,9 @@ class Runner:
         purpose: ModelPurpose = ModelPurpose.PRIMARY,
         input_override: str | None = None,
         allow_tools: bool = True,
+        instructions_override: str | None = None,
+        history_override: tuple[ConversationMessage, ...] | None = None,
+        response_transform: Callable[[ModelResponse], ModelResponse] | None = None,
     ) -> tuple[RunRecord, ModelResponse | None]:
         """执行一次模型调用并记录 Model Step / Attempt / Checkpoint。
 
@@ -2376,8 +2666,16 @@ class Runner:
                 return cancelled, None
             request = ModelRequest(
                 input=run.input if input_override is None else input_override,
-                instructions=run.snapshot.instructions,
-                history=run.history,
+                instructions=(
+                    run.snapshot.instructions
+                    if instructions_override is None
+                    else instructions_override
+                ),
+                history=(
+                    run.history
+                    if history_override is None
+                    else history_override
+                ),
                 context_items=tuple(context_items),
                 tools=(
                     tuple(tool.spec() for tool in definition.tools)
@@ -2612,8 +2910,14 @@ class Runner:
                 )
                 if not allow_tools and response.tool_calls:
                     raise ModelContractViolationError(
-                        "OUTPUT_REPAIR Model Step may not request business Tools"
+                        f"{purpose.value} Model Step may not request "
+                        "business Tools"
                     )
+                if response_transform is not None:
+                    # 辅助 Model Step（如 CONTEXT_COMPRESSION）在
+                    # checkpoint 前对响应做确定性变换 / 校验；变换抛出的
+                    # 契约违约按模型失败处理（fail closed）。
+                    response = response_transform(response)
             except (LeaseNotHeldError, StaleRunVersionError):
                 raise
             except Exception as exc:  # 模型失败：结构化分类 + 失败 Attempt

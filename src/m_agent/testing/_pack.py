@@ -244,6 +244,9 @@ SESSION_CONVERSATION_PACK_VERSION = "session-foundation-v1"
 SESSION_CONVERSATION_PROFILE = "session-conversation-foundation"
 RUNTIME_BASELINE_PACK_VERSION = "runtime-baseline-v1"
 RUNTIME_BASELINE_PROFILE = "runtime-baseline-0-3"
+CONTEXT_COMPRESSION_SCENARIO = "context-budget-compression"
+CONTEXT_COMPRESSION_PACK_VERSION = "context-compression-v1"
+CONTEXT_COMPRESSION_PROFILE = "context-compression-foundation"
 _CORE_LIFECYCLE_REQUIRED_CHECKS = (
     AcceptanceCheck(
         check_id="core.lifecycle",
@@ -601,6 +604,123 @@ def session_conversation_manifest(
         environment=environment,
         scenarios=(SESSION_CONVERSATION_SCENARIO,),
         required_checks=_SESSION_CONVERSATION_REQUIRED_CHECKS,
+        required_cli_commands=(),
+    )
+
+
+_CONTEXT_COMPRESSION_REQUIRED_CHECKS = (
+    AcceptanceCheck(
+        check_id="context.compression.plan-order",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.Runner.start_run,m_agent.runtime.Runner.inspect_run"
+        ),
+        positive_check="plan_order_and_scopes_match_frozen_context_plan",
+        negative_check="model_step_scope_never_triggered_for_compression",
+        authoritative_evidence="plan_order_authoritative_digest",
+        independent_evidence="plan_order_sentinel_digest",
+        milestone="0_4",
+        non_claim="nested_compression",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.frame-checkpoints",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.Runner.inspect_run,m_agent.runtime.CompressionResult"
+        ),
+        positive_check="source_items_preserved_and_derived_provenance_intact",
+        negative_check="compression_recomputed_or_external_source_reread_after_recovery",
+        authoritative_evidence="frame_checkpoints_authoritative_digest",
+        independent_evidence="frame_checkpoints_sentinel_digest",
+        milestone="0_4",
+        non_claim="lossless_transform",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.hard-budget",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.check_frame_budget,m_agent.runtime.ModelInputSizer"
+        ),
+        positive_check="over_limit_frame_fails_closed_with_zero_business_dispatch",
+        negative_check="under_counting_sizer_would_admit_over_limit_frame",
+        authoritative_evidence="hard_budget_authoritative_digest",
+        independent_evidence="hard_budget_sentinel_digest",
+        milestone="0_4",
+        non_claim="soft_budget_or_best_effort_compression",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.protected-channels",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.Runner.start_run,m_agent.runtime.CompressionContract"
+        ),
+        positive_check="protected_sources_history_run_input_instructions_never_compressed",
+        negative_check="canaries_leaked_into_compression_input",
+        authoritative_evidence="protected_channels_authoritative_digest",
+        independent_evidence="protected_channels_sentinel_digest",
+        milestone="0_4",
+        non_claim="all_context_channels_are_compressible",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.no-recursion",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.runtime.Runner.start_run,m_agent.runtime.ModelPurpose.CONTEXT_COMPRESSION"
+        ),
+        positive_check="compression_tool_calls_fail_closed_with_zero_business_dispatch",
+        negative_check="compression_triggers_pipeline_or_tools_or_repair",
+        authoritative_evidence="no_recursion_authoritative_digest",
+        independent_evidence="no_recursion_sentinel_digest",
+        milestone="0_4",
+        non_claim="compression_is_a_business_step",
+    ),
+    AcceptanceCheck(
+        check_id="context.compression.mutation",
+        scenario=CONTEXT_COMPRESSION_SCENARIO,
+        owner="Runtime",
+        public_seam=(
+            "m_agent.testing.reconcile_compression_observation"
+        ),
+        positive_check="stale_tampered_undercounting_recursion_mutations_all_detected",
+        negative_check="mutation_accepted_silently",
+        authoritative_evidence="mutation_authoritative_digest",
+        independent_evidence="mutation_independent_digest",
+        milestone="0_4",
+        non_claim="single_source_verification",
+    ),
+)
+
+
+def context_compression_manifest(
+    *,
+    source_commit: str,
+    artifact_digest: str,
+    sdist_digest: str,
+    fixture_digest: str,
+    environment: Mapping[str, str],
+) -> AcceptanceManifest:
+    """Freeze the Ticket 15 Semantic Compression Scenario declaration.
+
+    Six required CONTRACT checks cover plan order / scopes, Stage / Frame
+    checkpoint recovery, hard budget, protected channels, no-recursion,
+    and mutation detection (stale source, tampered provenance,
+    under-counting sizer, recursion).
+    """
+    return AcceptanceManifest(
+        pack_version=CONTEXT_COMPRESSION_PACK_VERSION,
+        profile=CONTEXT_COMPRESSION_PROFILE,
+        source_commit=source_commit,
+        artifact_digest=artifact_digest,
+        sdist_digest=sdist_digest,
+        fixture_digest=fixture_digest,
+        environment=environment,
+        scenarios=(CONTEXT_COMPRESSION_SCENARIO,),
+        required_checks=_CONTEXT_COMPRESSION_REQUIRED_CHECKS,
         required_cli_commands=(),
     )
 

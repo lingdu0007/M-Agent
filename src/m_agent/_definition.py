@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ._context import ContextProvider
+from ._compression import CompressionContract
 from ._context_plan import ContextPlan
 from ._errors import (
     DefinitionConflictError,
@@ -100,6 +101,11 @@ class DefinitionSnapshot(BaseModel, frozen=True):
     #: 作用域。空 Plan 表示不使用 Context Pipeline。恢复时 Runner 按
     #: Plan 顺序复用已完成 checkpoint，不重新读取外部事实。
     context_plan: ContextPlan = Field(default_factory=ContextPlan)
+    #: 冻结的 Compression Contract（ADR 0040 / Ticket 15）：显式、有损的
+    #: Semantic Compression 声明。None 表示该 Run 不执行压缩；非空时
+    #: Runner 在 RUN_INPUT Stage 之后、业务 Model Step 之前执行一次
+    #: ``purpose=CONTEXT_COMPRESSION`` 的独立 Model Step。
+    compression_contract: CompressionContract | None = None
 
     @model_validator(mode="after")
     def _validate_model_snapshot_shape(self) -> "DefinitionSnapshot":
@@ -169,6 +175,10 @@ class AgentDefinition(BaseModel, frozen=True):
     #: 非空 Plan 不随 Snapshot 序列化 Stage 实现对象（ADR 0023：
     #: 不持久化 callable），只冻结纯数据 Plan。
     context_plan: ContextPlan = Field(default_factory=ContextPlan)
+    #: 版本化的 Compression Contract（ADR 0040 / Ticket 15）：纯数据，
+    #: 随 Snapshot 冻结。恢复时按 (contract_id, version) 精确复用已
+    #: 完成 compression checkpoint，不用最新契约重算旧 Run。
+    compression_contract: CompressionContract | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -395,6 +405,7 @@ class AgentDefinition(BaseModel, frozen=True):
             policy_identity=self.run_policy.identity,
             output_contract=self.output_contract,
             context_plan=self.context_plan,
+            compression_contract=self.compression_contract,
         )
 
 
