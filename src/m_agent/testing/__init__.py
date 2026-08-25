@@ -39,6 +39,7 @@ from ._pack import (
 from ._dependencies import find_runtime_dependency_violations
 from ._identity import installed_identity
 from ._adapter_contracts import ModelAdapterContractReport, run_model_adapter_contract
+from ._evidence_contracts import EvidenceAdapterContractMixin
 from ._subprocess import isolated_subprocess_environment
 from ._durable_effects import reconcile_recovery_window, run_durable_effects_recovery
 from ._session_conversation import (
@@ -84,6 +85,7 @@ __all__ = [
     "installed_identity",
     "isolated_subprocess_environment",
     "ModelAdapterContractReport",
+    "EvidenceAdapterContractMixin",
     "PackExecution",
     "PackExecutionStatus",
     "RUNTIME_BASELINE_PACK_VERSION",

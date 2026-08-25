@@ -8,6 +8,9 @@ Runner 完成一条 scoped 对话。Companion 只通过公开端口组合 Core�
 
 SQLiteSessionStore 提供跨进程 durable 的同一行为契约实现，
 对话正文经独立的 Session Payload Codec 保护，与可搜索 metadata 分离。
+
+Eval Companion（ADR 0029，m_agent.companion.eval）：隔离 EXECUTE 与
+严格只读 OBSERVE 的最小证据评估能力。
 """
 
 from ._in_memory_session_store import InMemorySessionStore
@@ -27,6 +30,7 @@ from ._session import (
     SessionVersionConflictError,
 )
 from ._session_runner import SessionRunResult, SessionRunner
+from . import eval
 from ._sqlite_session_store import SQLiteSessionStore
 
 __all__ = [
