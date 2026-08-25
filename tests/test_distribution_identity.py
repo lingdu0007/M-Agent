@@ -926,6 +926,19 @@ print("m-agent modified archive provenance rejected")
 """
 
 
+_PIP_BYTECODE_PROBE = """
+import sys
+from pathlib import Path
+
+from m_agent.testing import installed_identity
+
+identity = installed_identity(artifact=Path(sys.argv[1]))
+assert identity["environment"]["installation"] == "wheel", identity["environment"]
+assert identity["artifact_digest"].startswith("sha256:"), identity["artifact_digest"]
+print("m-agent pip bytecode identity binding passed")
+"""
+
+
 class DistributionIdentityTests(unittest.TestCase):
     def test_built_m_agent_distribution_runs_public_runner_in_clean_environment(
         self,
@@ -1006,6 +1019,101 @@ class DistributionIdentityTests(unittest.TestCase):
                 env=clean_environment,
             )
             self.assertIn("m-agent distribution Runner contract passed", output)
+
+    def test_installed_identity_binds_default_pip_bytecode_installation(self) -> None:
+        """A default ``pip`` install still binds to the candidate wheel.
+
+        ``pip`` compiles bytecode by default and appends digest-less
+        ``__pycache__`` rows to the installed RECORD. Those rows are
+        installer-generated caches, not wheel product members, so the wheel
+        binding must still hold for a default installation.
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            dist_dir = temporary_root / "dist"
+            clean_environment = _clean_environment()
+
+            _run(
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--sdist",
+                    "--out-dir",
+                    str(dist_dir),
+                ],
+                cwd=_ROOT,
+                env=clean_environment,
+            )
+            wheel = next(dist_dir.glob("*.whl"))
+
+            environment_dir = temporary_root / "environment"
+            _run(
+                [
+                    "uv",
+                    "venv",
+                    "--offline",
+                    "--no-project",
+                    "--python",
+                    sys.executable,
+                    str(environment_dir),
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            python = environment_dir / "bin" / "python"
+            _run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--offline",
+                    "--python",
+                    str(python),
+                    "pydantic>=2",
+                    "packaging>=23",
+                ],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            _run(
+                [str(python), "-m", "ensurepip", "--upgrade"],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            _run(
+                [str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            target_site = Path(
+                _run(
+                    [
+                        str(python),
+                        "-c",
+                        "import site; print(site.getsitepackages()[0])",
+                    ],
+                    cwd=temporary_root,
+                    env=clean_environment,
+                ).strip()
+            )
+            record = next(target_site.glob("m_agent-*.dist-info/RECORD")).read_text(
+                encoding="utf-8"
+            )
+            self.assertTrue(
+                any(
+                    "__pycache__" in row and row.endswith(".pyc,,")
+                    for row in record.splitlines()
+                )
+            )
+
+            output = _run(
+                [str(python), "-c", _PIP_BYTECODE_PROBE, str(wheel)],
+                cwd=temporary_root,
+                env=clean_environment,
+            )
+            self.assertIn("m-agent pip bytecode identity binding passed", output)
 
     @unittest.skip("0.2 foundation profile is superseded by the 0.3 Runtime Baseline Pack")
     def test_built_wheel_runs_foundation_pack_from_public_namespaces_only(self) -> None:
