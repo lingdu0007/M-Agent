@@ -78,6 +78,7 @@ from ._context import (
     serialize_context_items,
 )
 from ._definition import AgentDefinition, DefinitionRegistry, RetryPolicy
+from ._history import ConversationMessage
 from ._policy import (
     PolicyAction,
     PolicyDecision,
@@ -291,18 +292,36 @@ class Runner:
     # -- 公开控制入口 -------------------------------------------------
 
     async def create_run(
-        self, definition_id: str, version: str, input: str
+        self,
+        definition_id: str,
+        version: str,
+        input: str,
+        *,
+        run_id: str | None = None,
+        history: Sequence[ConversationMessage] = (),
     ) -> RunRecord:
         """在没有任何模型调用之前，持久化一个可检查的 CREATED 记录。
 
         定义在创建时即按精确 id + version 解析，缺失提前失败。
+
+        :param run_id: 预分配 run identity（ADR 0019 / ADR 0020）。
+            SessionRunner 等组合方在创建 Run 之前先用该 identity 原子
+            绑定外部占用；未提供时运行时自行生成。提供的 identity 落库
+            后被占用，重复创建确定性失败（DuplicateRunError）。
+        :param history: 创建时显式提供并冻结的 Conversation History
+            （ADR 0019）。它作为受保护 Run Payload 持久化，后续
+            start / resume / 恢复只复用该冻结输入，绝不重新读取任何
+            会话存储；sessionless Run 保持默认空历史。
         """
+        if run_id is not None and not run_id.strip():
+            raise ValueError("run_id must be a non-blank identifier")
         definition = self._registry.resolve(definition_id, version)
         run = RunRecord(
-            run_id=new_id(),
+            run_id=run_id if run_id is not None else new_id(),
             definition_id=definition.definition_id,
             definition_version=definition.version,
             input=input,
+            history=tuple(history),
             status=RunStatus.CREATED,
             snapshot=definition.frozen_snapshot(),
         )
@@ -2130,6 +2149,7 @@ class Runner:
             request = ModelRequest(
                 input=run.input if input_override is None else input_override,
                 instructions=run.snapshot.instructions,
+                history=run.history,
                 context_items=tuple(context_items),
                 tools=(
                     tuple(tool.spec() for tool in definition.tools)

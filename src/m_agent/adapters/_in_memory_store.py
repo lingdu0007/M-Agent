@@ -20,6 +20,7 @@ from .._status import RunStatus, validate_transition
 from .._steps import StepAttempt, StepCheckpoint, StepRecord, StepType, utc_now
 from .._policy import PolicyDecisionRecord
 from .._store import (
+    FIELD_RUN_HISTORY,
     FIELD_RUN_INPUT,
     FIELD_RUN_OUTPUT,
     FIELD_RUN_SNAPSHOT,
@@ -27,6 +28,7 @@ from .._store import (
     _StoredAttempt,
     _StoredCheckpoint,
     _StoredRun,
+    _restore_history,
     _restore_snapshot,
     _snapshot_metadata,
     _split_attempt,
@@ -211,6 +213,11 @@ class InMemoryRunStore:
                 if FIELD_RUN_SNAPSHOT in payloads
                 else None,
             ),
+            history=_restore_history(
+                self._codec.decode(payloads[FIELD_RUN_HISTORY])
+                if FIELD_RUN_HISTORY in payloads
+                else None
+            ),
         )
 
     async def get_run(self, run_id: str) -> RunRecord | None:
@@ -223,6 +230,9 @@ class InMemoryRunStore:
             snapshot=_restore_snapshot(
                 stored.snapshot,
                 self._read_payload(run_id, FIELD_RUN_SNAPSHOT),
+            ),
+            history=_restore_history(
+                self._read_payload(run_id, FIELD_RUN_HISTORY)
             ),
         )
 
@@ -294,6 +304,9 @@ class InMemoryRunStore:
             snapshot=_restore_snapshot(
                 updated.snapshot,
                 self._read_payload(run_id, FIELD_RUN_SNAPSHOT),
+            ),
+            history=_restore_history(
+                self._read_payload(run_id, FIELD_RUN_HISTORY)
             ),
         )
 

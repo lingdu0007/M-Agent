@@ -32,6 +32,7 @@ from pydantic import (
 
 from ._context import ContextItem
 from ._errors import ModelCapabilityError, ModelContractViolationError
+from ._history import ConversationMessage
 from ._tools import ToolCall, ToolOutcome, ToolSpec
 
 class _CapabilityMode(str, enum.Enum):
@@ -860,6 +861,9 @@ class ModelRequest(_FrozenModelValue):
 
     input: str
     instructions: str
+    #: 创建 Run 时冻结的 Conversation History（ADR 0019）：作为模型输入
+    #: 交付，start / resume / 恢复只复用该冻结副本；sessionless Run 为空。
+    history: tuple[ConversationMessage, ...] = Field(default_factory=tuple)
     context_items: tuple[ContextItem, ...] = Field(default_factory=tuple)
     tools: tuple[ToolSpec, ...] = Field(default_factory=tuple)
     tool_outcomes: tuple[ToolOutcome, ...] = Field(default_factory=tuple)

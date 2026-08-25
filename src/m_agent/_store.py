@@ -12,6 +12,7 @@ Runtime Core 所需的协议、Lease 与与内容无关的共享序列化逻辑�
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol, runtime_checkable
@@ -19,6 +20,7 @@ from typing import Protocol, runtime_checkable
 from ._codec import PayloadCodec
 from ._definition import DefinitionSnapshot
 from ._failure import sanitize_error_code
+from ._history import ConversationMessage
 from ._run import RunRecord
 from ._model import ModelPurpose, ModelUsage
 from ._status import RunStatus
@@ -35,6 +37,7 @@ from ._policy import PolicyDecisionRecord
 FIELD_RUN_INPUT = "run:input"
 FIELD_RUN_OUTPUT = "run:output"
 FIELD_RUN_SNAPSHOT = "run:snapshot"
+FIELD_RUN_HISTORY = "run:history"
 
 
 def attempt_output_field(attempt_id: str) -> str:
@@ -85,12 +88,14 @@ class _StoredRun:
         input: str,
         output: str | None,
         snapshot: DefinitionSnapshot | None,
+        history: tuple[ConversationMessage, ...] = (),
     ) -> RunRecord:
         return RunRecord(
             run_id=self.run_id,
             definition_id=self.definition_id,
             definition_version=self.definition_version,
             input=input,
+            history=history,
             status=self.status,
             snapshot=snapshot,
             output=output,
@@ -264,6 +269,30 @@ class RunStore(Protocol):
     ) -> list[PolicyDecisionRecord]: ...
 
 
+def _serialize_history(history: tuple[ConversationMessage, ...]) -> str:
+    """把冻结 Conversation History 序列化为稳定的 JSON 载荷。"""
+    return json.dumps(
+        [
+            {"role": message.role.value, "content": message.content}
+            for message in history
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _restore_history(payload: str | None) -> tuple[ConversationMessage, ...]:
+    """从受保护 payload 还原冻结 Conversation History；缺失视为空。"""
+    if payload is None:
+        return ()
+    data = json.loads(payload)
+    if not isinstance(data, list):
+        raise ValueError("run history payload is malformed")
+    return tuple(
+        ConversationMessage.model_validate(message) for message in data
+    )
+
+
 def _split_run(run: RunRecord, codec: PayloadCodec) -> tuple[_StoredRun, dict[str, bytes]]:
     """把公共 RunRecord 拆成 metadata 视图 + 编码后的 payload 区。"""
     payloads: dict[str, bytes] = {FIELD_RUN_INPUT: codec.encode(run.input)}
@@ -271,6 +300,8 @@ def _split_run(run: RunRecord, codec: PayloadCodec) -> tuple[_StoredRun, dict[st
         payloads[FIELD_RUN_OUTPUT] = codec.encode(run.output)
     if run.snapshot is not None:
         payloads[FIELD_RUN_SNAPSHOT] = codec.encode(run.snapshot.model_dump_json())
+    if run.history:
+        payloads[FIELD_RUN_HISTORY] = codec.encode(_serialize_history(run.history))
     stored = _StoredRun(
         run_id=run.run_id,
         definition_id=run.definition_id,

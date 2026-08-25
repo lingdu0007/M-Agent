@@ -14,6 +14,7 @@ from .._definition import (
     DefinitionSnapshot,
     RetryPolicy,
 )
+from .._history import ConversationMessage, ConversationRole
 from .._output import OutputContract, OutputFallback, OutputRepairPolicy
 from .._policy import (
     AllowAllRunPolicy,
@@ -125,6 +126,8 @@ __all__ = [
     "ContextItem",
     "ContextProvider",
     "ContextRequest",
+    "ConversationMessage",
+    "ConversationRole",
     "DEFAULT_LEASE_TTL",
     "DEFAULT_TOOL_PARAMETERS",
     "DefinitionConflictError",

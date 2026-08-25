@@ -938,7 +938,27 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
         self.assertIsNotNone(adapters.DeterministicModelAdapter)
         self.assertFalse(hasattr(runtime, "DeterministicModelAdapter"))
         self.assertFalse(hasattr(runtime, "InMemoryRunStore"))
-        self.assertEqual(companion.__all__, [])
+        self.assertEqual(
+            companion.__all__,
+            [
+                "DuplicateSessionError",
+                "InMemorySessionStore",
+                "SessionClaimConflictError",
+                "SessionCommitResult",
+                "SessionCommitStatus",
+                "SessionError",
+                "SessionNotFoundError",
+                "SessionRecord",
+                "SessionRunClaim",
+                "SessionRunResult",
+                "SessionRunner",
+                "SessionScope",
+                "SessionSnapshot",
+                "SessionStore",
+                "SessionTurn",
+                "SessionVersionConflictError",
+            ],
+        )
         self.assertTrue(hasattr(testing, "AcceptanceManifest"))
         self.assertEqual(find_runtime_dependency_violations(), ())
         self.assertEqual(runtime.RunStore.__module__, "m_agent._store")
