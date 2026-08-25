@@ -24,12 +24,21 @@ from ._pack import (
     RUNTIME_BASELINE_PACK_VERSION,
     RUNTIME_BASELINE_PROFILE,
     runtime_baseline_manifest,
+    SESSION_CONVERSATION_PACK_VERSION,
+    SESSION_CONVERSATION_PROFILE,
+    SESSION_CONVERSATION_SCENARIO,
+    session_conversation_manifest,
 )
 from ._dependencies import find_runtime_dependency_violations
 from ._identity import installed_identity
 from ._adapter_contracts import ModelAdapterContractReport, run_model_adapter_contract
 from ._subprocess import isolated_subprocess_environment
 from ._durable_effects import reconcile_recovery_window, run_durable_effects_recovery
+from ._session_conversation import (
+    reconcile_session_protection,
+    reconcile_session_recovery,
+    run_session_conversation,
+)
 
 __all__ = [
     "AcceptanceCheck",
@@ -57,9 +66,16 @@ __all__ = [
     "RUNTIME_BASELINE_PACK_VERSION",
     "RUNTIME_BASELINE_PROFILE",
     "ScenarioEvidenceBundle",
+    "SESSION_CONVERSATION_PACK_VERSION",
+    "SESSION_CONVERSATION_PROFILE",
+    "SESSION_CONVERSATION_SCENARIO",
     "core_lifecycle_manifest",
     "runtime_baseline_manifest",
+    "session_conversation_manifest",
     "run_model_adapter_contract",
     "reconcile_recovery_window",
+    "reconcile_session_protection",
+    "reconcile_session_recovery",
     "run_durable_effects_recovery",
+    "run_session_conversation",
 ]

@@ -943,6 +943,7 @@ class LayeredRuntimePublicApiTests(unittest.TestCase):
             [
                 "DuplicateSessionError",
                 "InMemorySessionStore",
+                "SQLiteSessionStore",
                 "SessionClaimConflictError",
                 "SessionCommitResult",
                 "SessionCommitStatus",

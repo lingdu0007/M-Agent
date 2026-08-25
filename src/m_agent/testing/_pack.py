@@ -239,6 +239,9 @@ CORE_LIFECYCLE_PACK_VERSION = "foundation-v1"
 CORE_LIFECYCLE_PROFILE = "core-lifecycle-foundation"
 CORE_LIFECYCLE_SCENARIO = "core-lifecycle"
 DURABLE_EFFECTS_SCENARIO = "durable-effects-recovery"
+SESSION_CONVERSATION_SCENARIO = "session-conversation"
+SESSION_CONVERSATION_PACK_VERSION = "session-foundation-v1"
+SESSION_CONVERSATION_PROFILE = "session-conversation-foundation"
 RUNTIME_BASELINE_PACK_VERSION = "runtime-baseline-v1"
 RUNTIME_BASELINE_PROFILE = "runtime-baseline-0-3"
 _CORE_LIFECYCLE_REQUIRED_CHECKS = (
@@ -488,6 +491,117 @@ def runtime_baseline_manifest(
         scenarios=(CORE_LIFECYCLE_SCENARIO, DURABLE_EFFECTS_SCENARIO),
         required_checks=(*core_checks, *_DURABLE_EFFECTS_REQUIRED_CHECKS),
         required_cli_commands=("run", "inspect", "verify", "render"),
+    )
+
+
+_SESSION_CONVERSATION_REQUIRED_CHECKS = (
+    AcceptanceCheck(
+        check_id="session.conversation.recovery-windows",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam=(
+            "m_agent.companion.SessionRunner.resume,"
+            "m_agent.companion.SQLiteSessionStore,m_agent.runtime.Runner.get_run"
+        ),
+        positive_check=(
+            "three_cross_store_crash_windows_reopen_and_recover_repeatedly"
+        ),
+        negative_check="partial_commit_or_rewritten_core_terminal_is_fail",
+        authoritative_evidence="recovery_windows_authoritative_digest",
+        independent_evidence="recovery_windows_journal_digest",
+        milestone="0_4",
+        non_claim="exactly_once_external_effect",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.claim-no-ttl",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam=(
+            "m_agent.companion.SessionStore.claim_run,"
+            "m_agent.companion.SessionStore.get_claim"
+        ),
+        positive_check=(
+            "restart_and_stale_owner_keep_exactly_one_active_session_claim"
+        ),
+        negative_check="silent_second_run_admission_is_fail",
+        authoritative_evidence="claim_no_ttl_authoritative_digest",
+        independent_evidence="claim_no_ttl_journal_digest",
+        milestone="0_4",
+        non_claim="time_based_claim_recovery",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.payload-protection",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam=(
+            "m_agent.companion.SQLiteSessionStore,m_agent.runtime.PayloadCodec"
+        ),
+        positive_check=(
+            "independent_session_codec_protects_history_and_wrong_key_fails_closed"
+        ),
+        negative_check="plaintext_history_or_silent_wrong_key_decode_is_fail",
+        authoritative_evidence="payload_protection_authoritative_digest",
+        independent_evidence="payload_protection_independent_digest",
+        milestone="0_4",
+        non_claim="encryption_strength_or_key_management",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.scope-isolation",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Session Companion",
+        public_seam="m_agent.companion.SessionScope,m_agent.companion.SessionStore",
+        positive_check="cross_scope_access_fails_closed_without_side_effects",
+        negative_check="cross_scope_visibility_or_mutation_is_fail",
+        authoritative_evidence="scope_isolation_authoritative_digest",
+        independent_evidence="scope_isolation_independent_digest",
+        milestone="0_4",
+        non_claim="authorization_or_multitenant_isolation",
+    ),
+    AcceptanceCheck(
+        check_id="session.conversation.mutation",
+        scenario=SESSION_CONVERSATION_SCENARIO,
+        owner="Testing",
+        public_seam=(
+            "m_agent.testing.reconcile_session_recovery,"
+            "m_agent.testing.reconcile_session_protection,"
+            "m_agent.testing.ScenarioEvidenceBundle"
+        ),
+        positive_check=(
+            "tamper_wrong_scope_wrong_key_and_duplicate_submit_mutations_detected"
+        ),
+        negative_check="undetected_mutation_is_harness_error",
+        authoritative_evidence="mutation_authoritative_digest",
+        independent_evidence="mutation_independent_digest",
+        milestone="0_4",
+        non_claim="external_ledger_integrity",
+    ),
+)
+
+
+def session_conversation_manifest(
+    *,
+    source_commit: str,
+    artifact_digest: str,
+    sdist_digest: str,
+    fixture_digest: str,
+    environment: Mapping[str, str],
+) -> AcceptanceManifest:
+    """Freeze the Ticket 13 durable Session recovery Scenario declaration.
+
+    HOST wheel 证据与 0.4 release profile（ADR 0042）由后续发行票补充；
+    本 Manifest 冻结当前可离线重复验证的五个 required CONTRACT 检查。
+    """
+    return AcceptanceManifest(
+        pack_version=SESSION_CONVERSATION_PACK_VERSION,
+        profile=SESSION_CONVERSATION_PROFILE,
+        source_commit=source_commit,
+        artifact_digest=artifact_digest,
+        sdist_digest=sdist_digest,
+        fixture_digest=fixture_digest,
+        environment=environment,
+        scenarios=(SESSION_CONVERSATION_SCENARIO,),
+        required_checks=_SESSION_CONVERSATION_REQUIRED_CHECKS,
+        required_cli_commands=(),
     )
 
 
