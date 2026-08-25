@@ -88,6 +88,7 @@ from m_agent.testing import run_session_conversation
 
 
 async def store_contract_equivalent():
+    from m_agent.adapters import PlaintextPayloadCodec
     from m_agent.companion import (
         InMemorySessionStore,
         SessionScope,
@@ -97,8 +98,11 @@ async def store_contract_equivalent():
 
     scope = SessionScope(token="host-store-contract")
     session_id = "host-store-contract-1"
+    codec = PlaintextPayloadCodec()
     with tempfile.TemporaryDirectory() as temporary:
-        sqlite_store = SQLiteSessionStore(Path(temporary) / "contract.sqlite3")
+        sqlite_store = SQLiteSessionStore(
+            Path(temporary) / "contract.sqlite3", payload_codec=codec
+        )
         in_memory = InMemorySessionStore()
         try:
             observations = []
