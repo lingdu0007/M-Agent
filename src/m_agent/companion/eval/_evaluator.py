@@ -11,11 +11,13 @@ failure 由 outcome + failure_kind + reason code 三元组区分；任何单一
 from __future__ import annotations
 
 import enum
+from datetime import datetime
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..._steps import utc_now
 from ._case import EvaluatorRef
 from ._observation import EvidenceCompleteness
 from ._projection import EvidenceField, EvidenceRequirements, ObservationProjection
@@ -26,6 +28,7 @@ __all__ = [
     "EvaluatorAggregate",
     "EvaluatorOutcome",
     "EvaluatorResult",
+    "EvaluatorResultRecord",
     "OutputMatchesEvaluator",
     "REASON_EVALUATOR_RAISED",
     "REASON_EVIDENCE_MISSING",
@@ -340,3 +343,33 @@ class RunStatusEvaluator:
             hard=True,
             evidence_refs=(projection.observation_id,),
         )
+
+
+class EvaluatorResultRecord(BaseModel):
+    """一次 Evaluator 执行的持久化不可变结果（EvalStore 记录）。
+
+    与 :class:`EvaluatorResult` 同构，附加确定性身份（``result_id``）、
+    执行关联（execution / observation / item / case / variant /
+    repetition）与 Judge 溯源（``judge_run_id``）。记录一经保存即
+    不可变：同 id 同内容重放幂等，异内容确定性冲突。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    result_id: str = Field(min_length=1)
+    execution_id: str | None = None
+    observation_id: str = Field(min_length=1)
+    item_id: str = ""
+    case_id: str = ""
+    variant_id: str = ""
+    repetition_index: int = Field(default=0, ge=0)
+    evaluator: EvaluatorRef
+    outcome: EvaluatorOutcome
+    failure_kind: EvalFailureKind
+    reason_code: str = Field(min_length=1)
+    detail: str = ""
+    score: float | None = None
+    hard: bool = False
+    evidence_refs: tuple[str, ...] = ()
+    judge_run_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)

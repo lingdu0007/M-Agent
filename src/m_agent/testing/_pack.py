@@ -247,6 +247,9 @@ RUNTIME_BASELINE_PROFILE = "runtime-baseline-0-3"
 CONTEXT_COMPRESSION_SCENARIO = "context-budget-compression"
 CONTEXT_COMPRESSION_PACK_VERSION = "context-compression-v1"
 CONTEXT_COMPRESSION_PROFILE = "context-compression-foundation"
+EVAL_REGRESSION_SCENARIO = "eval-regression"
+EVAL_REGRESSION_PACK_VERSION = "eval-regression-v1"
+EVAL_REGRESSION_PROFILE = "eval-regression-foundation"
 _CORE_LIFECYCLE_REQUIRED_CHECKS = (
     AcceptanceCheck(
         check_id="core.lifecycle",
@@ -929,6 +932,189 @@ _RELEASE_0_4_CONTEXT_CHECKS = (
         evidence_level=EvidenceLevel.HOST,
     ),
 )
+
+
+_EVAL_REGRESSION_REQUIRED_CHECKS = (
+    AcceptanceCheck(
+        check_id="eval.regression.durable-recovery",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.EvalExecutionEngine.run_suite,"
+            "m_agent.companion.eval.EvalExecutionEngine.resume_execution,"
+            "m_agent.companion.eval.SQLiteEvalStore"
+        ),
+        positive_check=(
+            "crash_resume_completes_remaining_items_without_rerunning_completed_units"
+        ),
+        negative_check="duplicate_execution_or_rerun_of_completed_units_is_fail",
+        authoritative_evidence="durable_recovery_authoritative_digest",
+        independent_evidence="durable_recovery_sqlite_digest",
+        milestone="0_5",
+        non_claim="live_provider_or_production_eval_store",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.judge-isolation",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.EvalExecutionEngine,"
+            "m_agent.companion.eval.JudgeRunExecutor"
+        ),
+        positive_check=(
+            "judge_uses_dedicated_run_store_and_results_are_append_only_reused"
+        ),
+        negative_check="judge_sharing_subject_store_or_rerun_is_fail",
+        authoritative_evidence="judge_isolation_authoritative_digest",
+        independent_evidence="judge_isolation_sqlite_digest",
+        milestone="0_5",
+        non_claim="judge_quality_or_live_model_behavior",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.baseline-comparison",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.compare_report_revisions,"
+            "m_agent.companion.eval.BaselineComparison"
+        ),
+        positive_check=(
+            "five_state_comparison_unchanged_changed_new_missing_inconclusive"
+        ),
+        negative_check="insufficient_evidence_misclassified_as_comparable_is_fail",
+        authoritative_evidence="baseline_comparison_authoritative_digest",
+        independent_evidence="baseline_comparison_sqlite_digest",
+        milestone="0_5",
+        non_claim="automatic_baseline_update_or_live_provider_drift",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.regression-detection",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.compare_report_revisions,"
+            "m_agent.companion.eval.ComparisonOverall"
+        ),
+        positive_check=(
+            "hard_gate_regression_pass_to_fail_detected_and_quality_regression_by_policy"
+        ),
+        negative_check="regression_missed_or_no_change_misclassified_as_regression_is_fail",
+        authoritative_evidence="regression_detection_authoritative_digest",
+        independent_evidence="regression_detection_sqlite_digest",
+        milestone="0_5",
+        non_claim="subjective_quality_or_external_baseline_source",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.report-metrics",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.build_report_revision,"
+            "m_agent.companion.eval.CaseVariantReport,"
+            "m_agent.companion.eval.summarize_samples"
+        ),
+        positive_check=(
+            "repetitions_retained_with_pass_at_k_and_justified_statistics"
+        ),
+        negative_check="unjustified_p95_or_swallowed_failure_sample_is_fail",
+        authoritative_evidence="report_metrics_authoritative_digest",
+        independent_evidence="report_metrics_sqlite_digest",
+        milestone="0_5",
+        non_claim="score_calibration_or_cross_model_comparison",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.observe-projection",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.EvalObserver,"
+            "m_agent.companion.eval.ObservationSelection,"
+            "m_agent.companion.eval.project_observation"
+        ),
+        positive_check=(
+            "observe_selection_is_read_only_and_projection_minimally_authorized"
+        ),
+        negative_check=(
+            "unauthorized_field_delivered_or_model_dispatch_during"
+            "_observe_is_fail"
+        ),
+        authoritative_evidence="observe_projection_authoritative_digest",
+        independent_evidence="observe_projection_sqlite_digest",
+        milestone="0_5",
+        non_claim="sampling_statistics_or_live_provider_observation",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.recommendation-readonly",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.ModelRecommendationRecord,"
+            "m_agent.companion.eval.RecommendationTarget,"
+            "m_agent.companion.eval.SQLiteEvalStore"
+        ),
+        positive_check=(
+            "recommendation_references_frozen_evidence_without"
+            "_mutating_stored_facts"
+        ),
+        negative_check=(
+            "stored_fact_mutation_or_tampered_recommendation"
+            "_accepted_is_fail"
+        ),
+        authoritative_evidence="recommendation_authoritative_digest",
+        independent_evidence="recommendation_sqlite_digest",
+        milestone="0_5",
+        non_claim="automatic_promotion_or_routing_activation",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.mutation",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Testing",
+        public_seam=(
+            "m_agent.testing.reconcile_eval_regression,"
+            "m_agent.testing.ScenarioEvidenceBundle"
+        ),
+        positive_check=(
+            "tampered_report_baseline_identity_and_pass_at_k_mutations_all_detected"
+        ),
+        negative_check="undetected_mutation_is_harness_error",
+        authoritative_evidence="mutation_authoritative_digest",
+        independent_evidence="mutation_independent_digest",
+        milestone="0_5",
+        non_claim="external_ledger_integrity",
+    ),
+)
+
+
+def eval_regression_manifest(
+    *,
+    source_commit: str,
+    artifact_digest: str,
+    sdist_digest: str,
+    fixture_digest: str,
+    environment: Mapping[str, str],
+) -> AcceptanceManifest:
+    """Freeze the eval-regression Scenario declaration.
+
+    八个 required CONTRACT 检查覆盖：durable 恢复（崩溃后续跑不重复
+    已完成单元）、Judge 隔离（专用 RunStore + append-only 复用）、
+    Baseline 五态比较（UNCHANGED/CHANGED/NEW/MISSING/INCONCLUSIVE）、
+    回归判定（hard gate 恒判定 + quality gate 按 policy）、报告
+    metrics（repetition 保留、pass^k 与有依据的统计披露）、OBSERVE
+    只读与 Projection 最小授权、Recommendation 只读引用，以及变异
+    检测（篡改报告、Baseline 身份错配、pass^k 恶化）。
+    """
+    return AcceptanceManifest(
+        pack_version=EVAL_REGRESSION_PACK_VERSION,
+        profile=EVAL_REGRESSION_PROFILE,
+        source_commit=source_commit,
+        artifact_digest=artifact_digest,
+        sdist_digest=sdist_digest,
+        fixture_digest=fixture_digest,
+        environment=environment,
+        scenarios=(EVAL_REGRESSION_SCENARIO,),
+        required_checks=_EVAL_REGRESSION_REQUIRED_CHECKS,
+        required_cli_commands=(),
+    )
 
 
 def foundation_release_0_4_manifest(

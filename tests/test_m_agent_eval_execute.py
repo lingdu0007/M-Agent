@@ -282,14 +282,28 @@ class ExecuteIdentityAndSessionTests(unittest.IsolatedAsyncioTestCase):
             EvalExecutor.subject_run_id("exec-1", item),
             EvalExecutor.subject_run_id("exec-1", item),
         )
-        await executor.execute_item(
+        first = await executor.execute_item(
             suite=suite, item=item, execution_id="exec-1"
         )
-        # 同一 execution 下重放同一 item：确定性身份冲突而非重复执行。
-        with self.assertRaises(DuplicateRunError):
-            await executor.execute_item(
-                suite=suite, item=item, execution_id="exec-1"
-            )
+        # Ticket 18 durable 恢复语义：同一 execution 下重放同一 item
+        # 时已完成 subject Run 不重复执行——权威终态直接复用（零新增
+        # 模型 dispatch），observation 与首次一致。
+        replay = await executor.execute_item(
+            suite=suite, item=item, execution_id="exec-1"
+        )
+        self.assertEqual(
+            replay.model_dump(exclude={"collected_at"}),
+            first.model_dump(exclude={"collected_at"}),
+        )
+        self.assertEqual(
+            replay.subject_run_id, first.subject_run_id
+        )
+        replay_again = await executor.execute_item(
+            suite=suite, item=item, execution_id="exec-1"
+        )
+        self.assertEqual(
+            replay_again.subject_run_id, first.subject_run_id
+        )
 
     async def test_isolated_session_store_commits_only_eval_turns(self) -> None:
         session_store = InMemorySessionStore()

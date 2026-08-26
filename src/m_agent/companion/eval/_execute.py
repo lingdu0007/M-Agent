@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..._clock import Clock, SystemClock
 from ..._definition import DefinitionRegistry
-from ..._errors import DefinitionNotFoundError
+from ..._errors import DefinitionNotFoundError, RunNotFoundError
 from ..._runner import Runner
 from ..._store import RunStore
 from ..._tools import ToolEffect
@@ -150,15 +150,11 @@ class EvalExecutor:
 
         claim_binding = await self._claim_session(execution_id, item, run_id)
         try:
-            await self._runner.create_run(
-                definition.definition_id,
-                definition.version,
-                case.input,
-                run_id=run_id,
-                history=case.history,
+            run = await self._drive_subject_run(
+                definition=definition, case=case, run_id=run_id
             )
         except BaseException:
-            # Run 从未创建：回滚隔离 claim（残余 claim 交给对账）。
+            # Run 未到达终态：回滚隔离 claim（残余 claim 交给对账）。
             if (
                 claim_binding is not None
                 and self._session_store is not None
@@ -171,7 +167,6 @@ class EvalExecutor:
                 except Exception:
                     pass
             raise
-        run = await self._runner.start_run(run_id)
         await self._complete_session(execution_id, item, run, claim_binding)
         inspection = await self._runner.inspect_run(run_id)
         return observation_from_inspection(
@@ -220,6 +215,33 @@ class EvalExecutor:
             execution=execution,
             observations=tuple(observations),
         )
+
+
+    async def _drive_subject_run(
+        self, *, definition, case, run_id: str
+    ):  # noqa: ANN001 - 内部崩溃感知生命周期
+        """崩溃感知的 subject Run 生命周期（Ticket 18 恢复语义）。
+
+        - Run 不存在：创建并推进到终态（全新执行）；
+        - Run 存在且非终态：resume 续跑（崩溃发生在执行中途）；
+        - Run 已终态：直接返回权威终态——已完成 subject Run 绝不
+          重复执行（零新增模型 dispatch）。
+        """
+        try:
+            run = await self._runner.get_run(run_id)
+        except RunNotFoundError:
+            await self._runner.create_run(
+                definition.definition_id,
+                definition.version,
+                case.input,
+                run_id=run_id,
+                history=case.history,
+            )
+            return await self._runner.start_run(run_id)
+        if not run.status.is_terminal:
+            return await self._runner.resume_run(run_id)
+        return run
+
 
     # -- 内部：fixture boundary 与能力门槛 -------------------------------
 
@@ -274,16 +296,35 @@ class EvalExecutor:
 
         返回 (scope, session_id, frozen_version)；未配置隔离 Store 时
         返回 None（sessionless 执行）。
+
+        三条幂等恢复路径：同一 run 的既有 claim 直接复用；turn 已
+        提交（claim 已被 commit_turn 清除、崩溃发生在提交与
+        observation 落盘之间）时按当前版本复用——重放 claim_run 会
+        撞上「已提交过 Turn」的 fail-closed，必须识别为幂等而非冲突。
         """
         if self._session_store is None:
             return None
         scope = self.session_scope(execution_id)
         session_id = self.session_id(item)
+        existing = await self._session_store.get_claim(scope, session_id)
+        if existing is not None and existing.run_id == run_id:
+            # 崩溃恢复：同一 subject Run 的既有 claim 幂等复用。
+            return scope, session_id, existing.session_version
         record = await self._session_store.get_session(scope, session_id)
         if record is None:
             record = await self._session_store.create_session(
                 scope, session_id
             )
+        # 崩溃恢复：Turn 已提交（claim 已被 commit_turn 清除、崩溃
+        # 发生在提交与 observation 落盘之间）——重放 claim_run 会撞上
+        # 「已提交过 Turn」的 fail-closed，必须识别为幂等而非冲突。
+        # 后续 _complete_session 的重复 commit 会按 run identity 幂等
+        # 去重，无任何 mutation。
+        committed = await self._session_store.find_turn_by_run(
+            scope, session_id, run_id
+        )
+        if committed is not None:
+            return scope, session_id, record.version
         claim = await self._session_store.claim_run(
             scope, session_id, run_id, expected_version=record.version
         )
