@@ -11,6 +11,10 @@ SQLiteSessionStore 提供跨进程 durable 的同一行为契约实现，
 
 Eval Companion（ADR 0029，m_agent.companion.eval）：隔离 EXECUTE 与
 严格只读 OBSERVE 的最小证据评估能力。
+
+Model Routing Companion（ADR 0041，m_agent.companion.routing）：
+在 ``create_run`` 前用冻结 Catalog、版本化 Routing Policy、
+Deployment Constraints 与只读快照确定性选择完整 Agent Variant。
 """
 
 from ._in_memory_session_store import InMemorySessionStore
@@ -31,6 +35,7 @@ from ._session import (
 )
 from ._session_runner import SessionRunResult, SessionRunner
 from . import eval
+from . import routing
 from ._sqlite_session_store import SQLiteSessionStore
 
 __all__ = [
