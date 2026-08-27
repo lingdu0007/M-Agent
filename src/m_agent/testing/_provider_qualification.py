@@ -30,7 +30,13 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    model_validator,
+)
 
 from ..runtime import (
     ModelCapabilityError,
@@ -626,6 +632,14 @@ class ProviderReportRevision(_FrozenQualificationValue):
     records: tuple[ProviderCaseRecord, ...]
     redaction_verified: bool
 
+    @field_serializer("endpoint_scope")
+    def _serialize_endpoint_scope(self, value: frozenset[str]) -> list[str]:
+        # The report content digest is computed over this serialization, so it
+        # must never depend on per-process set iteration order (PYTHONHASHSEED
+        # reshuffles it; a rebuilt frozenset can iterate differently from the
+        # list it was parsed from, making the digest unverifiable).
+        return sorted(value)
+
     @model_validator(mode="after")
     def _validate_revision(self) -> Self:
         _require_aware(self.created_at, "created_at")
@@ -685,6 +699,12 @@ class ProviderVerificationReport(_FrozenQualificationValue):
     endpoint_aliases: frozenset[str]
     revisions: tuple[ProviderReportRevision, ...] = ()
     content_digest: str
+
+    @field_serializer("endpoint_aliases")
+    def _serialize_endpoint_aliases(self, value: frozenset[str]) -> list[str]:
+        # Same rationale as ProviderReportRevision.endpoint_scope: the
+        # content digest must be stable across processes and hash seeds.
+        return sorted(value)
 
     @model_validator(mode="after")
     def _validate_report(self) -> Self:
