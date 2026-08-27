@@ -25,6 +25,8 @@ from ._pack import (
     EXIT_SUCCESS,
     FOUNDATION_RELEASE_0_4_PACK_VERSION,
     FOUNDATION_RELEASE_0_4_PROFILE,
+    FOUNDATION_RELEASE_0_5_PACK_VERSION,
+    FOUNDATION_RELEASE_0_5_PROFILE,
     MODEL_ROUTING_PACK_VERSION,
     MODEL_ROUTING_PROFILE,
     MODEL_ROUTING_SCENARIO,
@@ -40,6 +42,7 @@ from ._pack import (
     core_lifecycle_manifest,
     eval_regression_manifest,
     foundation_release_0_4_manifest,
+    foundation_release_0_5_manifest,
     model_routing_manifest,
     runtime_baseline_manifest,
     session_conversation_manifest,
@@ -114,10 +117,22 @@ from ._provider_qualification import (
 from ._release import (
     CONTEXT_HOST_EXPECTATION,
     CONTEXT_HOST_PROBE,
+    EVAL_REGRESSION_HOST_EXPECTATION,
+    EVAL_REGRESSION_HOST_PROBE,
+    MODEL_ROUTING_HOST_EXPECTATION,
+    MODEL_ROUTING_HOST_PROBE,
     SESSION_HOST_EXPECTATION,
     SESSION_HOST_PROBE,
     observe_isolated_scenario_probe,
 )
+from ._platform_matrix import (
+    FOUNDATION_PLATFORM_MATRIX_0_5,
+    PlatformMatrixEntry,
+    PlatformMatrixEvidence,
+    PlatformMatrixObservation,
+)
+from ._demo import PRE_GENERATED_EVIDENCE_LABEL, render_release_demo
+from ._coverage import coverage_matrix_gaps, documented_check_ids
 
 __all__ = [
     "AcceptanceCheck",
@@ -167,6 +182,7 @@ __all__ = [
     "eval_regression_manifest",
     "model_routing_manifest",
     "foundation_release_0_4_manifest",
+    "foundation_release_0_5_manifest",
     "run_model_adapter_contract",
     "reconcile_recovery_window",
     "reconcile_session_protection",
@@ -181,6 +197,20 @@ __all__ = [
     "run_model_routing",
     "FOUNDATION_RELEASE_0_4_PACK_VERSION",
     "FOUNDATION_RELEASE_0_4_PROFILE",
+    "FOUNDATION_RELEASE_0_5_PACK_VERSION",
+    "FOUNDATION_RELEASE_0_5_PROFILE",
+    "FOUNDATION_PLATFORM_MATRIX_0_5",
+    "PlatformMatrixEntry",
+    "PlatformMatrixEvidence",
+    "PlatformMatrixObservation",
+    "PRE_GENERATED_EVIDENCE_LABEL",
+    "coverage_matrix_gaps",
+    "documented_check_ids",
+    "render_release_demo",
+    "MODEL_ROUTING_HOST_EXPECTATION",
+    "MODEL_ROUTING_HOST_PROBE",
+    "EVAL_REGRESSION_HOST_EXPECTATION",
+    "EVAL_REGRESSION_HOST_PROBE",
     "PROVIDER_EVIDENCE_MAX_AGE_DAYS",
     "ProviderEvidenceStatus",
     "provider_evidence_status",

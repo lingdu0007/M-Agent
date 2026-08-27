@@ -1,12 +1,15 @@
 # Acceptance Coverage Matrix
 
-This matrix is the frozen contract index for the 0.4 Session and Context
-candidate. Its release profile is `foundation-release-0-4` at Pack version
-`foundation-release-0-4-v1` and it freezes all four required Scenarios: the
-0.3 Runtime Baseline (`core-lifecycle` and `durable-effects-recovery`) is rerun
-under the same release-candidate identity, and `session-conversation` and
-`context-budget-compression` add CONTRACT and HOST evidence. Every row,
-including its owner, public seam, positive/negative assertion, evidence,
+This matrix is the frozen contract index for the 0.5 Runtime Foundation
+candidate. Its release profile is `foundation-release-0-5` at Pack version
+`foundation-release-0-5-v1` and it freezes all six required Scenarios under
+one release-candidate Manifest identity: the 0.3 Runtime Baseline
+(`core-lifecycle` and `durable-effects-recovery`) and the 0.4 Session and
+Context Scenarios (the `foundation-release-0-4` profile;
+`session-conversation` and
+`context-budget-compression`) are rerun as-is under the same RC identity, and
+`model-routing` and `eval-regression` add CONTRACT and HOST evidence. Every
+row, including its owner, public seam, positive/negative assertion, evidence,
 milestone, and non-claim, is frozen in a passing Manifest. The Testing CLI
 rejects a Manifest that differs from this complete set; a row cannot be
 omitted based on an execution result, and an older release-candidate Bundle
@@ -47,10 +50,63 @@ therefore never attests to its own later verification or rendering.
 | `context.compression.no-recursion` | Runtime | `context-budget-compression`; `Runner.start_run`, `ModelPurpose.CONTEXT_COMPRESSION` | Compression tool calls fail closed with zero business dispatch and compression never triggers the pipeline, tools, or repair; recursion is `FAIL`. | Public recursion observation digest and independent sentinel digest. | CONTRACT / 0.4 | Does not claim compression is a business step. |
 | `context.compression.mutation` | Runtime | `context-budget-compression`; `reconcile_compression_observation` | Controlled stale-source, tampered-provenance, under-counting-sizer, and recursion mutations are all detected; a silently accepted mutation is a Harness error. | Runtime reconciliation result and independent mutation digest. | CONTRACT / 0.4 | Does not claim single-source verification. |
 | `context.compression.host-wheel` | Runtime | Clean external venv; `python -I -m m_agent.testing` | The installed wheel runs the budget compression and recovery probes in one isolated process; source import or artifact identity mismatch is `FAIL`. | Installed-wheel probe observation digest and independent probe stdout digest. | HOST / 0.4 | Does not prove live provider or business context quality. |
+| `model.routing.typed-capability` | Routing Companion | `model-routing`; `m_agent.companion.routing.ModelRouter`, `m_agent.runtime.ModelRequirements` | Typed capability and contract limits filter candidates with inspectable reasons; a capability or limit mismatch silently admitted is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not prove live provider capability behavior. |
+| `model.routing.operational-limits` | Routing Companion | `model-routing`; `m_agent.companion.routing.OperationalLimitsGate`, `OperationalLimitsSnapshot` | Limits floor, unknown, missing, stale, and integrity paths are all resolved with stable reason codes; unknown limits treated as sufficient or stale as healthy is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not prove live quota probing or enforcement. |
+| `model.routing.usage-cost` | Routing Companion | `model-routing`; `m_agent.companion.routing.estimate_run_cost`, `RunCostPolicy` | Declared formula, usage provenance, and gaps are reported without fabricated precision; a fabricated estimate or settlement guarantee claim is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not claim billing settlement or provider invoice accuracy. |
+| `model.routing.deployment-constraints` | Routing Companion | `model-routing`; `m_agent.companion.routing.DeploymentConstraints`, `ModelCatalogEntry` | Provider, region, endpoint, and retention constraints match hard with unknown attributes failing closed; an unknown or disallowed attribute admitted is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not prove credential or sensitive endpoint configuration. |
+| `model.routing.six-outcomes` | Routing Companion | `model-routing`; `m_agent.companion.routing.ModelRouter.select` | All six resolved outcomes are observed with inspectable reason codes; an unresolved or silent outcome is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not claim probabilistic or learning-based routing. |
+| `model.routing.fallback` | Routing Companion | `model-routing`; `m_agent.companion.routing.execute_pre_run_fallback`, `FallbackSequence` | A frozen sequence with bounded attempts and inspectable reasons resolves before any Run creation; an unbounded, unregistered, or duplicate-identity sequence is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not claim in-run model switching. |
+| `model.routing.zero-side-effect` | Routing Companion | `model-routing`; `m_agent.companion.routing.ModelRouter.select` | Success and failure paths leave the evidence catalog and policy digests unchanged; a mutated input snapshot or hidden dispatch is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not prove telemetry or diagnostic side channels. |
+| `model.routing.immutable-decision` | Routing Companion | `model-routing`; `m_agent.companion.routing.SQLiteRoutingStore`, `bind_decision_to_run` | Deterministic decision identity supports idempotent replay, conflict failure, and reopen without recomputation; rewritten history or a recomputed decision on recovery is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not prove distributed or cross-process store contention. |
+| `model.routing.no-in-run-switch` | Routing Companion | `model-routing`; `m_agent.companion.routing.register_replacement_run`, `RoutingReplacementError` | A running predecessor is never replaced and a successor requires a new decision; an in-run variant switch or decision reuse masquerading as retry is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not claim automatic failure recovery or retry policy. |
+| `model.routing.explicit-promotion` | Routing Companion | `model-routing`; `m_agent.companion.routing.publish_recommendation_as_policy`, `register_variant_for_policy` | Publication preconditions fail closed and a published policy only affects future routing; an unpublished recommendation visible or a rewritten base policy is `FAIL`. | Routing authoritative probe digest and independent digest. | CONTRACT / 0.5 | Does not claim automatic promotion or baseline rerun. |
+| `model.routing.mutation` | Testing | `model-routing`; `m_agent.testing.reconcile_model_routing`, `ScenarioEvidenceBundle` | Every flipped scenario observation boolean is detected by reconciliation; an undetected mutation is a Harness error. | Runtime reconciliation result and independent mutation digest. | CONTRACT / 0.5 | Does not prove external ledger integrity. |
+| `model.routing.host-wheel` | Testing | Clean external venv; `python -I -m m_agent.testing` | The installed wheel runs every model routing contract probe in one isolated process; source import or artifact identity mismatch is `FAIL`. | Installed-wheel probe observation digest and independent probe stdout digest. | HOST / 0.5 | Does not prove live provider routing or quota enforcement. |
+| `eval.regression.durable-recovery` | Eval Companion | `eval-regression`; `EvalExecutionEngine.run_suite`, `resume_execution`, `SQLiteEvalStore` | A crash resume completes the remaining items without rerunning completed units; duplicate execution or rerun of completed units is `FAIL`. | Eval authoritative probe digest and independent SQLite digest. | CONTRACT / 0.5 | Does not prove live provider or production eval store. |
+| `eval.regression.judge-isolation` | Eval Companion | `eval-regression`; `EvalExecutionEngine`, `JudgeRunExecutor` | The judge uses a dedicated run store and results are append-only and reused; a judge sharing the subject store or rerunning is `FAIL`. | Eval authoritative probe digest and independent SQLite digest. | CONTRACT / 0.5 | Does not prove judge quality or live model behavior. |
+| `eval.regression.baseline-comparison` | Eval Companion | `eval-regression`; `compare_report_revisions`, `BaselineComparison` | The five comparison states (unchanged, changed, new, missing, inconclusive) are verified; insufficient evidence misclassified as comparable is `FAIL`. | Eval authoritative probe digest and independent SQLite digest. | CONTRACT / 0.5 | Does not claim automatic baseline update or live provider drift. |
+| `eval.regression.regression-detection` | Eval Companion | `eval-regression`; `compare_report_revisions`, `ComparisonOverall` | The hard gate detects pass-to-fail regressions and the quality gate follows policy; a missed regression or a no-change misclassified as regression is `FAIL`. | Eval authoritative probe digest and independent SQLite digest. | CONTRACT / 0.5 | Does not claim subjective quality or external baseline source. |
+| `eval.regression.report-metrics` | Eval Companion | `eval-regression`; `build_report_revision`, `CaseVariantReport`, `summarize_samples` | Repetitions are retained with pass-at-k and justified statistics; an unjustified p95 or a swallowed failure sample is `FAIL`. | Eval authoritative probe digest and independent SQLite digest. | CONTRACT / 0.5 | Does not claim score calibration or cross-model comparison. |
+| `eval.regression.observe-projection` | Eval Companion | `eval-regression`; `EvalObserver`, `ObservationSelection`, `project_observation` | Observe selection is read-only and projection is minimally authorized; an unauthorized field delivered or model dispatch during observe is `FAIL`. | Eval authoritative probe digest and independent SQLite digest. | CONTRACT / 0.5 | Does not claim sampling statistics or live provider observation. |
+| `eval.regression.recommendation-readonly` | Eval Companion | `eval-regression`; `ModelRecommendationRecord`, `RecommendationTarget`, `SQLiteEvalStore` | A recommendation references frozen evidence without mutating stored facts; a stored fact mutation or a tampered recommendation accepted is `FAIL`. | Eval authoritative probe digest and independent SQLite digest. | CONTRACT / 0.5 | Does not claim automatic promotion or routing activation. |
+| `eval.regression.mutation` | Testing | `eval-regression`; `m_agent.testing.reconcile_eval_regression`, `ScenarioEvidenceBundle` | Tampered report, baseline identity, and pass-at-k mutations are all detected; an undetected mutation is a Harness error. | Runtime reconciliation result and independent mutation digest. | CONTRACT / 0.5 | Does not prove external ledger integrity. |
+| `eval.regression.host-wheel` | Testing | Clean external venv; `python -I -m m_agent.testing` | The installed wheel runs every eval regression contract probe in one isolated process; source import or artifact identity mismatch is `FAIL`. | Installed-wheel probe observation digest and independent probe stdout digest. | HOST / 0.5 | Does not prove live provider or production eval store. |
 
 The 0.3 migration table is part of the `core.lifecycle.migration` contract. Its
 complete 0.2 root-export mapping, including `Clock`, is kept in
 [`migrating-to-0.3.md`](migrating-to-0.3.md).
+
+## 0.5 platform matrix
+
+The 0.5 release freezes the cross-platform requirement
+(`FOUNDATION_PLATFORM_MATRIX_0_5`): Linux CPython 3.11, 3.12, 3.13, and 3.14
+carry required CONTRACT evidence; Linux 3.11 is the primary HOST platform
+where the full six-Scenario release profile runs against the installed wheel;
+macOS (darwin) 3.11 and 3.14 carry secondary HOST evidence. Windows is not a
+supported platform and is not declared. A platform cell that a release attempt
+cannot cover is recorded as an honest `NOT_RUN` gap with its evidence source
+— never silently satisfied, and never filled with another platform's or
+another release candidate's evidence (all matrix observations bind the same
+RC artifact digest). A matrix with gaps is `INCOMPLETE`, an observed failure
+is `FAILED`, and only a fully covered matrix is `PASS`.
+
+## 0.5 non-goals
+
+The 0.5 candidate deliberately does not ship automatic promotion: a routing
+recommendation is frozen read-only evidence, and publishing it as a policy is
+an explicit, precondition-checked operator action that only affects future
+routing. It does not ship in-run model switching: a running predecessor is
+never replaced, a successor requires a new routing decision, and fallback
+resolves entirely before any Run is created. It does not ship live provider
+claims: CONTRACT and HOST evidence never establishes live provider behavior,
+and PROVIDER-level qualification remains a separate, credential-gated,
+opt-in verification. It does not claim production capacity, throughput, or
+SLO evidence — the SQLite benchmarks are environment-qualified comparative
+local evidence only. It does not claim exactly-once external effects; durable
+recovery proves no duplicate execution after a crash resume, while external
+side effects remain the application's resolution decision. 0.6 capabilities
+(model catalog governance, automatic policy lifecycle, multi-candidate
+routing) are out of scope for this candidate.
 
 ## 0.4 non-goals
 

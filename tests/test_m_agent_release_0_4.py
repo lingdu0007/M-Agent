@@ -709,9 +709,14 @@ class ContextWorkloadBenchmarkTests(unittest.TestCase):
 class ReleaseMaterialConsistencyTests(unittest.TestCase):
     """0.4 release material agrees with the actual candidate."""
 
-    def test_distribution_version_is_0_4_0(self) -> None:
+    def test_distribution_version_supersedes_the_0_4_candidate(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-        self.assertEqual(project["version"], "0.4.0")
+        current = tuple(int(part) for part in str(project["version"]).split("."))
+        self.assertGreaterEqual(
+            current,
+            (0, 4, 0),
+            "the 0.4 candidate must not be superseded by an older release",
+        )
 
     def test_coverage_matrix_documents_the_0_4_release_rows(self) -> None:
         matrix = (ROOT / "docs/acceptance-coverage-matrix.md").read_text()

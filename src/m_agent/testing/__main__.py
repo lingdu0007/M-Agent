@@ -619,8 +619,24 @@ def _assert_supported_manifest(manifest: AcceptanceManifest) -> None:
         _assert_runtime_baseline_manifest(manifest)
     elif manifest.profile == "foundation-release-0-4":
         _assert_foundation_release_manifest(manifest)
+    elif manifest.profile == "foundation-release-0-5":
+        _assert_foundation_release_0_5_manifest(manifest)
     else:
         raise ValueError(f"unsupported Acceptance Pack profile: {manifest.profile}")
+
+
+def _assert_foundation_release_0_5_manifest(manifest: AcceptanceManifest) -> None:
+    from ._pack import foundation_release_0_5_manifest
+
+    expected = foundation_release_0_5_manifest(
+        source_commit=manifest.source_commit,
+        artifact_digest=manifest.artifact_digest,
+        sdist_digest=manifest.sdist_digest,
+        fixture_digest=manifest.fixture_digest,
+        environment=manifest.environment,
+    )
+    if manifest != expected:
+        raise ValueError("Manifest is not the frozen 0.5 foundation-release profile")
 
 
 def _assert_foundation_release_manifest(manifest: AcceptanceManifest) -> None:
@@ -1077,6 +1093,52 @@ def _attest_release_evidence(
     return authoritative, independent
 
 
+def _attest_release_0_5_evidence(
+    manifest: AcceptanceManifest,
+    results: tuple[AcceptanceCheckResult, ...],
+    evidence_view: Mapping[str, str | int | float | bool | None],
+    independent_evidence: Mapping[str, str | int | float | bool | None],
+    *,
+    host_observation_digest: str,
+    session_host_independent_digest: str,
+    context_host_independent_digest: str,
+    routing_host_independent_digest: str,
+    eval_host_independent_digest: str,
+) -> tuple[
+    dict[str, str | int | float | bool | None],
+    dict[str, str | int | float | bool | None],
+]:
+    """Attach every frozen 0.5 evidence slot to the result it attests.
+
+    Session / Context / Routing / Eval 的 CONTRACT 槽位在进入本函数前已由
+    带前缀的场景证据填充（``session_`` / ``context_`` / ``routing_`` /
+    ``eval_``）；本函数只处理必须绑定 HOST 观察、变异实验或 identity
+    实验的检查。
+    """
+    declared = {check.check_id: check for check in manifest.required_checks}
+    authoritative = dict(evidence_view)
+    independent = dict(independent_evidence)
+    host_bound_slots = {
+        "core.lifecycle": host_observation_digest,
+        "core.lifecycle.unknown-definition": host_observation_digest,
+        "core.lifecycle.public-namespaces": host_observation_digest,
+        "core.lifecycle.dependency-direction": host_observation_digest,
+        "core.lifecycle.host-wheel": independent["host_wheel_identity_mutation_digest"],
+        "core.lifecycle.telemetry-host": independent["telemetry_host_observation_digest"],
+        "core.lifecycle.bundle-tamper": independent["bundle_mutation_independent_digest"],
+        "session.conversation.host-wheel": session_host_independent_digest,
+        "context.compression.host-wheel": context_host_independent_digest,
+        "model.routing.host-wheel": routing_host_independent_digest,
+        "eval.regression.host-wheel": eval_host_independent_digest,
+    }
+    for result in results:
+        check = declared[result.check_id]
+        authoritative[check.authoritative_evidence] = result.evidence_digest
+        if check.check_id in host_bound_slots:
+            independent[check.independent_evidence] = host_bound_slots[check.check_id]
+    return authoritative, independent
+
+
 def _run_foundation_release_0_4(
     arguments: argparse.Namespace, manifest: AcceptanceManifest
 ) -> int:
@@ -1287,6 +1349,241 @@ def _run_foundation_release_0_4(
     return completed.exit_code or 0
 
 
+def _run_foundation_release_0_5(
+    arguments: argparse.Namespace, manifest: AcceptanceManifest
+) -> int:
+    """Execute all six 0.5 Scenarios against one exact wheel-bound execution."""
+    from ._context_compression import run_context_budget_compression
+    from ._eval_regression import run_eval_regression
+    from ._model_routing import run_model_routing
+    from ._release import (
+        CONTEXT_HOST_PROBE,
+        EVAL_REGRESSION_HOST_PROBE,
+        MODEL_ROUTING_HOST_PROBE,
+        SESSION_HOST_PROBE,
+        observe_isolated_scenario_probe,
+    )
+    from ._session_conversation import run_session_conversation
+
+    _assert_foundation_release_0_5_manifest(manifest)
+    prior = _load_run_state(arguments.output_dir, manifest)
+    if prior is not None and prior[1] is not None:
+        execution, bundle = prior
+        assert bundle is not None  # narrowed by the prior[1] check above
+        _publish_bundle(arguments.output_dir, bundle)
+        _clear_run_state(arguments.output_dir)
+        return execution.exit_code or 0
+    execution = (
+        prior[0]
+        if prior is not None
+        else PackExecution.create(
+            manifest, execution_id=f"foundation-release-0-5-{uuid4().hex}"
+        ).start(manifest)
+    )
+    _write_run_state(arguments.output_dir, manifest, execution)
+    try:
+        provenance_digest = assert_sdist_builds_candidate_wheel(
+            arguments.sdist, arguments.wheel
+        )
+    except AcceptanceHarnessError:
+        return _complete_release_host_wheel_terminal(
+            arguments.output_dir, manifest, execution,
+            status=AcceptanceCheckStatus.ERROR,
+            reason_code="supplied_sdist_rebuild_harness_error",
+        )
+    except ValueError:
+        return _complete_release_host_wheel_terminal(
+            arguments.output_dir, manifest, execution,
+            status=AcceptanceCheckStatus.FAIL,
+            reason_code="supplied_sdist_rebuild_failed",
+        )
+
+    core_checks, core_view, core_independent = asyncio.run(
+        run_core_lifecycle(fixture_digest=manifest.fixture_digest)
+    )
+    durable_checks, durable_view, durable_independent = run_durable_effects_recovery()
+    session_checks, session_view, session_independent = run_session_conversation()
+    context_checks, context_view, context_independent = (
+        run_context_budget_compression()
+    )
+    routing_checks, routing_view, routing_independent = run_model_routing()
+    eval_checks, eval_view, eval_independent = run_eval_regression()
+    host_results, host_evidence = _isolated_host_result()
+    host_wheel_identity_mutation_digest = _controlled_identity_mutation_evidence(
+        manifest, artifact=arguments.wheel, sdist=arguments.sdist
+    )
+    durable_host = _durable_host_result(durable_checks, durable_view, provenance_digest)
+    durable_checks = tuple(
+        durable_host if result.check_id == durable_host.check_id else result
+        for result in durable_checks
+    )
+    session_host, session_host_evidence = observe_isolated_scenario_probe(
+        probe_source=SESSION_HOST_PROBE,
+        check_id="session.conversation.host-wheel",
+    )
+    context_host, context_host_evidence = observe_isolated_scenario_probe(
+        probe_source=CONTEXT_HOST_PROBE,
+        check_id="context.compression.host-wheel",
+    )
+    routing_host, routing_host_evidence = observe_isolated_scenario_probe(
+        probe_source=MODEL_ROUTING_HOST_PROBE,
+        check_id="model.routing.host-wheel",
+    )
+    eval_host, eval_host_evidence = observe_isolated_scenario_probe(
+        probe_source=EVAL_REGRESSION_HOST_PROBE,
+        check_id="eval.regression.host-wheel",
+    )
+
+    def wheel_bound(
+        result: AcceptanceCheckResult
+    ) -> AcceptanceCheckResult:
+        return result.model_copy(
+            update={
+                "evidence_digest": _evidence_digest({
+                    "host": result.evidence_digest,
+                    "provenance_digest": provenance_digest,
+                })
+            }
+        )
+
+    session_host = wheel_bound(session_host)
+    context_host = wheel_bound(context_host)
+    routing_host = wheel_bound(routing_host)
+    eval_host = wheel_bound(eval_host)
+    host_results = tuple(wheel_bound(result) for result in host_results)
+
+    required_ids = {check.check_id for check in manifest.required_checks}
+    core_checks = tuple(result for result in core_checks if result.check_id in required_ids)
+    durable_checks = tuple(
+        result for result in durable_checks if result.check_id in required_ids
+    )
+    session_checks = tuple(
+        result for result in session_checks if result.check_id in required_ids
+    )
+    context_checks = tuple(
+        result for result in context_checks if result.check_id in required_ids
+    )
+    routing_checks = tuple(
+        result for result in routing_checks if result.check_id in required_ids
+    )
+    eval_checks = tuple(result for result in eval_checks if result.check_id in required_ids)
+
+    def prefixed(
+        view: Mapping[str, str | int | bool], prefix: str
+    ) -> dict[str, str | int | bool]:
+        return {f"{prefix}_{key}": value for key, value in view.items()}
+
+    session_evidence_view = prefixed(session_view, "session")
+    context_evidence_view = prefixed(context_view, "context")
+    routing_evidence_view = prefixed(routing_view, "routing")
+    eval_evidence_view = prefixed(eval_view, "eval")
+    session_independent_view = prefixed(session_independent, "session")
+    context_independent_view = prefixed(context_independent, "context")
+    routing_independent_view = prefixed(routing_independent, "routing")
+    eval_independent_view = prefixed(eval_independent, "eval")
+
+    bundle_check = next(
+        check for check in manifest.required_checks if check.check_id == "core.lifecycle.bundle-tamper"
+    )
+    provisional_bundle_result = AcceptanceCheckResult(
+        check_id=bundle_check.check_id,
+        status=AcceptanceCheckStatus.PASS,
+        evidence_level=bundle_check.evidence_level,
+        reason_code="bundle_mutation_detected",
+        evidence_digest=_evidence_digest({"manifest": manifest.digest, "mutation": True}),
+    )
+    checks_without_bundle = (
+        *core_checks,
+        *host_results,
+        *durable_checks,
+        *session_checks,
+        session_host,
+        *context_checks,
+        context_host,
+        *routing_checks,
+        routing_host,
+        *eval_checks,
+        eval_host,
+    )
+    provisional_results = (*checks_without_bundle, provisional_bundle_result)
+    provisional_execution = execution.complete(manifest, provisional_results)
+    evidence_view: dict[str, str | int | float | bool | None] = {
+        **core_view,
+        **durable_view,
+        **session_evidence_view,
+        **context_evidence_view,
+        **routing_evidence_view,
+        **eval_evidence_view,
+        "host_wheel_sdist_rebuild_matches": True,
+        "host_wheel_identity_mismatches_rejected": True,
+        "host_wheel_sdist_provenance_digest": provenance_digest,
+    }
+    independent_evidence: dict[str, str | int | float | bool | None] = {
+        **core_independent,
+        **durable_independent,
+        **host_evidence,
+        **session_independent_view,
+        **context_independent_view,
+        **routing_independent_view,
+        **eval_independent_view,
+        "host_wheel_independent_digest": host_evidence["host_observation_digest"],
+        "telemetry_host_independent_digest": host_evidence["telemetry_host_observation_digest"],
+        "durable_host_independent_digest": durable_independent["recovery_windows_journal_digest"],
+        "migration_table_digest": _evidence_digest({"migration": "0.5-release"}),
+        "host_wheel_identity_mutation_digest": host_wheel_identity_mutation_digest,
+        "bundle_tamper_independent_digest": _evidence_digest({"mutation": True}),
+        "bundle_mutation_independent_digest": _evidence_digest({"mutation": True}),
+    }
+    evidence_view, independent_evidence = _attest_release_0_5_evidence(
+        manifest, provisional_results, evidence_view, independent_evidence,
+        host_observation_digest=str(host_evidence["host_observation_digest"]),
+        session_host_independent_digest=str(session_host_evidence["probe_stdout_digest"]),
+        context_host_independent_digest=str(context_host_evidence["probe_stdout_digest"]),
+        routing_host_independent_digest=str(routing_host_evidence["probe_stdout_digest"]),
+        eval_host_independent_digest=str(eval_host_evidence["probe_stdout_digest"]),
+    )
+    provisional_core_bundle = ScenarioEvidenceBundle.create(
+        manifest=manifest, execution=provisional_execution,
+        execution_checks=provisional_results, scenario="core-lifecycle",
+        checks=tuple(result for result in provisional_results if result.check_id.startswith("core.lifecycle")),
+        evidence_view=evidence_view, independent_evidence=independent_evidence,
+    )
+    mutation_digest, mutation_independent_digest = _controlled_bundle_mutation_evidence(
+        provisional_core_bundle, manifest, provisional_execution
+    )
+    final_results = tuple(
+        provisional_bundle_result.model_copy(update={"evidence_digest": mutation_digest})
+        if result.check_id == provisional_bundle_result.check_id else result
+        for result in provisional_results
+    )
+    completed = execution.complete(manifest, final_results)
+    independent_evidence["bundle_tamper_independent_digest"] = mutation_independent_digest
+    evidence_view, independent_evidence = _attest_release_0_5_evidence(
+        manifest, final_results, evidence_view, independent_evidence,
+        host_observation_digest=str(host_evidence["host_observation_digest"]),
+        session_host_independent_digest=str(session_host_evidence["probe_stdout_digest"]),
+        context_host_independent_digest=str(context_host_evidence["probe_stdout_digest"]),
+        routing_host_independent_digest=str(routing_host_evidence["probe_stdout_digest"]),
+        eval_host_independent_digest=str(eval_host_evidence["probe_stdout_digest"]),
+    )
+    declared_by_id = {check.check_id: check for check in manifest.required_checks}
+    for scenario in manifest.scenarios:
+        scenario_results = tuple(
+            result for result in final_results
+            if declared_by_id[result.check_id].scenario == scenario
+        )
+        bundle = ScenarioEvidenceBundle.create(
+            manifest=manifest, execution=completed,
+            execution_checks=final_results, scenario=scenario,
+            checks=scenario_results, evidence_view=evidence_view,
+            independent_evidence=independent_evidence,
+        )
+        _publish_bundle(arguments.output_dir, bundle)
+    _write_run_state(arguments.output_dir, manifest, completed)
+    _clear_run_state(arguments.output_dir)
+    return completed.exit_code or 0
+
+
 def _run_runtime_baseline(
     arguments: argparse.Namespace, manifest: AcceptanceManifest
 ) -> int:
@@ -1437,6 +1734,8 @@ def _run(arguments: argparse.Namespace) -> int:
         return _run_runtime_baseline(arguments, manifest)
     if manifest.profile == "foundation-release-0-4":
         return _run_foundation_release_0_4(arguments, manifest)
+    if manifest.profile == "foundation-release-0-5":
+        return _run_foundation_release_0_5(arguments, manifest)
     _assert_core_lifecycle_manifest(manifest)
     prior = _load_run_state(arguments.output_dir, manifest)
     if prior is not None and prior[1] is not None:

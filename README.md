@@ -1,6 +1,6 @@
 # M-Agent
 
-M-Agent 0.4.0 is an embeddable Agent Application Runtime for Python. Install
+M-Agent 0.5.0 is an embeddable Agent Application Runtime for Python. Install
 the `m-agent` distribution and import `m_agent`.
 
 ```bash
@@ -84,6 +84,32 @@ Run the offline demonstration:
 python examples/m_agent_session_context.py
 ```
 
+## Deterministic Model Routing and Eval Regression
+
+The 0.5 candidate completes the Runtime Foundation. `m_agent.companion.routing`
+adds deterministic model routing: typed capability and contract-limit matching,
+operational-limits gating with fail-closed unknown handling, declared usage
+cost estimation, hard deployment constraints, six inspectable selection
+outcomes, pre-run fallback, immutable run-bound decisions in
+`SQLiteRoutingStore`, and explicit recommendation-to-policy promotion —
+never automatic promotion, and never in-run model switching. 
+`m_agent.companion.eval` adds the durable eval regression harness: a
+crash-resumable `EvalExecutionEngine` over an append-only `SQLiteEvalStore`,
+judge isolation, five-state baseline comparison, hard-gate regression
+detection, pass-at-k report statistics with justified percentiles, read-only
+observation projection, and read-only model recommendations. Run the offline
+demonstrations:
+
+```bash
+python examples/m_agent_routing_eval.py
+```
+
+The 0.5 release profile `foundation-release-0-5` reruns all prior Scenarios
+(core lifecycle, durable effects, session conversation, context compression)
+under one release-candidate identity and adds the model routing and eval
+regression Scenarios with CONTRACT and HOST evidence. See
+[the Acceptance Coverage Matrix](docs/acceptance-coverage-matrix.md).
+
 ## Evidence Boundaries
 
 - The deterministic fake adapters and flagship example are offline demonstrations; they do not establish provider compatibility.
@@ -93,9 +119,10 @@ python examples/m_agent_session_context.py
 ## Python and Migration
 
 Supported Python is 3.11 or newer. CONTRACT coverage targets Linux Python
-3.11-3.14; HOST evidence is Linux Python 3.11. macOS and Windows gaps are
-recorded in the Coverage Matrix, and Windows is not supported. The 0.1
-`agent_framework` path is removed in 0.4.0; see [the migration table](docs/migrating-to-0.3.md).
+3.11-3.14; HOST evidence is Linux Python 3.11 (primary) plus macOS Python
+3.11 and 3.14 (secondary). Windows is not supported and is not declared in
+the frozen platform matrix. The 0.1 `agent_framework` path is removed in
+0.4.0; see [the migration table](docs/migrating-to-0.3.md).
 
 ## Project Material
 

@@ -1407,6 +1407,455 @@ def foundation_release_0_4_manifest(
     )
 
 
+FOUNDATION_RELEASE_0_5_PACK_VERSION = "foundation-release-0-5-v1"
+FOUNDATION_RELEASE_0_5_PROFILE = "foundation-release-0-5"
+
+# ADR 0042：0.5 发布 profile 在同一 RC 身份下重跑全部四个既有 required
+# Scenario 并新增 model-routing 与 eval-regression 场景。routing / eval
+# 检查相对单场景 Manifest 使用带前缀的证据槽位（``routing_`` /
+# ``eval_``），避免与 durable 检查的同名槽位（如
+# ``mutation_authoritative_digest``）在合并后的 Evidence View 中发生
+# 覆盖——这是发布 profile 的冻结声明，不回写单场景 Manifest。
+_RELEASE_0_5_MODEL_ROUTING_CHECKS = (
+    AcceptanceCheck(
+        check_id="model.routing.typed-capability",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.ModelRouter,"
+            "m_agent.runtime.ModelRequirements"
+        ),
+        positive_check=(
+            "typed_capability_and_contract_limits_filter_with_inspectable_reasons"
+        ),
+        negative_check="capability_or_limit_mismatch_silently_admitted_is_fail",
+        authoritative_evidence="routing_typed_capability_authoritative_digest",
+        independent_evidence="routing_typed_capability_independent_digest",
+        milestone="0_5",
+        non_claim="live_provider_capability_behavior",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.operational-limits",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.OperationalLimitsGate,"
+            "m_agent.companion.routing.OperationalLimitsSnapshot"
+        ),
+        positive_check=(
+            "limits_floor_unknown_missing_stale_and_integrity_paths_all"
+            "_resolved_with_stable_codes"
+        ),
+        negative_check=(
+            "unknown_limits_treated_as_sufficient_or_stale_as_healthy_is_fail"
+        ),
+        authoritative_evidence="routing_operational_limits_authoritative_digest",
+        independent_evidence="routing_operational_limits_independent_digest",
+        milestone="0_5",
+        non_claim="live_quota_probing_or_enforcement",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.usage-cost",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.estimate_run_cost,"
+            "m_agent.companion.routing.RunCostPolicy"
+        ),
+        positive_check=(
+            "declared_formula_usage_provenance_and_gaps_without"
+            "_fabricated_precision"
+        ),
+        negative_check=(
+            "fabricated_estimate_or_settlement_guarantee_claim_is_fail"
+        ),
+        authoritative_evidence="routing_usage_cost_authoritative_digest",
+        independent_evidence="routing_usage_cost_independent_digest",
+        milestone="0_5",
+        non_claim="billing_settlement_or_provider_invoice_accuracy",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.deployment-constraints",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.DeploymentConstraints,"
+            "m_agent.companion.routing.ModelCatalogEntry"
+        ),
+        positive_check=(
+            "provider_region_endpoint_and_retention_constraints_match_hard"
+            "_with_unknown_failing_closed"
+        ),
+        negative_check="unknown_or_disallowed_attribute_admitted_is_fail",
+        authoritative_evidence="routing_deployment_constraints_authoritative_digest",
+        independent_evidence="routing_deployment_constraints_independent_digest",
+        milestone="0_5",
+        non_claim="credential_or_sensitive_endpoint_configuration",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.six-outcomes",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam="m_agent.companion.routing.ModelRouter.select",
+        positive_check=(
+            "all_six_resolved_outcomes_observed_with_inspectable_reason"
+            "_codes"
+        ),
+        negative_check="unresolved_or_silent_outcome_is_fail",
+        authoritative_evidence="routing_six_outcomes_authoritative_digest",
+        independent_evidence="routing_six_outcomes_independent_digest",
+        milestone="0_5",
+        non_claim="probabilistic_or_learning_based_routing",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.fallback",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.execute_pre_run_fallback,"
+            "m_agent.companion.routing.FallbackSequence"
+        ),
+        positive_check=(
+            "frozen_sequence_bounded_attempts_and_inspectable_reasons"
+            "_before_any_run_creation"
+        ),
+        negative_check=(
+            "unbounded_or_unregistered_or_duplicate_identity_sequence_is_fail"
+        ),
+        authoritative_evidence="routing_fallback_authoritative_digest",
+        independent_evidence="routing_fallback_independent_digest",
+        milestone="0_5",
+        non_claim="in_run_model_switching",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.zero-side-effect",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam="m_agent.companion.routing.ModelRouter.select",
+        positive_check=(
+            "success_and_failure_paths_leave_evidence_catalog_and_policy"
+            "_digests_unchanged"
+        ),
+        negative_check="mutated_input_snapshot_or_hidden_dispatch_is_fail",
+        authoritative_evidence="routing_zero_side_effect_authoritative_digest",
+        independent_evidence="routing_zero_side_effect_independent_digest",
+        milestone="0_5",
+        non_claim="telemetry_or_diagnostic_side_channels",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.immutable-decision",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.SQLiteRoutingStore,"
+            "m_agent.companion.routing.bind_decision_to_run"
+        ),
+        positive_check=(
+            "deterministic_decision_id_idempotent_replay_conflict_failure"
+            "_and_reopen_without_recomputation"
+        ),
+        negative_check=(
+            "rewritten_history_or_recomputed_decision_on_recovery_is_fail"
+        ),
+        authoritative_evidence="routing_immutable_decision_authoritative_digest",
+        independent_evidence="routing_immutable_decision_independent_digest",
+        milestone="0_5",
+        non_claim="distributed_or_cross_process_store_contention",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.no-in-run-switch",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.register_replacement_run,"
+            "m_agent.companion.routing.RoutingReplacementError"
+        ),
+        positive_check=(
+            "running_predecessor_never_replaced_and_successor_requires_a"
+            "_new_decision"
+        ),
+        negative_check=(
+            "in_run_variant_switch_or_decision_reuse_masquerading_as_retry"
+            "_is_fail"
+        ),
+        authoritative_evidence="routing_no_in_run_switch_authoritative_digest",
+        independent_evidence="routing_no_in_run_switch_independent_digest",
+        milestone="0_5",
+        non_claim="automatic_failure_recovery_or_retry_policy",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.explicit-promotion",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.publish_recommendation_as_policy,"
+            "m_agent.companion.routing.register_variant_for_policy"
+        ),
+        positive_check=(
+            "publication_preconditions_fail_closed_and_published_policy"
+            "_only_affects_future_routing"
+        ),
+        negative_check=(
+            "unpublished_recommendation_visible_or_base_policy_rewritten_is"
+            "_fail"
+        ),
+        authoritative_evidence="routing_explicit_promotion_authoritative_digest",
+        independent_evidence="routing_explicit_promotion_independent_digest",
+        milestone="0_5",
+        non_claim="automatic_promotion_or_baseline_rerun",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.mutation",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Testing",
+        public_seam=(
+            "m_agent.testing.reconcile_model_routing,"
+            "m_agent.testing.ScenarioEvidenceBundle"
+        ),
+        positive_check=(
+            "every_flipped_scenario_observation_boolean_is_detected_by"
+            "_reconciliation"
+        ),
+        negative_check="undetected_mutation_is_harness_error",
+        authoritative_evidence="routing_mutation_authoritative_digest",
+        independent_evidence="routing_mutation_independent_digest",
+        milestone="0_5",
+        non_claim="external_ledger_integrity",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.host-wheel",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam="python -I -m m_agent.testing",
+        positive_check=(
+            "installed_wheel_runs_every_model_routing_contract_probe"
+        ),
+        negative_check="source_import_or_artifact_identity_mismatch_is_fail",
+        authoritative_evidence="routing_host_authoritative_digest",
+        independent_evidence="routing_host_independent_digest",
+        milestone="0_5",
+        non_claim="live_provider_routing_or_quota_enforcement",
+        evidence_level=EvidenceLevel.HOST,
+    ),
+)
+
+_RELEASE_0_5_EVAL_REGRESSION_CHECKS = (
+    AcceptanceCheck(
+        check_id="eval.regression.durable-recovery",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.EvalExecutionEngine.run_suite,"
+            "m_agent.companion.eval.EvalExecutionEngine.resume_execution,"
+            "m_agent.companion.eval.SQLiteEvalStore"
+        ),
+        positive_check=(
+            "crash_resume_completes_remaining_items_without_rerunning_completed_units"
+        ),
+        negative_check="duplicate_execution_or_rerun_of_completed_units_is_fail",
+        authoritative_evidence="eval_durable_recovery_authoritative_digest",
+        independent_evidence="eval_durable_recovery_sqlite_digest",
+        milestone="0_5",
+        non_claim="live_provider_or_production_eval_store",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.judge-isolation",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.EvalExecutionEngine,"
+            "m_agent.companion.eval.JudgeRunExecutor"
+        ),
+        positive_check=(
+            "judge_uses_dedicated_run_store_and_results_are_append_only_reused"
+        ),
+        negative_check="judge_sharing_subject_store_or_rerun_is_fail",
+        authoritative_evidence="eval_judge_isolation_authoritative_digest",
+        independent_evidence="eval_judge_isolation_sqlite_digest",
+        milestone="0_5",
+        non_claim="judge_quality_or_live_model_behavior",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.baseline-comparison",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.compare_report_revisions,"
+            "m_agent.companion.eval.BaselineComparison"
+        ),
+        positive_check=(
+            "five_state_comparison_unchanged_changed_new_missing_inconclusive"
+        ),
+        negative_check="insufficient_evidence_misclassified_as_comparable_is_fail",
+        authoritative_evidence="eval_baseline_comparison_authoritative_digest",
+        independent_evidence="eval_baseline_comparison_sqlite_digest",
+        milestone="0_5",
+        non_claim="automatic_baseline_update_or_live_provider_drift",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.regression-detection",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.compare_report_revisions,"
+            "m_agent.companion.eval.ComparisonOverall"
+        ),
+        positive_check=(
+            "hard_gate_regression_pass_to_fail_detected_and_quality_regression_by_policy"
+        ),
+        negative_check="regression_missed_or_no_change_misclassified_as_regression_is_fail",
+        authoritative_evidence="eval_regression_detection_authoritative_digest",
+        independent_evidence="eval_regression_detection_sqlite_digest",
+        milestone="0_5",
+        non_claim="subjective_quality_or_external_baseline_source",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.report-metrics",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.build_report_revision,"
+            "m_agent.companion.eval.CaseVariantReport,"
+            "m_agent.companion.eval.summarize_samples"
+        ),
+        positive_check=(
+            "repetitions_retained_with_pass_at_k_and_justified_statistics"
+        ),
+        negative_check="unjustified_p95_or_swallowed_failure_sample_is_fail",
+        authoritative_evidence="eval_report_metrics_authoritative_digest",
+        independent_evidence="eval_report_metrics_sqlite_digest",
+        milestone="0_5",
+        non_claim="score_calibration_or_cross_model_comparison",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.observe-projection",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.EvalObserver,"
+            "m_agent.companion.eval.ObservationSelection,"
+            "m_agent.companion.eval.project_observation"
+        ),
+        positive_check=(
+            "observe_selection_is_read_only_and_projection_minimally_authorized"
+        ),
+        negative_check=(
+            "unauthorized_field_delivered_or_model_dispatch_during"
+            "_observe_is_fail"
+        ),
+        authoritative_evidence="eval_observe_projection_authoritative_digest",
+        independent_evidence="eval_observe_projection_sqlite_digest",
+        milestone="0_5",
+        non_claim="sampling_statistics_or_live_provider_observation",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.recommendation-readonly",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam=(
+            "m_agent.companion.eval.ModelRecommendationRecord,"
+            "m_agent.companion.eval.RecommendationTarget,"
+            "m_agent.companion.eval.SQLiteEvalStore"
+        ),
+        positive_check=(
+            "recommendation_references_frozen_evidence_without"
+            "_mutating_stored_facts"
+        ),
+        negative_check=(
+            "stored_fact_mutation_or_tampered_recommendation"
+            "_accepted_is_fail"
+        ),
+        authoritative_evidence="eval_recommendation_authoritative_digest",
+        independent_evidence="eval_recommendation_sqlite_digest",
+        milestone="0_5",
+        non_claim="automatic_promotion_or_routing_activation",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.mutation",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Testing",
+        public_seam=(
+            "m_agent.testing.reconcile_eval_regression,"
+            "m_agent.testing.ScenarioEvidenceBundle"
+        ),
+        positive_check=(
+            "tampered_report_baseline_identity_and_pass_at_k_mutations_all_detected"
+        ),
+        negative_check="undetected_mutation_is_harness_error",
+        authoritative_evidence="eval_mutation_authoritative_digest",
+        independent_evidence="eval_mutation_independent_digest",
+        milestone="0_5",
+        non_claim="external_ledger_integrity",
+    ),
+    AcceptanceCheck(
+        check_id="eval.regression.host-wheel",
+        scenario=EVAL_REGRESSION_SCENARIO,
+        owner="Eval Companion",
+        public_seam="python -I -m m_agent.testing",
+        positive_check=(
+            "installed_wheel_runs_every_eval_regression_contract_probe"
+        ),
+        negative_check="source_import_or_artifact_identity_mismatch_is_fail",
+        authoritative_evidence="eval_host_authoritative_digest",
+        independent_evidence="eval_host_independent_digest",
+        milestone="0_5",
+        non_claim="live_provider_or_production_eval_store",
+        evidence_level=EvidenceLevel.HOST,
+    ),
+)
+
+
+def foundation_release_0_5_manifest(
+    *,
+    source_commit: str,
+    artifact_digest: str,
+    sdist_digest: str,
+    fixture_digest: str,
+    environment: Mapping[str, str],
+) -> AcceptanceManifest:
+    """Freeze the six required 0.5 Scenarios for one exact RC candidate.
+
+    0.3/0.4 基线（``core-lifecycle``、``durable-effects-recovery``、
+    ``session-conversation``、``context-budget-compression``）在同一 RC
+    身份下原样重跑；``model-routing`` 与 ``eval-regression`` 追加
+    CONTRACT 与 HOST required 证据。不同 RC（artifact / sdist digest 或
+    环境不同）的 Manifest digest 必然不同，任何旧 RC Bundle 都无法通过
+    本 Manifest 的执行验证。
+    """
+    core_checks = tuple(
+        _RUNTIME_BASELINE_MIGRATION_CHECK
+        if check.check_id == "core.lifecycle.expand-compatibility"
+        else check
+        for check in _CORE_LIFECYCLE_REQUIRED_CHECKS
+    )
+    return AcceptanceManifest(
+        pack_version=FOUNDATION_RELEASE_0_5_PACK_VERSION,
+        profile=FOUNDATION_RELEASE_0_5_PROFILE,
+        source_commit=source_commit,
+        artifact_digest=artifact_digest,
+        sdist_digest=sdist_digest,
+        fixture_digest=fixture_digest,
+        environment=environment,
+        scenarios=(
+            CORE_LIFECYCLE_SCENARIO,
+            DURABLE_EFFECTS_SCENARIO,
+            SESSION_CONVERSATION_SCENARIO,
+            CONTEXT_COMPRESSION_SCENARIO,
+            MODEL_ROUTING_SCENARIO,
+            EVAL_REGRESSION_SCENARIO,
+        ),
+        required_checks=(
+            *core_checks,
+            *_DURABLE_EFFECTS_REQUIRED_CHECKS,
+            *_RELEASE_0_4_SESSION_CHECKS,
+            *_RELEASE_0_4_CONTEXT_CHECKS,
+            *_RELEASE_0_5_MODEL_ROUTING_CHECKS,
+            *_RELEASE_0_5_EVAL_REGRESSION_CHECKS,
+        ),
+        required_cli_commands=("run", "inspect", "verify", "render"),
+    )
+
+
 class PackExecution(BaseModel, frozen=True):
     """An execution bound to exactly one Manifest identity."""
 

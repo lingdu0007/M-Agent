@@ -84,6 +84,53 @@ or production QPS, latency, scalability, availability, or capacity claims.
 
 ---
 
+# Durable Eval regression workload benchmark
+
+Run the benchmark from the repository root:
+
+```bash
+uv run python benchmarks/eval_workload.py \
+  --database benchmarks/results/eval-workload-local.sqlite \
+  --json-output benchmarks/results/eval-workload-local.json
+```
+
+The command refuses to overwrite an existing database. It executes one
+frozen offline Suite of 20 sequential items through the public
+`EvalExecutionEngine.run_suite` API: every item dispatches exactly one
+deterministic subject Run (a dedicated `InMemoryRunStore`, documented: the
+measured persistence boundary is the append-only `SQLiteEvalStore`) and one
+hard `OutputMatchesEvaluator`. No credentials, provider clients, network
+services, or external databases are used.
+
+Before calculating metrics, the command validates the execution: preserved
+execution identity, exactly one observation and one evaluator result per
+item, all `PASS` outcomes, recorded result completions inside the measured
+interval, expected SQLite row counts (`eval_executions = 1`,
+`eval_observations` = `eval_execution_observations` =
+`eval_evaluator_results` = item count), and a successful
+`integrity_check`. Validation failure exits nonzero and emits no `metrics`
+object or apparently valid performance numbers.
+
+The measured interval is the wall clock of the single `run_suite` call
+(sequential items). Validation and inspection are excluded. Per-item latency
+is the completion interval between consecutive recorded evaluator results
+(the engine executes items sequentially; the first item is measured from the
+interval start). Per-item persistence overhead is the summed wall time of
+`record_observation` and `record_evaluator_result` attributed to each
+completed item (timed via the `TimedSQLiteEvalStore` subclass). SQLite
+schema initialization occurs before measurement; warmup is therefore reported
+as zero items. The report also records Python, OS, CPU, the database path,
+journal/synchronous settings, and the exact measurement definition. Baseline
+comparison (`compare_with_baseline`) reports relative change only for
+identical artifact/manifest identity, identical Python/OS/CPU, identical
+item counts, and passing validation on both sides; every other case is
+`INCONCLUSIVE`.
+
+Results are comparative local evidence only. They are not universal thresholds
+or production QPS, latency, scalability, availability, or capacity claims.
+
+---
+
 # Explicit Context compression workload benchmark
 
 Run the benchmark from the repository root:
