@@ -9,8 +9,10 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, NoReturn
+from typing import TYPE_CHECKING, Mapping, NoReturn
 from uuid import uuid4
 
 from ._core_lifecycle import run_core_lifecycle
@@ -27,15 +29,63 @@ from ._pack import (
     AcceptanceManifest,
     BundleIntegrityError,
     EXIT_HARNESS_ERROR,
+    EXIT_INCOMPLETE,
     EXIT_INTEGRITY_FAILURE,
     EXIT_INVALID_INVOCATION,
+    EXIT_SUCCESS,
     EvidenceLevel,
     PackExecution,
     PackExecutionStatus,
     ScenarioEvidenceBundle,
     core_lifecycle_manifest,
 )
+from ._provider_qualification import (
+    PROVIDER_CREDENTIAL_ENV_NAMES,
+    PROVIDER_ENDPOINT_ALIASES,
+    ProviderCaseBinding,
+    ProviderCaseRecord,
+    ProviderReportRewriteError,
+    ProviderVerificationAuthorization,
+    ProviderVerificationReport,
+    ProviderVerificationStatus,
+    assert_provider_evidence_sanitized,
+    provider_capability_matrix,
+    provider_verification_authorization,
+    verify_provider_capability_case,
+)
 from ._subprocess import isolated_subprocess_environment
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from typing import Protocol
+
+    from m_agent.runtime import (
+        ModelCapabilities,
+        ModelContract,
+        ModelDelta,
+        ModelRequest,
+        ModelResponse,
+    )
+
+    class _ProviderQualificationAdapter(Protocol):
+        """资格验证 harness 依赖的官方 live Adapter 结构表面。"""
+
+        model: str
+        requests: list[str]
+        capabilities: ModelCapabilities
+
+        @property
+        def model_contract(self) -> ModelContract: ...
+
+        def definition_contract_fingerprint(self) -> str: ...
+
+        async def generate(self, request: ModelRequest) -> ModelResponse: ...
+
+        def stream(
+            self, request: ModelRequest
+        ) -> AsyncIterator[ModelDelta | ModelResponse]: ...
+
+        async def aclose(self) -> None: ...
 
 
 _ISOLATED_HOST_PROBE = """
@@ -1727,6 +1777,412 @@ def _render(arguments: argparse.Namespace) -> int:
     return 0
 
 
+# -- Ticket 21：RC 的 live provider 资格验证（默认零 live request） --------
+
+#: 资格探针 Contract 声明的 Limits：declared_limits 案例验证 provider
+#: 用量不超过这些声明值。
+_PROVIDER_QUALIFICATION_CONTEXT_TOKENS = 1_000_000
+_PROVIDER_QUALIFICATION_MAX_OUTPUT_TOKENS = 4_096
+_PROVIDER_QUALIFICATION_INSTRUCTIONS = (
+    "You are the provider qualification probe for a release candidate."
+)
+_PROVIDER_QUALIFICATION_INPUT = (
+    "Release candidate provider qualification probe. "
+    "Reply with the single word: pong"
+)
+_PROVIDER_QUALIFICATION_STRUCTURED_INPUT = (
+    'Return a JSON object exactly like {"status": "ok"} and nothing else.'
+)
+_PROVIDER_QUALIFICATION_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"status": {"type": "string", "enum": ["ok"]}},
+    "required": ["status"],
+    "additionalProperties": False,
+}
+
+
+def _provider_qualification_environment(
+    endpoint_aliases: frozenset[str],
+) -> dict[str, tuple["_ProviderQualificationAdapter", "ModelContract"]]:
+    """离线构造官方 live Adapter 并冻结其资格验证 Contract。
+
+    构造不发任何请求、不读取凭证值；adapter 配置指纹与 Contract 指纹
+    在此成为 RC 验证结果的绑定身份（其他 wheel / 其他配置的指纹无法
+    伪造成这里的身份）。
+    """
+    from m_agent.adapters.provider import (
+        ChatCompletionsModelAdapter,
+        ResponsesModelAdapter,
+    )
+    from m_agent.runtime import (
+        ModelContract,
+        ModelLimits,
+        ModelUsageGuarantees,
+        RevisionStability,
+        UsageFieldGuarantee,
+    )
+
+    adapter_classes = {
+        "openai-chat-completions": ChatCompletionsModelAdapter,
+        "openai-responses": ResponsesModelAdapter,
+    }
+    environments: dict[
+        str, tuple[_ProviderQualificationAdapter, ModelContract]
+    ] = {}
+    for alias in sorted(endpoint_aliases):
+        adapter_class = adapter_classes[alias]
+        seed = adapter_class(
+            structured_output_schema=dict(_PROVIDER_QUALIFICATION_SCHEMA),
+        )
+        contract = ModelContract(
+            contract_id=f"provider-qualification-{alias}",
+            version="1",
+            revision_stability=RevisionStability.PROVIDER_ALIAS,
+            model_identity=seed.model,
+            capabilities=seed.capabilities,
+            limits=ModelLimits(
+                context_window_tokens=_PROVIDER_QUALIFICATION_CONTEXT_TOKENS,
+                max_output_tokens=_PROVIDER_QUALIFICATION_MAX_OUTPUT_TOKENS,
+            ),
+            input_sizer_id=f"provider-qualification-{alias}-v1",
+            serialization_id=f"provider-qualification-{alias}-wire-v1",
+            usage_guarantees=ModelUsageGuarantees(
+                input_tokens=UsageFieldGuarantee.REQUIRED,
+                output_tokens=UsageFieldGuarantee.REQUIRED,
+            ),
+            configuration_fingerprint=seed.definition_contract_fingerprint(),
+        )
+        adapter = adapter_class(
+            structured_output_schema=dict(_PROVIDER_QUALIFICATION_SCHEMA),
+            model_contract=contract,
+        )
+        environments[alias] = (adapter, adapter.model_contract)
+    return environments
+
+
+def _provider_capability_probe(
+    adapter: "_ProviderQualificationAdapter",
+    contract: "ModelContract",
+    capability_case: str,
+) -> tuple[Callable[[], Awaitable[object]], Callable[[object], None]]:
+    """为一个 capability case 构建 (dispatch, assertion) 探针。"""
+    from m_agent.runtime import (
+        ModelDelta,
+        ModelRequest,
+        ModelResponse,
+        StructuredOutputMode,
+        UsageReportingMode,
+    )
+
+    def text_request() -> ModelRequest:
+        return ModelRequest(
+            input=_PROVIDER_QUALIFICATION_INPUT,
+            instructions=_PROVIDER_QUALIFICATION_INSTRUCTIONS,
+            usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+        )
+
+    if capability_case == "text_behavior":
+        request = ModelRequest(
+            input=_PROVIDER_QUALIFICATION_INPUT,
+            instructions=_PROVIDER_QUALIFICATION_INSTRUCTIONS,
+        )
+
+        async def dispatch_text() -> object:
+            return await adapter.generate(request)
+
+        def assert_text(observation: object) -> None:
+            if not isinstance(observation, ModelResponse) or not (
+                observation.content and observation.content.strip()
+            ):
+                raise AssertionError("provider text behavior is empty")
+
+        return dispatch_text, assert_text
+
+    if capability_case == "structured_mode":
+        request = ModelRequest(
+            input=_PROVIDER_QUALIFICATION_STRUCTURED_INPUT,
+            instructions=_PROVIDER_QUALIFICATION_INSTRUCTIONS,
+            structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+        )
+
+        async def dispatch_structured() -> object:
+            return await adapter.generate(request)
+
+        def assert_structured(observation: object) -> None:
+            if not isinstance(observation, ModelResponse):
+                raise AssertionError("structured mode returned no response")
+            try:
+                payload = json.loads(observation.content or "")
+            except json.JSONDecodeError as error:
+                raise AssertionError(
+                    "structured output is not valid JSON"
+                ) from error
+            if not isinstance(payload, dict) or payload.get("status") != "ok":
+                raise AssertionError(
+                    "structured output violated the probe schema"
+                )
+
+        return dispatch_structured, assert_structured
+
+    if capability_case == "streaming":
+        request = text_request()
+
+        async def dispatch_streaming() -> object:
+            deltas = 0
+            final: ModelResponse | None = None
+            async for event in adapter.stream(request):
+                if isinstance(event, ModelDelta):
+                    deltas += 1
+                else:
+                    final = event
+            return deltas, final
+
+        def assert_streaming(observation: object) -> None:
+            if not isinstance(observation, tuple) or len(observation) != 2:
+                raise AssertionError("streaming probe returned no observation")
+            deltas, final = observation
+            if not isinstance(deltas, int) or deltas < 1:
+                raise AssertionError("streaming produced no deltas")
+            if not isinstance(final, ModelResponse) or not (
+                final.content and final.content.strip()
+            ):
+                raise AssertionError("streaming produced no final response")
+
+        return dispatch_streaming, assert_streaming
+
+    if capability_case == "usage_normalization":
+        request = text_request()
+
+        async def dispatch_usage() -> object:
+            return await adapter.generate(request)
+
+        def assert_usage(observation: object) -> None:
+            if not isinstance(observation, ModelResponse):
+                raise AssertionError("usage probe returned no response")
+            usage = observation.usage
+            if usage is None:
+                raise AssertionError("provider reported no usage")
+            for field in ("input_tokens", "output_tokens"):
+                value = getattr(usage, field)
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                ):
+                    raise AssertionError(
+                        f"usage {field} is not a non-negative integer"
+                    )
+
+        return dispatch_usage, assert_usage
+
+    if capability_case == "declared_limits":
+        request = text_request()
+
+        async def dispatch_limits() -> object:
+            return await adapter.generate(request)
+
+        def assert_limits(observation: object) -> None:
+            if not isinstance(observation, ModelResponse):
+                raise AssertionError("limits probe returned no response")
+            usage = observation.usage
+            if usage is None:
+                raise AssertionError("provider reported no usage")
+            if (usage.input_tokens or 0) > contract.limits.context_window_tokens:
+                raise AssertionError(
+                    "provider usage exceeded the declared context window"
+                )
+            if (usage.output_tokens or 0) > contract.limits.max_output_tokens:
+                raise AssertionError(
+                    "provider usage exceeded the declared max output"
+                )
+
+        return dispatch_limits, assert_limits
+
+    raise ValueError(f"unknown provider capability case: {capability_case}")
+
+
+async def _qualify_provider_matrix(
+    *,
+    manifest: AcceptanceManifest,
+    endpoint_aliases: frozenset[str],
+    authorization: ProviderVerificationAuthorization,
+) -> tuple[ProviderCaseRecord, ...]:
+    """把范围内每个 (endpoint, capability case) 交给验证引擎归档。"""
+    environments = _provider_qualification_environment(endpoint_aliases)
+    records: list[ProviderCaseRecord] = []
+    try:
+        for alias, capability_case in provider_capability_matrix(endpoint_aliases):
+            adapter, contract = environments[alias]
+            assert contract.fingerprint is not None
+            assert contract.configuration_fingerprint is not None
+            binding = ProviderCaseBinding(
+                artifact_digest=manifest.artifact_digest,
+                contract_fingerprint=contract.fingerprint,
+                adapter_configuration_fingerprint=(
+                    contract.configuration_fingerprint
+                ),
+                endpoint_alias=alias,
+                capability_case=capability_case,
+                provider="openai-compatible",
+                model_identity=adapter.model,
+            )
+            dispatch, assertion = _provider_capability_probe(
+                adapter, contract, capability_case
+            )
+
+            def request_counter(
+                bound: "_ProviderQualificationAdapter" = adapter,
+            ) -> int:
+                return len(bound.requests)
+
+            records.append(
+                await verify_provider_capability_case(
+                    authorization=authorization,
+                    binding=binding,
+                    dispatch=dispatch,
+                    request_counter=request_counter,
+                    assertion=assertion,
+                    now=datetime.now(timezone.utc),
+                )
+            )
+    finally:
+        for adapter, _contract in environments.values():
+            await adapter.aclose()
+    return tuple(records)
+
+
+def _provider_report_path(output_dir: Path, execution_id: str) -> Path:
+    return output_dir / f"provider-verification-{execution_id}.json"
+
+
+def _load_provider_report(
+    output_dir: Path,
+    manifest: AcceptanceManifest,
+    *,
+    execution_id: str,
+    endpoint_aliases: frozenset[str],
+) -> ProviderVerificationReport:
+    """装载该 execution 的既有报告（append-only）或创建新报告。
+
+    既有报告必须属于同一 RC（同一 Manifest 与 artifact digest）；其他
+    wheel 的报告在这里被拒绝，绝不附加到当前 RC。
+    """
+    path = _provider_report_path(output_dir, execution_id)
+    report_id = f"provider-verification-{execution_id}"
+    if not path.exists():
+        return ProviderVerificationReport.create(
+            report_id=report_id,
+            manifest_digest=manifest.digest,
+            artifact_digest=manifest.artifact_digest,
+            execution_id=execution_id,
+            endpoint_aliases=endpoint_aliases,
+        )
+    report = ProviderVerificationReport.model_validate_json(path.read_text())
+    if (
+        report.report_id != report_id
+        or report.manifest_digest != manifest.digest
+        or report.artifact_digest != manifest.artifact_digest
+        or report.execution_id != execution_id
+    ):
+        raise ProviderReportRewriteError(
+            "the existing provider report for this execution belongs to a "
+            "different release candidate"
+        )
+    if not endpoint_aliases <= report.endpoint_aliases:
+        raise ValueError(
+            "the existing provider report does not cover the requested "
+            "endpoints"
+        )
+    report.verify()
+    return report
+
+
+def _publish_provider_report(
+    output_dir: Path, report: ProviderVerificationReport
+) -> Path:
+    """原子发布 append-only 的 provider 验证报告（每个 execution 一份）。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = _provider_report_path(output_dir, report.execution_id)
+    payload = (report.model_dump_json(indent=2) + "\n").encode("utf-8")
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    with temporary.open("xb") as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    print(path)
+    return path
+
+
+def _verify_provider(arguments: argparse.Namespace) -> int:
+    """独立入口：默认零 live request，显式 ``--allow-live`` 才可能授权。"""
+    manifest = _read_manifest(arguments.manifest)
+    validate_installed_identity(
+        manifest,
+        artifact=arguments.wheel,
+        sdist=arguments.sdist,
+        verify_sdist_build=False,
+    )
+    endpoint_aliases = frozenset(
+        arguments.endpoint or PROVIDER_ENDPOINT_ALIASES
+    )
+    if arguments.allow_live:
+        authorization = provider_verification_authorization(
+            os.environ, endpoint_aliases=endpoint_aliases
+        )
+    else:
+        authorization = ProviderVerificationAuthorization.opted_out(
+            endpoint_aliases
+        )
+    report = _load_provider_report(
+        arguments.output_dir,
+        manifest,
+        execution_id=arguments.execution_id,
+        endpoint_aliases=endpoint_aliases,
+    )
+    records = asyncio.run(
+        _qualify_provider_matrix(
+            manifest=manifest,
+            endpoint_aliases=endpoint_aliases,
+            authorization=authorization,
+        )
+    )
+    # 归档前强制脱敏：凭证值（canary）绝不进入保存的证据。
+    canaries = tuple(
+        value
+        for name in PROVIDER_CREDENTIAL_ENV_NAMES
+        if (value := os.environ.get(name))
+    )
+    assert_provider_evidence_sanitized(
+        {"records": [record.model_dump(mode="json") for record in records]},
+        canary_values=canaries,
+    )
+    report = report.append_revision(
+        records=records,
+        created_at=datetime.now(timezone.utc),
+        authorization=authorization,
+        redaction_verified=True,
+    )
+    assert_provider_evidence_sanitized(
+        json.loads(report.model_dump_json()),
+        canary_values=canaries,
+    )
+    report.verify()
+    _publish_provider_report(arguments.output_dir, report)
+    latest = report.latest_case_records()
+    missing = report.missing_cases()
+    qualified = not missing and all(
+        record.status is ProviderVerificationStatus.PASS
+        for record in latest.values()
+    )
+    print(
+        "Provider qualification: "
+        + ("PASS" if qualified else "INCOMPLETE")
+        + f" ({len(latest)} cases recorded, {len(missing)} missing)"
+    )
+    return EXIT_SUCCESS if qualified else EXIT_INCOMPLETE
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m m_agent.testing")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1754,6 +2210,34 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--sdist", type=Path, required=True)
     render.add_argument("--bundle", type=Path, required=True)
     render.set_defaults(handler=_render)
+    verify_provider = subparsers.add_parser(
+        "verify-provider",
+        help="qualify live provider evidence for one release candidate",
+    )
+    verify_provider.add_argument("--manifest", type=Path, required=True)
+    verify_provider.add_argument("--wheel", type=Path, required=True)
+    verify_provider.add_argument("--sdist", type=Path, required=True)
+    verify_provider.add_argument("--execution-id", required=True)
+    verify_provider.add_argument("--output-dir", type=Path, required=True)
+    verify_provider.add_argument(
+        "--endpoint",
+        action="append",
+        choices=sorted(PROVIDER_ENDPOINT_ALIASES),
+        default=None,
+        help=(
+            "official endpoint alias to qualify (repeatable; default: "
+            "every official endpoint)"
+        ),
+    )
+    verify_provider.add_argument(
+        "--allow-live",
+        action="store_true",
+        help=(
+            "explicitly authorize live provider requests for this run; "
+            "without it the command records OPTED_OUT with zero requests"
+        ),
+    )
+    verify_provider.set_defaults(handler=_verify_provider)
     return parser
 
 
@@ -1761,6 +2245,9 @@ def main() -> NoReturn:
     arguments = _parser().parse_args()
     try:
         raise SystemExit(arguments.handler(arguments))
+    except ProviderReportRewriteError as error:
+        print(f"Provider report integrity error: {error}", file=sys.stderr)
+        raise SystemExit(EXIT_INTEGRITY_FAILURE) from error
     except BundleIntegrityError as error:
         print(f"Bundle integrity error: {error}", file=sys.stderr)
         raise SystemExit(EXIT_INTEGRITY_FAILURE) from error
