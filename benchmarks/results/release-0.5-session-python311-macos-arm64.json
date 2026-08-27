@@ -1,0 +1,79 @@
+{
+  "baseline_identity": {
+    "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+    "manifest_digest": "sha256:560156e5ca26cc706c31c7231fbe7329ba56c3f800fd6fc1f0700758a6e6f2be"
+  },
+  "environment": {
+    "cpu": {
+      "logical_count": 14,
+      "machine": "arm64",
+      "processor": "arm"
+    },
+    "os": {
+      "release": "25.2.0",
+      "system": "Darwin",
+      "version": "Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:56 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6041"
+    },
+    "python": {
+      "implementation": "CPython",
+      "version": "3.11.15"
+    }
+  },
+  "measurement": {
+    "concurrency": 10,
+    "definition": "wall clock from barrier release through concurrent public SessionRunner.submit completion for every Turn; validation and inspection excluded",
+    "elapsed_seconds": 0.7696806250605732,
+    "session_count": 10,
+    "turn_count": 100,
+    "turns_per_session": 10
+  },
+  "metrics": {
+    "persistence_overhead_ms_per_turn": {
+      "definition": "summed claim_run and commit_turn wall time for each committed Turn",
+      "mean": 0.6304116151295602,
+      "p50": 0.5396243650466204,
+      "p95": 1.0738498880527911
+    },
+    "throughput_turns_per_second": 129.9240187995249,
+    "turn_latency_ms": {
+      "p50": 7.1654790081083775,
+      "p95": 9.66446941019967
+    }
+  },
+  "qualification": "Comparative local evidence only; not production QPS, latency, scalability, or availability proof.",
+  "run_database": {
+    "integrity_check": "ok",
+    "path": "benchmarks/results/rel05-session-run-local.sqlite",
+    "row_counts": {
+      "runs": 100
+    }
+  },
+  "schema_version": 1,
+  "session_database": {
+    "foreign_scope_turns": 0,
+    "integrity_check": "ok",
+    "journal_mode": "delete",
+    "orphan_counts": {
+      "claims_without_session": 0,
+      "turns_without_session": 0
+    },
+    "path": "benchmarks/results/rel05-session-local.sqlite",
+    "row_counts": {
+      "session_claims": 0,
+      "session_turns": 100,
+      "sessions": 10
+    },
+    "synchronous": 2
+  },
+  "validation": {
+    "problems": [],
+    "sessions": 10,
+    "status": "PASS",
+    "terminal_runs": 100,
+    "turns": 100
+  },
+  "warmup": {
+    "definition": "SQLite schema initialization before measurement",
+    "turn_count": 0
+  }
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "platform": "darwin",
+    "python": "3.11",
+    "level": "HOST",
+    "role": "secondary",
+    "status": "PASS",
+    "evidence_source": "host macOS darwin/arm64 CPython 3.11 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+    "evidence_digest": "sha256:f5db6e0892a0ad5c36df15c4a82ec3cd5a3f636d2951f7282ee2cef0b52ea67b",
+    "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27"
+  }
+]

@@ -1,0 +1,76 @@
+{
+  "gaps": [],
+  "observations": [
+    {
+      "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+      "evidence_digest": "sha256:f5db6e0892a0ad5c36df15c4a82ec3cd5a3f636d2951f7282ee2cef0b52ea67b",
+      "evidence_source": "host macOS darwin/arm64 CPython 3.11 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+      "level": "HOST",
+      "platform": "darwin",
+      "python": "3.11",
+      "role": "secondary",
+      "status": "PASS"
+    },
+    {
+      "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+      "evidence_digest": "sha256:aa867f9d1b6ea8cd5e117d0c34b50900aeb3078ad4536a49b27611a0c07704bf",
+      "evidence_source": "host macOS darwin/arm64 CPython 3.14 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+      "level": "HOST",
+      "platform": "darwin",
+      "python": "3.14",
+      "role": "secondary",
+      "status": "PASS"
+    },
+    {
+      "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+      "evidence_digest": "sha256:03afa42bd2bb7cd9fb50f3a15e131d291a113c831bec0c8e836717c0fe391034",
+      "evidence_source": "Docker linux/arm64 bookworm CPython 3.11 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+      "level": "CONTRACT",
+      "platform": "linux",
+      "python": "3.11",
+      "role": "required",
+      "status": "PASS"
+    },
+    {
+      "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+      "evidence_digest": "sha256:d340bf02512b53a6ea435e8280c603e5aef7bb33ad94f0c45d9764d9acbe64ae",
+      "evidence_source": "Docker linux/arm64 bookworm CPython 3.11 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+      "level": "HOST",
+      "platform": "linux",
+      "python": "3.11",
+      "role": "primary",
+      "status": "PASS"
+    },
+    {
+      "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+      "evidence_digest": "sha256:502d374a17069ef4cda7225c2679d3ba8c5ab57a5d7afca47b5e21512f014afa",
+      "evidence_source": "Docker linux/arm64 bookworm CPython 3.12 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+      "level": "CONTRACT",
+      "platform": "linux",
+      "python": "3.12",
+      "role": "required",
+      "status": "PASS"
+    },
+    {
+      "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+      "evidence_digest": "sha256:8a10b2c1d655c4c490b813e330817841d96bf2e391e58e52125fcf0bbbbd979d",
+      "evidence_source": "Docker linux/arm64 bookworm CPython 3.13 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+      "level": "CONTRACT",
+      "platform": "linux",
+      "python": "3.13",
+      "role": "required",
+      "status": "PASS"
+    },
+    {
+      "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+      "evidence_digest": "sha256:c25ca1dd3fe650fd923ecedf614c022275d616ffc4a7c3033787451a27f5bb30",
+      "evidence_source": "Docker linux/arm64 bookworm CPython 3.14 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+      "level": "CONTRACT",
+      "platform": "linux",
+      "python": "3.14",
+      "role": "required",
+      "status": "PASS"
+    }
+  ],
+  "overall_status": "PASS"
+}

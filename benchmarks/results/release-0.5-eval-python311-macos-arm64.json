@@ -1,0 +1,67 @@
+{
+  "baseline_identity": {
+    "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+    "manifest_digest": "sha256:560156e5ca26cc706c31c7231fbe7329ba56c3f800fd6fc1f0700758a6e6f2be"
+  },
+  "environment": {
+    "cpu": {
+      "logical_count": 14,
+      "machine": "arm64",
+      "processor": "arm"
+    },
+    "os": {
+      "release": "25.2.0",
+      "system": "Darwin",
+      "version": "Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:56 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6041"
+    },
+    "python": {
+      "implementation": "CPython",
+      "version": "3.11.15"
+    }
+  },
+  "eval_store": {
+    "integrity_check": "ok",
+    "journal_mode": "delete",
+    "path": "benchmarks/results/rel05-eval-workload-local.sqlite",
+    "row_counts": {
+      "eval_evaluator_results": 20,
+      "eval_execution_observations": 20,
+      "eval_executions": 1,
+      "eval_observations": 20
+    },
+    "synchronous": 2
+  },
+  "measurement": {
+    "case_count": 20,
+    "definition": "wall clock of one public EvalExecutionEngine.run_suite call for the frozen Suite (sequential items); validation and inspection excluded",
+    "elapsed_seconds": 0.08756749983876944,
+    "evaluators_per_case": 1
+  },
+  "metrics": {
+    "item_latency_ms": {
+      "p50": 4.202291485853493,
+      "p95": 5.746933596674354
+    },
+    "persistence_overhead_ms_per_item": {
+      "definition": "wall time of record_observation and record_evaluator_result per completed item",
+      "mean": 0.5301613477058709,
+      "p50": 0.4370620008558035,
+      "p95": 1.2343047419562934
+    },
+    "throughput_items_per_second": 228.3952383798132
+  },
+  "qualification": "Comparative environment-qualified local evidence only; not production QPS, latency, scalability, or capacity proof.",
+  "schema_version": 1,
+  "validation": {
+    "evaluator_results": 20,
+    "execution_id": "eval-exec-8dce47781f008e3c68bc89b40075a677",
+    "observations": 20,
+    "problems": [],
+    "status": "PASS",
+    "suite_items": 20
+  },
+  "warmup": {
+    "definition": "SQLite schema initialization before measurement",
+    "item_count": 0
+  }
+}
