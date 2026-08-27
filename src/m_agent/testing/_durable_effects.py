@@ -240,7 +240,14 @@ async def _recover_once(window: str, repetition: int, directory: Path) -> tuple[
         runner = Runner(
             _registry(window, journal, sentinel, crash=False),
             store,
-            lease_ttl=timedelta(milliseconds=500),
+            # The takeover this Scenario proves only requires the *crashed*
+            # child's short lease to have expired (guaranteed by the sleep
+            # above); this recovery Runner's own TTL merely covers its
+            # resume/resolve/inspect operations. 500 ms raced CI runners,
+            # where a scheduling hiccup between two operations can outlast
+            # the lease and trip the guard milliseconds after expiry, so use
+            # a TTL that no plausible pause can exceed.
+            lease_ttl=timedelta(seconds=30),
         )
         recovered = await runner.resume_run(run_id)
         waiting_seen = recovered.status is RunStatus.WAITING
