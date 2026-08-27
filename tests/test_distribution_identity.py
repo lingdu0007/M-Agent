@@ -1276,6 +1276,80 @@ class DistributionIdentityTests(unittest.TestCase):
             )
             self.assertIn("m-agent sdist-derived wheel identity passed", output)
 
+    def test_sdist_rebuilds_a_clean_wheel_on_hosts_without_git(self) -> None:
+        """A clean sdist rebuild falls back to archival provenance without git.
+
+        Hosts without a git executable (minimal Linux images) must still be
+        able to build the wheel from the source distribution, deriving the
+        immutable identity from the embedded ``.git_archival.txt`` and
+        ``SOURCE_INTEGRITY.json`` instead of crashing the build backend.
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository_root = temporary_root / "repository"
+            shutil.copytree(
+                _ROOT,
+                repository_root,
+                ignore=shutil.ignore_patterns(
+                    ".git", ".venv", ".pytest_cache", "__pycache__", "build", "dist"
+                ),
+            )
+            clean_environment = _clean_environment()
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "ticket22@example.invalid"],
+                ["git", "config", "user.name", "Acceptance Harness"],
+                ["git", "add", "--all"],
+                ["git", "commit", "-qm", "gitless sdist provenance subject"],
+            ):
+                _run(command, cwd=repository_root, env=clean_environment)
+            commit = _run(
+                ["git", "rev-parse", "HEAD"], cwd=repository_root, env=clean_environment
+            ).strip()
+            sdist_dir = temporary_root / "sdist"
+            _run(
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--sdist",
+                    "--out-dir",
+                    str(sdist_dir),
+                ],
+                cwd=repository_root,
+                env=clean_environment,
+            )
+            sdist = next(sdist_dir.glob("*.tar.gz"))
+            extracted = temporary_root / "extracted"
+            shutil.unpack_archive(str(sdist), str(extracted))
+            extracted_root = next(extracted.iterdir())
+            gitless_bin = temporary_root / "gitless-bin"
+            gitless_bin.mkdir()
+            (gitless_bin / "uv").symlink_to(
+                Path(shutil.which("uv") or "uv").resolve()
+            )
+            gitless_environment = {**clean_environment, "PATH": str(gitless_bin)}
+            wheel_dir = temporary_root / "wheel"
+            _run(
+                [
+                    "uv",
+                    "build",
+                    "--offline",
+                    "--wheel",
+                    "--out-dir",
+                    str(wheel_dir),
+                    "--python",
+                    sys.executable,
+                ],
+                cwd=extracted_root,
+                env=gitless_environment,
+            )
+            wheel = next(wheel_dir.glob("*.whl"))
+            with zipfile.ZipFile(wheel) as artifact:
+                identity = artifact.read("m_agent/_build_identity.py").decode("utf-8")
+            self.assertIn(f"SOURCE_COMMIT = '{commit}'", identity)
+            self.assertIn("SOURCE_STATE = 'clean'", identity)
+
     @unittest.skip("0.2 foundation profile is superseded by the 0.3 Runtime Baseline Pack")
     def test_foundation_cli_rejects_wheel_not_built_from_supplied_sdist(self) -> None:
         """A self-declared source map cannot bind a different installed wheel."""

@@ -99,13 +99,19 @@ def _source_integrity_matches(root: Path) -> bool:
 
 
 def _checkout_identity() -> tuple[str, str] | None:
-    completed = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel", "HEAD", "HEAD^{tree}"],
-        cwd=_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "HEAD", "HEAD^{tree}"],
+            cwd=_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        # Hosts without a git executable (minimal Linux images) must fall
+        # back to the sdist's embedded archival provenance instead of
+        # crashing the build backend.
+        return None
     lines = completed.stdout.strip().splitlines()
     if (
         completed.returncode == 0
