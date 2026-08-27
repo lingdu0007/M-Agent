@@ -9,12 +9,13 @@ Definition 的运行语义，也不包含凭据或敏感 endpoint 配置。
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 import enum
 import json
 import hashlib
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from ..._model import ModelRequirements
 
@@ -116,7 +117,12 @@ class HardRoutingGates(_FrozenRoutingValue):
       每百万 input token）；
     - ``min_quality_score`` / ``min_stability_score``：硬质量/稳定性
       下限（Model Evidence，[0, 1]）；
-    - ``require_availability``：硬可用性要求（Availability Snapshot）。
+    - ``require_availability``：硬可用性要求（Availability Snapshot）；
+    - ``operational_limits``：硬运行限额门槛（Operational Limits
+      Snapshot，RPM/TPM/并发/周期配额余量）；
+    - ``worst_case_cost_cap``：硬最坏情况运行成本上限（Pricing
+      Snapshot × 冻结 Contract Limits × Execution Budget；硬成本
+      规则在价格证据缺失/过期/不完整时 fail closed）。
     """
 
     max_input_price_per_mtok: Decimal | None = Field(
@@ -125,6 +131,66 @@ class HardRoutingGates(_FrozenRoutingValue):
     min_quality_score: float | None = Field(default=None, ge=0.0, le=1.0)
     min_stability_score: float | None = Field(default=None, ge=0.0, le=1.0)
     require_availability: bool = False
+    operational_limits: "OperationalLimitsGate | None" = None
+    worst_case_cost_cap: "WorstCaseCostCap | None" = None
+
+
+class OperationalLimitsGate(_FrozenRoutingValue):
+    """硬运行限额门槛：Operational Limits Snapshot 的最低要求。
+
+    声明了最低值的维度上，快照未申报该维度（未知）时 fail closed，
+    绝不把未知当充足；低于最低值按硬门槛过滤。
+    """
+
+    min_available_rpm: int | None = Field(default=None, ge=0)
+    min_available_tpm: int | None = Field(default=None, ge=0)
+    min_available_concurrency: int | None = Field(default=None, ge=0)
+    min_remaining_period_quota: Decimal | None = Field(
+        default=None, ge=Decimal("0")
+    )
+
+
+class WorstCaseCostCap(_FrozenRoutingValue):
+    """硬最坏情况运行成本上限（声明币种，不做隐式换算）。"""
+
+    currency: str = Field(min_length=1)
+    max_run_cost: Decimal = Field(ge=Decimal("0"))
+
+
+class SoftRoutingPreferences(_FrozenRoutingValue):
+    """soft evidence 偏好：异常快照产生显式降级 warning，不阻断。
+
+    ADR 0041：硬可用性策略遇过期快照 fail closed，软偏好可带
+    ``STALE_AVAILABILITY`` warning 继续。跟踪到的异常快照不进入
+    evidence reference——两种路径都不把异常快照当作健康证据。
+    """
+
+    track_availability: bool = False
+    track_operational_limits: bool = False
+
+
+class RecommendationPublication(_FrozenRoutingValue):
+    """显式发布记录：应用把 Eval Recommendation 的事实桥接为 Routing 输入。
+
+    Runtime Companion 不自动采纳 Recommendation：发布是上层应用的
+    显式决策。本类型只冻结被发布 Recommendation 的关键事实（目标
+    Variant、gate 结论、置信度、有效期与证据引用），由
+    :func:`~m_agent.companion.routing.publish_recommendation_as_policy`
+    消费并产生新的 Routing Policy 版本；未发布的 Recommendation 对
+    Router 完全不可见。
+    """
+
+    recommendation_id: str = Field(min_length=1)
+    recommendation_version: str = Field(min_length=1)
+    report_id: str = Field(min_length=1)
+    report_revision: int = Field(ge=1)
+    evidence_digest: str = Field(min_length=1)
+    target_variant_id: str = Field(min_length=1)
+    target_variant_version: str = Field(min_length=1)
+    hard_gate_passed: bool
+    quality_gate_passed: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    valid_until: datetime
 
 
 class RoutingPolicy(_FrozenRoutingValue):
@@ -134,6 +200,10 @@ class RoutingPolicy(_FrozenRoutingValue):
     的 Routing Decision 与 reason trace；候选范围
     （``allowed_variants``，``None`` 表示 Catalog 全体）、排序维度或
     门槛变化时必须创建新的 Policy 版本，绝不覆盖既有版本。
+
+    ``published_from`` 记录该版本由某个显式发布的 Recommendation
+    派生（未发布的版本为 ``None``）；``soft_preferences`` 是 soft
+    evidence 偏好：异常快照只产生显式降级 warning，不放宽规则。
     """
 
     identity: RoutingPolicyIdentity
@@ -145,10 +215,14 @@ class RoutingPolicy(_FrozenRoutingValue):
     )
     hard_gates: HardRoutingGates = Field(default_factory=HardRoutingGates)
     objectives: tuple[RoutingObjective, ...] = Field(default_factory=tuple)
+    soft_preferences: SoftRoutingPreferences = Field(
+        default_factory=SoftRoutingPreferences
+    )
     #: 候选 allowlist：``(variant_id, version)`` 精确身份；
     #: ``None`` 表示不收窄候选范围；空元组是结构不完整的规则
     #: （Router 返回 ``INVALID_POLICY``）。
     allowed_variants: tuple[tuple[str, str], ...] | None = None
+    published_from: RecommendationPublication | None = None
 
     def content_digest(self) -> str:
         """规则的规范化内容摘要（不含对象标识语义）。"""

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from m_agent.runtime import (
     ModelBinding,
@@ -29,19 +30,22 @@ from m_agent.runtime import (
 )
 from m_agent.companion.routing import (
     AgentVariant,
+    AvailabilitySnapshot,
     DeploymentAttributes,
     HardRoutingGates,
+    SoftRoutingPreferences,
     ModelCatalog,
     ModelCatalogEntry,
     ModelEvidenceSnapshot,
+    OperationalLimitsSnapshot,
     PricingSnapshot,
-    AvailabilitySnapshot,
     RetentionEvidenceSnapshot,
     RoutingEvidence,
     RoutingObjective,
     RoutingPolicy,
     RoutingPolicyIdentity,
     DeploymentConstraints,
+    with_integrity,
 )
 from m_agent.companion.routing import (
     ObjectiveDimension,
@@ -54,6 +58,19 @@ from m_agent.companion.routing import (
 AS_OF = datetime(2026, 8, 26, 12, 0, 0)
 
 POLICY_IDENTITY = RoutingPolicyIdentity(policy_id="finance-default", version="3")
+
+
+# 哨兵：缺省时自动绑定 variant 的 PRIMARY Contract 指纹；
+# 显式传 None 表示不绑定指纹，传字符串表示覆盖。
+_UNBOUND_FINGERPRINT: Any = object()
+
+
+def _fingerprint(
+    variant: AgentVariant, declared: Any
+) -> str | None:
+    if declared is _UNBOUND_FINGERPRINT:
+        return variant.primary_contract().fingerprint
+    return declared
 
 
 def make_contract(
@@ -146,6 +163,7 @@ def make_variant(
     version: str = "1",
     definition_id: str | None = None,
     policy_identity: RoutingPolicyIdentity | None = None,
+    policy_identities: tuple[RoutingPolicyIdentity, ...] | None = None,
     requirements: ModelRequirements | None = None,
     budget: ModelExecutionBudget | None = None,
 ) -> AgentVariant:
@@ -162,7 +180,11 @@ def make_variant(
             context_compression_max_attempts=1,
             output_repair_max_attempts=1,
         ),
-        policy_identities=(policy_identity or POLICY_IDENTITY,),
+        policy_identities=(
+            policy_identities
+            if policy_identities is not None
+            else (policy_identity or POLICY_IDENTITY,)
+        ),
     )
 
 
@@ -201,6 +223,7 @@ def make_policy(
     hard_gates: HardRoutingGates | None = None,
     objectives: tuple[RoutingObjective, ...] = (),
     allowed_variants: tuple[tuple[str, str], ...] | None = None,
+    soft_preferences: SoftRoutingPreferences | None = None,
 ) -> RoutingPolicy:
     return RoutingPolicy(
         identity=identity or POLICY_IDENTITY,
@@ -209,6 +232,7 @@ def make_policy(
         hard_gates=hard_gates or HardRoutingGates(),
         objectives=objectives,
         allowed_variants=allowed_variants,
+        soft_preferences=soft_preferences or SoftRoutingPreferences(),
     )
 
 
@@ -238,20 +262,32 @@ def make_pricing(
     variant: AgentVariant,
     *,
     input_price: str = "3.50",
+    output_price: str | None = "12.00",
+    currency: str = "USD",
     version: str = "price-1",
     effective_at: datetime | None = None,
     valid_until: datetime | None = None,
+    contract_fingerprint: Any = _UNBOUND_FINGERPRINT,
+    sealed: bool = True,
 ) -> PricingSnapshot:
-    return PricingSnapshot(
+    """默认携带输出价格、绑定观测指纹并 seal 的价格快照。"""
+    snapshot = PricingSnapshot(
         variant_id=variant.variant_id,
         variant_version=variant.version,
-        currency="USD",
+        currency=currency,
         input_price_per_mtok=Decimal(input_price),
+        output_price_per_mtok=(
+            None if output_price is None else Decimal(output_price)
+        ),
         version=version,
         source="offline-price-sheet",
         effective_at=effective_at or (AS_OF - timedelta(days=1)),
         valid_until=valid_until or (AS_OF + timedelta(days=7)),
+        contract_fingerprint=_fingerprint(variant, contract_fingerprint),
     )
+    if not sealed:
+        return snapshot
+    return with_integrity(snapshot)  # type: ignore[return-value]
 
 
 def make_availability(
@@ -260,8 +296,11 @@ def make_availability(
     available: bool = True,
     version: str = "avail-1",
     valid_until: datetime | None = None,
+    contract_fingerprint: Any = _UNBOUND_FINGERPRINT,
+    sealed: bool = True,
 ) -> AvailabilitySnapshot:
-    return AvailabilitySnapshot(
+    """默认绑定观测指纹并 seal 的可用性快照。"""
+    snapshot = AvailabilitySnapshot(
         variant_id=variant.variant_id,
         variant_version=variant.version,
         available=available,
@@ -269,7 +308,11 @@ def make_availability(
         source="offline-probe",
         sampled_at=AS_OF - timedelta(hours=1),
         valid_until=valid_until or (AS_OF + timedelta(hours=6)),
+        contract_fingerprint=_fingerprint(variant, contract_fingerprint),
     )
+    if not sealed:
+        return snapshot
+    return with_integrity(snapshot)  # type: ignore[return-value]
 
 
 def make_retention_evidence(
@@ -290,6 +333,39 @@ def make_retention_evidence(
     )
 
 
+def make_operational_limits(
+    variant: AgentVariant,
+    *,
+    rpm: int | None = 600,
+    tpm: int | None = 120_000,
+    concurrency: int | None = 8,
+    remaining_quota: str | None = "0.75",
+    version: str = "ops-1",
+    valid_until: datetime | None = None,
+    contract_fingerprint: Any = _UNBOUND_FINGERPRINT,
+    sealed: bool = True,
+) -> OperationalLimitsSnapshot:
+    """默认绑定观测指纹并 seal 的运行限额快照。"""
+    snapshot = OperationalLimitsSnapshot(
+        variant_id=variant.variant_id,
+        variant_version=variant.version,
+        available_rpm=rpm,
+        available_tpm=tpm,
+        available_concurrency=concurrency,
+        remaining_period_quota=(
+            None if remaining_quota is None else Decimal(remaining_quota)
+        ),
+        version=version,
+        source="offline-quota-probe",
+        collected_at=AS_OF - timedelta(minutes=30),
+        valid_until=valid_until or (AS_OF + timedelta(hours=2)),
+        contract_fingerprint=_fingerprint(variant, contract_fingerprint),
+    )
+    if not sealed:
+        return snapshot
+    return with_integrity(snapshot)  # type: ignore[return-value]
+
+
 def make_evidence(
     variants: tuple[AgentVariant, ...],
     *,
@@ -297,6 +373,7 @@ def make_evidence(
     pricing: tuple[PricingSnapshot, ...] | None = None,
     availability: tuple[AvailabilitySnapshot, ...] | None = None,
     retention: tuple[RetentionEvidenceSnapshot, ...] | None = None,
+    operational_limits: tuple[OperationalLimitsSnapshot, ...] | None = None,
 ) -> RoutingEvidence:
     """为一个或多个 variant 生成默认有效的完整 evidence bundle。"""
 
@@ -307,11 +384,16 @@ def make_evidence(
             return tuple(provided)
         return tuple(builder(variant) for variant in variants)
 
-    return RoutingEvidence(
+    # model_construct：跳过元素级重新校验，使 fixture 能携带消费侧
+    # 才会检出的篡改快照（模拟从外部存储收到已损坏的 evidence bundle）。
+    return RoutingEvidence.model_construct(
         model_evidence=defaulted(model_evidence, make_model_evidence),
         pricing=defaulted(pricing, make_pricing),
         availability=defaulted(availability, make_availability),
         retention=defaulted(retention, make_retention_evidence),
+        operational_limits=defaulted(
+            operational_limits, make_operational_limits
+        ),
     )
 
 

@@ -25,6 +25,9 @@ from ._pack import (
     EXIT_SUCCESS,
     FOUNDATION_RELEASE_0_4_PACK_VERSION,
     FOUNDATION_RELEASE_0_4_PROFILE,
+    MODEL_ROUTING_PACK_VERSION,
+    MODEL_ROUTING_PROFILE,
+    MODEL_ROUTING_SCENARIO,
     PackExecution,
     PackExecutionStatus,
     RUNTIME_BASELINE_PACK_VERSION,
@@ -37,6 +40,7 @@ from ._pack import (
     core_lifecycle_manifest,
     eval_regression_manifest,
     foundation_release_0_4_manifest,
+    model_routing_manifest,
     runtime_baseline_manifest,
     session_conversation_manifest,
 )
@@ -58,6 +62,10 @@ from ._context_compression import (
 from ._eval_regression import (
     reconcile_eval_regression,
     run_eval_regression,
+)
+from ._model_routing import (
+    reconcile_model_routing,
+    run_model_routing,
 )
 from ._provider_evidence import (
     PROVIDER_EVIDENCE_MAX_AGE_DAYS,
@@ -85,6 +93,9 @@ __all__ = [
     "EVAL_REGRESSION_PACK_VERSION",
     "EVAL_REGRESSION_PROFILE",
     "EVAL_REGRESSION_SCENARIO",
+    "MODEL_ROUTING_PACK_VERSION",
+    "MODEL_ROUTING_PROFILE",
+    "MODEL_ROUTING_SCENARIO",
     "EvidenceLevel",
     "EXIT_HARNESS_ERROR",
     "EXIT_INCOMPLETE",
@@ -115,6 +126,7 @@ __all__ = [
     "session_conversation_manifest",
     "context_compression_manifest",
     "eval_regression_manifest",
+    "model_routing_manifest",
     "foundation_release_0_4_manifest",
     "run_model_adapter_contract",
     "reconcile_recovery_window",
@@ -122,10 +134,12 @@ __all__ = [
     "reconcile_session_recovery",
     "reconcile_compression_observation",
     "reconcile_eval_regression",
+    "reconcile_model_routing",
     "run_durable_effects_recovery",
     "run_session_conversation",
     "run_context_budget_compression",
     "run_eval_regression",
+    "run_model_routing",
     "FOUNDATION_RELEASE_0_4_PACK_VERSION",
     "FOUNDATION_RELEASE_0_4_PROFILE",
     "PROVIDER_EVIDENCE_MAX_AGE_DAYS",

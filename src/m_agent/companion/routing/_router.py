@@ -31,18 +31,37 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..._errors import MAgentError
-from ..._model import ModelPurpose
+from ..._model import ModelPurpose, UsageProvenance
 from ..._run import RunRecord
 from ._catalog import AgentVariant, ModelCatalog, ModelCatalogEntry
-from ._evidence import RoutingEvidence
+from ._cost import (
+    CostFormula,
+    GAP_CURRENCY_MISMATCH,
+    GAP_OUTPUT_PRICE_MISSING,
+    GAP_PRICING_FINGERPRINT_DRIFT,
+    GAP_PRICING_INTEGRITY_FAILURE,
+    GAP_PRICING_MISSING,
+    GAP_PRICING_STALE,
+    RunCostPolicy,
+    estimate_run_cost,
+)
+from ._evidence import (
+    RoutingEvidence,
+    SnapshotStatus,
+    evaluate_availability_snapshot,
+    evaluate_operational_limits_snapshot,
+    evaluate_pricing_snapshot,
+)
 from ._policy import (
     DeploymentConstraints,
     MissingValuePolicy,
     ObjectiveDirection,
     ObjectiveDimension,
+    OperationalLimitsGate,
     RoutingObjective,
     RoutingPolicy,
     RoutingPolicyIdentity,
+    WorstCaseCostCap,
     canonical_digest,
 )
 
@@ -99,15 +118,51 @@ REASON_HARD_PRICE_GATE_FAILED = "HARD_PRICE_GATE_FAILED"
 REASON_HARD_QUALITY_GATE_FAILED = "HARD_QUALITY_GATE_FAILED"
 REASON_HARD_STABILITY_GATE_FAILED = "HARD_STABILITY_GATE_FAILED"
 REASON_HARD_AVAILABILITY_GATE_FAILED = "HARD_AVAILABILITY_GATE_FAILED"
+REASON_HARD_OPERATIONAL_LIMIT_GATE_FAILED = "HARD_OPERATIONAL_LIMIT_GATE_FAILED"
+REASON_HARD_COST_GATE_FAILED = "HARD_COST_GATE_FAILED"
 REASON_OUTRANKED = "OUTRANKED"
+
+REASON_PRICING_SNAPSHOT_FINGERPRINT_DRIFT = "PRICING_SNAPSHOT_FINGERPRINT_DRIFT"
+REASON_PRICING_SNAPSHOT_INTEGRITY_FAILURE = (
+    "PRICING_SNAPSHOT_INTEGRITY_FAILURE"
+)
+REASON_AVAILABILITY_SNAPSHOT_FINGERPRINT_DRIFT = (
+    "AVAILABILITY_SNAPSHOT_FINGERPRINT_DRIFT"
+)
+REASON_AVAILABILITY_SNAPSHOT_INTEGRITY_FAILURE = (
+    "AVAILABILITY_SNAPSHOT_INTEGRITY_FAILURE"
+)
+REASON_OPERATIONAL_LIMITS_SNAPSHOT_MISSING = "OPERATIONAL_LIMITS_SNAPSHOT_MISSING"
+REASON_OPERATIONAL_LIMITS_SNAPSHOT_STALE = "OPERATIONAL_LIMITS_SNAPSHOT_STALE"
+REASON_OPERATIONAL_LIMITS_SNAPSHOT_FINGERPRINT_DRIFT = (
+    "OPERATIONAL_LIMITS_SNAPSHOT_FINGERPRINT_DRIFT"
+)
+REASON_OPERATIONAL_LIMITS_SNAPSHOT_INTEGRITY_FAILURE = (
+    "OPERATIONAL_LIMITS_SNAPSHOT_INTEGRITY_FAILURE"
+)
+REASON_OPERATIONAL_LIMITS_UNKNOWN = "OPERATIONAL_LIMITS_UNKNOWN"
+REASON_HARD_COST_EVIDENCE_INCOMPLETE = "HARD_COST_EVIDENCE_INCOMPLETE"
+REASON_COST_CURRENCY_MISMATCH = "COST_CURRENCY_MISMATCH"
 
 WARNING_SOFT_EVIDENCE_MISSING = "SOFT_EVIDENCE_MISSING"
 WARNING_SOFT_EVIDENCE_STALE = "SOFT_EVIDENCE_STALE"
+WARNING_STALE_AVAILABILITY = "STALE_AVAILABILITY"
+WARNING_ENDPOINT_UNAVAILABLE = "ENDPOINT_UNAVAILABLE"
+WARNING_AVAILABILITY_SNAPSHOT_MISSING = "AVAILABILITY_SNAPSHOT_MISSING"
+WARNING_AVAILABILITY_FINGERPRINT_DRIFT = "AVAILABILITY_FINGERPRINT_DRIFT"
+WARNING_AVAILABILITY_INTEGRITY_FAILURE = "AVAILABILITY_INTEGRITY_FAILURE"
+WARNING_PRICING_FINGERPRINT_DRIFT = "PRICING_FINGERPRINT_DRIFT"
+WARNING_PRICING_INTEGRITY_FAILURE = "PRICING_INTEGRITY_FAILURE"
+WARNING_STALE_OPERATIONAL_LIMITS = "STALE_OPERATIONAL_LIMITS"
+WARNING_OPERATIONAL_LIMITS_SNAPSHOT_MISSING = (
+    "OPERATIONAL_LIMITS_SNAPSHOT_MISSING"
+)
 
 _EVIDENCE_MODEL_EVIDENCE = "MODEL_EVIDENCE"
 _EVIDENCE_PRICING = "PRICING"
 _EVIDENCE_AVAILABILITY = "AVAILABILITY"
 _EVIDENCE_RETENTION = "RETENTION"
+_EVIDENCE_OPERATIONAL_LIMITS = "OPERATIONAL_LIMITS"
 
 
 class RoutingError(MAgentError):
@@ -408,6 +463,9 @@ class ModelRouter:
                 )
                 for objective in policy.objectives
             }
+        _emit_soft_preference_warnings(
+            policy, gate_survivors, evidence, as_of, warnings, references
+        )
 
         ranked = sorted(
             gate_survivors,
@@ -495,6 +553,17 @@ _EVIDENCE_ABORT_CODES = frozenset(
         REASON_AVAILABILITY_SNAPSHOT_STALE,
         REASON_RETENTION_EVIDENCE_MISSING,
         REASON_RETENTION_EVIDENCE_STALE,
+        REASON_PRICING_SNAPSHOT_FINGERPRINT_DRIFT,
+        REASON_PRICING_SNAPSHOT_INTEGRITY_FAILURE,
+        REASON_AVAILABILITY_SNAPSHOT_FINGERPRINT_DRIFT,
+        REASON_AVAILABILITY_SNAPSHOT_INTEGRITY_FAILURE,
+        REASON_OPERATIONAL_LIMITS_SNAPSHOT_MISSING,
+        REASON_OPERATIONAL_LIMITS_SNAPSHOT_STALE,
+        REASON_OPERATIONAL_LIMITS_SNAPSHOT_FINGERPRINT_DRIFT,
+        REASON_OPERATIONAL_LIMITS_SNAPSHOT_INTEGRITY_FAILURE,
+        REASON_OPERATIONAL_LIMITS_UNKNOWN,
+        REASON_HARD_COST_EVIDENCE_INCOMPLETE,
+        REASON_COST_CURRENCY_MISMATCH,
     }
 )
 
@@ -736,10 +805,19 @@ def _hard_gate_failure(
         pricing = evidence.latest_pricing(variant.variant_id, variant.version)
         if pricing is None:
             return None, REASON_PRICING_SNAPSHOT_MISSING
-        if pricing.effective_at > as_of:
-            return None, REASON_PRICING_SNAPSHOT_NOT_EFFECTIVE
-        if pricing.valid_until < as_of:
+        status = evaluate_pricing_snapshot(
+            pricing, expected_variant=variant, as_of=as_of
+        )
+        if status is SnapshotStatus.STALE:
             return None, REASON_PRICING_SNAPSHOT_STALE
+        if status is SnapshotStatus.NOT_EFFECTIVE:
+            return None, REASON_PRICING_SNAPSHOT_NOT_EFFECTIVE
+        if status is SnapshotStatus.SUBJECT_MISMATCH:
+            return None, REASON_PRICING_SNAPSHOT_MISSING
+        if status is SnapshotStatus.FINGERPRINT_DRIFT:
+            return None, REASON_PRICING_SNAPSHOT_FINGERPRINT_DRIFT
+        if status is SnapshotStatus.INTEGRITY_FAILURE:
+            return None, REASON_PRICING_SNAPSHOT_INTEGRITY_FAILURE
         _record_reference(
             references, variant, _EVIDENCE_PRICING, pricing.version, pricing.valid_until
         )
@@ -777,8 +855,19 @@ def _hard_gate_failure(
         )
         if availability is None:
             return None, REASON_AVAILABILITY_SNAPSHOT_MISSING
-        if availability.valid_until < as_of:
+        status = evaluate_availability_snapshot(
+            availability, expected_variant=variant, as_of=as_of
+        )
+        if status is SnapshotStatus.STALE:
             return None, REASON_AVAILABILITY_SNAPSHOT_STALE
+        if status is SnapshotStatus.SUBJECT_MISMATCH:
+            return None, REASON_AVAILABILITY_SNAPSHOT_MISSING
+        if status is SnapshotStatus.NOT_EFFECTIVE:
+            return None, REASON_AVAILABILITY_SNAPSHOT_MISSING
+        if status is SnapshotStatus.FINGERPRINT_DRIFT:
+            return None, REASON_AVAILABILITY_SNAPSHOT_FINGERPRINT_DRIFT
+        if status is SnapshotStatus.INTEGRITY_FAILURE:
+            return None, REASON_AVAILABILITY_SNAPSHOT_INTEGRITY_FAILURE
         _record_reference(
             references,
             variant,
@@ -788,7 +877,206 @@ def _hard_gate_failure(
         )
         if not availability.available:
             return REASON_HARD_AVAILABILITY_GATE_FAILED, None
+
+    if gates.operational_limits is not None:
+        failure, abort = _operational_limits_gate_failure(
+            variant, gates.operational_limits, evidence, as_of, references
+        )
+        if failure is not None or abort is not None:
+            return failure, abort
+
+    if gates.worst_case_cost_cap is not None:
+        failure, abort = _worst_case_cost_gate_failure(
+            variant, gates.worst_case_cost_cap, evidence, as_of, references
+        )
+        if failure is not None or abort is not None:
+            return failure, abort
     return None, None
+
+
+def _operational_limits_gate_failure(
+    variant: AgentVariant,
+    gate: OperationalLimitsGate,
+    evidence: RoutingEvidence,
+    as_of: datetime,
+    references: dict[tuple[str, str], list[EvidenceSnapshotReference]],
+) -> tuple[str | None, str | None]:
+    """hard Operational Limits 门槛：维度阈值与未知 fail closed。"""
+    snapshot = evidence.latest_operational_limits(
+        variant.variant_id, variant.version
+    )
+    if snapshot is None:
+        return None, REASON_OPERATIONAL_LIMITS_SNAPSHOT_MISSING
+    status = evaluate_operational_limits_snapshot(
+        snapshot, expected_variant=variant, as_of=as_of
+    )
+    if status is SnapshotStatus.STALE:
+        return None, REASON_OPERATIONAL_LIMITS_SNAPSHOT_STALE
+    if status is SnapshotStatus.SUBJECT_MISMATCH:
+        return None, REASON_OPERATIONAL_LIMITS_SNAPSHOT_MISSING
+    if status is SnapshotStatus.NOT_EFFECTIVE:
+        return None, REASON_OPERATIONAL_LIMITS_SNAPSHOT_MISSING
+    if status is SnapshotStatus.FINGERPRINT_DRIFT:
+        return None, REASON_OPERATIONAL_LIMITS_SNAPSHOT_FINGERPRINT_DRIFT
+    if status is SnapshotStatus.INTEGRITY_FAILURE:
+        return None, REASON_OPERATIONAL_LIMITS_SNAPSHOT_INTEGRITY_FAILURE
+    _record_reference(
+        references,
+        variant,
+        _EVIDENCE_OPERATIONAL_LIMITS,
+        snapshot.version,
+        snapshot.valid_until,
+    )
+    for minimum, observed in (
+        (gate.min_available_rpm, snapshot.available_rpm),
+        (gate.min_available_tpm, snapshot.available_tpm),
+        (gate.min_available_concurrency, snapshot.available_concurrency),
+        (gate.min_remaining_period_quota, snapshot.remaining_period_quota),
+    ):
+        if minimum is None:
+            continue
+        if observed is None:
+            # 声明了最低值的维度未知 → fail closed，绝不把未知当充足。
+            return None, REASON_OPERATIONAL_LIMITS_UNKNOWN
+        if observed < minimum:
+            return REASON_HARD_OPERATIONAL_LIMIT_GATE_FAILED, None
+    return None, None
+
+
+def _worst_case_cost_gate_failure(
+    variant: AgentVariant,
+    cap: WorstCaseCostCap,
+    evidence: RoutingEvidence,
+    as_of: datetime,
+    references: dict[tuple[str, str], list[EvidenceSnapshotReference]],
+) -> tuple[str | None, str | None]:
+    """hard 最坏成本上限：价格证据不完整时整体 fail closed。
+
+    最坏情况上界 = 执行预算次数 x ((计量输入或上下文窗口回退 +
+    预留输出) x 输入单价 + 预留输出 x 输出单价)。硬成本规则在价格
+    证据缺失/过期/漂移/integrity failure、币种不一致或输出价格
+    缺失时返回稳定的 fail-closed abort code，绝不伪造精确费用。
+    """
+    policy = RunCostPolicy(
+        policy_id="worst-case-cost-cap",
+        version="1",
+        currency=cap.currency,
+        formula=CostFormula.WORST_CASE_TOKEN_BUDGET,
+        usage_provenance=UsageProvenance.RUNTIME_SIZED,
+    )
+    estimate = estimate_run_cost(
+        policy=policy,
+        variant=variant,
+        evidence=evidence,
+        as_of=as_of,
+    )
+    if estimate.upper_bound is None:
+        gaps = estimate.evidence_gaps
+        if GAP_CURRENCY_MISMATCH in gaps:
+            return None, REASON_COST_CURRENCY_MISMATCH
+        if GAP_OUTPUT_PRICE_MISSING in gaps:
+            return None, REASON_HARD_COST_EVIDENCE_INCOMPLETE
+        if GAP_PRICING_FINGERPRINT_DRIFT in gaps:
+            return None, REASON_PRICING_SNAPSHOT_FINGERPRINT_DRIFT
+        if GAP_PRICING_INTEGRITY_FAILURE in gaps:
+            return None, REASON_PRICING_SNAPSHOT_INTEGRITY_FAILURE
+        if GAP_PRICING_STALE in gaps:
+            return None, REASON_PRICING_SNAPSHOT_STALE
+        if GAP_PRICING_MISSING in gaps:
+            return None, REASON_PRICING_SNAPSHOT_MISSING
+        return None, REASON_HARD_COST_EVIDENCE_INCOMPLETE
+    if estimate.upper_bound > cap.max_run_cost:
+        return REASON_HARD_COST_GATE_FAILED, None
+    pricing = evidence.latest_pricing(variant.variant_id, variant.version)
+    if pricing is not None:
+        _record_reference(
+            references,
+            variant,
+            _EVIDENCE_PRICING,
+            pricing.version,
+            pricing.valid_until,
+        )
+    return None, None
+
+
+def _emit_soft_preference_warnings(
+    policy: RoutingPolicy,
+    survivors: list[ModelCatalogEntry],
+    evidence: RoutingEvidence,
+    as_of: datetime,
+    warnings: _WarningCollector,
+    references: dict[tuple[str, str], list[EvidenceSnapshotReference]],
+) -> None:
+    """soft preference：对幸存候选的异常快照产生显式降级 warning。
+
+    只有判定 VALID 的快照才记录 evidence reference——soft 路径同样
+    不把异常快照当作健康证据。
+    """
+    preferences = policy.soft_preferences
+    if not (
+        preferences.track_availability or preferences.track_operational_limits
+    ):
+        return
+    for entry in survivors:
+        variant = entry.variant
+        if preferences.track_availability:
+            availability = evidence.latest_availability(
+                variant.variant_id, variant.version
+            )
+            if availability is None:
+                warnings.add(variant, WARNING_AVAILABILITY_SNAPSHOT_MISSING)
+            else:
+                status = evaluate_availability_snapshot(
+                    availability, expected_variant=variant, as_of=as_of
+                )
+                if status is SnapshotStatus.STALE:
+                    warnings.add(variant, WARNING_STALE_AVAILABILITY)
+                elif status is SnapshotStatus.FINGERPRINT_DRIFT:
+                    warnings.add(variant, WARNING_AVAILABILITY_FINGERPRINT_DRIFT)
+                elif status is SnapshotStatus.INTEGRITY_FAILURE:
+                    warnings.add(
+                        variant, WARNING_AVAILABILITY_INTEGRITY_FAILURE
+                    )
+                elif status is not SnapshotStatus.VALID:
+                    warnings.add(
+                        variant, WARNING_AVAILABILITY_SNAPSHOT_MISSING
+                    )
+                elif not availability.available:
+                    warnings.add(variant, WARNING_ENDPOINT_UNAVAILABLE)
+                else:
+                    _record_reference(
+                        references,
+                        variant,
+                        _EVIDENCE_AVAILABILITY,
+                        availability.version,
+                        availability.valid_until,
+                    )
+        if preferences.track_operational_limits:
+            operational = evidence.latest_operational_limits(
+                variant.variant_id, variant.version
+            )
+            if operational is None:
+                warnings.add(
+                    variant, WARNING_OPERATIONAL_LIMITS_SNAPSHOT_MISSING
+                )
+            else:
+                status = evaluate_operational_limits_snapshot(
+                    operational, expected_variant=variant, as_of=as_of
+                )
+                if status is SnapshotStatus.STALE:
+                    warnings.add(variant, WARNING_STALE_OPERATIONAL_LIMITS)
+                elif status is not SnapshotStatus.VALID:
+                    warnings.add(
+                        variant, WARNING_OPERATIONAL_LIMITS_SNAPSHOT_MISSING
+                    )
+                else:
+                    _record_reference(
+                        references,
+                        variant,
+                        _EVIDENCE_OPERATIONAL_LIMITS,
+                        operational.version,
+                        operational.valid_until,
+                    )
 
 
 class _WarningCollector:
@@ -802,7 +1090,7 @@ class _WarningCollector:
         self,
         variant: AgentVariant,
         code: str,
-        dimension: ObjectiveDimension,
+        dimension: ObjectiveDimension | None = None,
     ) -> None:
         key = (
             code,
@@ -837,11 +1125,20 @@ def _objective_value(
         if pricing is None:
             warnings.add(variant, WARNING_SOFT_EVIDENCE_MISSING, dimension)
             return None
-        if pricing.effective_at > as_of:
-            warnings.add(variant, WARNING_SOFT_EVIDENCE_MISSING, dimension)
-            return None
-        if pricing.valid_until < as_of:
+        status = evaluate_pricing_snapshot(
+            pricing, expected_variant=variant, as_of=as_of
+        )
+        if status is SnapshotStatus.STALE:
             warnings.add(variant, WARNING_SOFT_EVIDENCE_STALE, dimension)
+            return None
+        if status is SnapshotStatus.FINGERPRINT_DRIFT:
+            warnings.add(variant, WARNING_PRICING_FINGERPRINT_DRIFT, dimension)
+            return None
+        if status is SnapshotStatus.INTEGRITY_FAILURE:
+            warnings.add(variant, WARNING_PRICING_INTEGRITY_FAILURE, dimension)
+            return None
+        if status is not SnapshotStatus.VALID:
+            warnings.add(variant, WARNING_SOFT_EVIDENCE_MISSING, dimension)
             return None
         _record_reference(
             references, variant, _EVIDENCE_PRICING, pricing.version, pricing.valid_until

@@ -250,6 +250,9 @@ CONTEXT_COMPRESSION_PROFILE = "context-compression-foundation"
 EVAL_REGRESSION_SCENARIO = "eval-regression"
 EVAL_REGRESSION_PACK_VERSION = "eval-regression-v1"
 EVAL_REGRESSION_PROFILE = "eval-regression-foundation"
+MODEL_ROUTING_SCENARIO = "model-routing"
+MODEL_ROUTING_PACK_VERSION = "model-routing-v1"
+MODEL_ROUTING_PROFILE = "model-routing-foundation"
 _CORE_LIFECYCLE_REQUIRED_CHECKS = (
     AcceptanceCheck(
         check_id="core.lifecycle",
@@ -1113,6 +1116,247 @@ def eval_regression_manifest(
         environment=environment,
         scenarios=(EVAL_REGRESSION_SCENARIO,),
         required_checks=_EVAL_REGRESSION_REQUIRED_CHECKS,
+        required_cli_commands=(),
+    )
+
+
+_MODEL_ROUTING_REQUIRED_CHECKS = (
+    AcceptanceCheck(
+        check_id="model.routing.typed-capability",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.ModelRouter,"
+            "m_agent.runtime.ModelRequirements"
+        ),
+        positive_check=(
+            "typed_capability_and_contract_limits_filter_with_inspectable_reasons"
+        ),
+        negative_check="capability_or_limit_mismatch_silently_admitted_is_fail",
+        authoritative_evidence="typed_capability_authoritative_digest",
+        independent_evidence="typed_capability_independent_digest",
+        milestone="0_5",
+        non_claim="live_provider_capability_behavior",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.operational-limits",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.OperationalLimitsGate,"
+            "m_agent.companion.routing.OperationalLimitsSnapshot"
+        ),
+        positive_check=(
+            "limits_floor_unknown_missing_stale_and_integrity_paths_all"
+            "_resolved_with_stable_codes"
+        ),
+        negative_check=(
+            "unknown_limits_treated_as_sufficient_or_stale_as_healthy_is_fail"
+        ),
+        authoritative_evidence="operational_limits_authoritative_digest",
+        independent_evidence="operational_limits_independent_digest",
+        milestone="0_5",
+        non_claim="live_quota_probing_or_enforcement",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.usage-cost",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.estimate_run_cost,"
+            "m_agent.companion.routing.RunCostPolicy"
+        ),
+        positive_check=(
+            "declared_formula_usage_provenance_and_gaps_without"
+            "_fabricated_precision"
+        ),
+        negative_check=(
+            "fabricated_estimate_or_settlement_guarantee_claim_is_fail"
+        ),
+        authoritative_evidence="usage_cost_authoritative_digest",
+        independent_evidence="usage_cost_independent_digest",
+        milestone="0_5",
+        non_claim="billing_settlement_or_provider_invoice_accuracy",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.deployment-constraints",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.DeploymentConstraints,"
+            "m_agent.companion.routing.ModelCatalogEntry"
+        ),
+        positive_check=(
+            "provider_region_endpoint_and_retention_constraints_match_hard"
+            "_with_unknown_failing_closed"
+        ),
+        negative_check="unknown_or_disallowed_attribute_admitted_is_fail",
+        authoritative_evidence="deployment_constraints_authoritative_digest",
+        independent_evidence="deployment_constraints_independent_digest",
+        milestone="0_5",
+        non_claim="credential_or_sensitive_endpoint_configuration",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.six-outcomes",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam="m_agent.companion.routing.ModelRouter.select",
+        positive_check=(
+            "all_six_resolved_outcomes_observed_with_inspectable_reason"
+            "_codes"
+        ),
+        negative_check="unresolved_or_silent_outcome_is_fail",
+        authoritative_evidence="six_outcomes_authoritative_digest",
+        independent_evidence="six_outcomes_independent_digest",
+        milestone="0_5",
+        non_claim="probabilistic_or_learning_based_routing",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.fallback",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.execute_pre_run_fallback,"
+            "m_agent.companion.routing.FallbackSequence"
+        ),
+        positive_check=(
+            "frozen_sequence_bounded_attempts_and_inspectable_reasons"
+            "_before_any_run_creation"
+        ),
+        negative_check=(
+            "unbounded_or_unregistered_or_duplicate_identity_sequence_is_fail"
+        ),
+        authoritative_evidence="fallback_authoritative_digest",
+        independent_evidence="fallback_independent_digest",
+        milestone="0_5",
+        non_claim="in_run_model_switching",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.zero-side-effect",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam="m_agent.companion.routing.ModelRouter.select",
+        positive_check=(
+            "success_and_failure_paths_leave_evidence_catalog_and_policy"
+            "_digests_unchanged"
+        ),
+        negative_check="mutated_input_snapshot_or_hidden_dispatch_is_fail",
+        authoritative_evidence="zero_side_effect_authoritative_digest",
+        independent_evidence="zero_side_effect_independent_digest",
+        milestone="0_5",
+        non_claim="telemetry_or_diagnostic_side_channels",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.immutable-decision",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.SQLiteRoutingStore,"
+            "m_agent.companion.routing.bind_decision_to_run"
+        ),
+        positive_check=(
+            "deterministic_decision_id_idempotent_replay_conflict_failure"
+            "_and_reopen_without_recomputation"
+        ),
+        negative_check=(
+            "rewritten_history_or_recomputed_decision_on_recovery_is_fail"
+        ),
+        authoritative_evidence="immutable_decision_authoritative_digest",
+        independent_evidence="immutable_decision_independent_digest",
+        milestone="0_5",
+        non_claim="distributed_or_cross_process_store_contention",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.no-in-run-switch",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.register_replacement_run,"
+            "m_agent.companion.routing.RoutingReplacementError"
+        ),
+        positive_check=(
+            "running_predecessor_never_replaced_and_successor_requires_a"
+            "_new_decision"
+        ),
+        negative_check=(
+            "in_run_variant_switch_or_decision_reuse_masquerading_as_retry"
+            "_is_fail"
+        ),
+        authoritative_evidence="no_in_run_switch_authoritative_digest",
+        independent_evidence="no_in_run_switch_independent_digest",
+        milestone="0_5",
+        non_claim="automatic_failure_recovery_or_retry_policy",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.explicit-promotion",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Routing Companion",
+        public_seam=(
+            "m_agent.companion.routing.publish_recommendation_as_policy,"
+            "m_agent.companion.routing.register_variant_for_policy"
+        ),
+        positive_check=(
+            "publication_preconditions_fail_closed_and_published_policy"
+            "_only_affects_future_routing"
+        ),
+        negative_check=(
+            "unpublished_recommendation_visible_or_base_policy_rewritten_is"
+            "_fail"
+        ),
+        authoritative_evidence="explicit_promotion_authoritative_digest",
+        independent_evidence="explicit_promotion_independent_digest",
+        milestone="0_5",
+        non_claim="automatic_promotion_or_baseline_rerun",
+    ),
+    AcceptanceCheck(
+        check_id="model.routing.mutation",
+        scenario=MODEL_ROUTING_SCENARIO,
+        owner="Testing",
+        public_seam=(
+            "m_agent.testing.reconcile_model_routing,"
+            "m_agent.testing.ScenarioEvidenceBundle"
+        ),
+        positive_check=(
+            "every_flipped_scenario_observation_boolean_is_detected_by"
+            "_reconciliation"
+        ),
+        negative_check="undetected_mutation_is_harness_error",
+        authoritative_evidence="mutation_authoritative_digest",
+        independent_evidence="mutation_independent_digest",
+        milestone="0_5",
+        non_claim="external_ledger_integrity",
+    ),
+)
+
+
+def model_routing_manifest(
+    *,
+    source_commit: str,
+    artifact_digest: str,
+    sdist_digest: str,
+    fixture_digest: str,
+    environment: Mapping[str, str],
+) -> AcceptanceManifest:
+    """Freeze the model-routing Scenario declaration.
+
+    十一个 required CONTRACT 检查覆盖：typed capability 与 Contract
+    Limits 过滤、Operational Limits 门槛（floor/unknown/missing/stale/
+    integrity）、声明式 usage/cost 估算（上界语义 + 证据缺口）、
+    Deployment Constraints 硬匹配、六种已决议 Routing Outcome、
+    pre-Run Fallback、零副作用、immutable Decision（SQLite Routing
+    Store）、显式 Replacement Run（no in-Run switch）、Eval
+    Recommendation 显式发布，以及变异检测。
+    """
+    return AcceptanceManifest(
+        pack_version=MODEL_ROUTING_PACK_VERSION,
+        profile=MODEL_ROUTING_PROFILE,
+        source_commit=source_commit,
+        artifact_digest=artifact_digest,
+        sdist_digest=sdist_digest,
+        fixture_digest=fixture_digest,
+        environment=environment,
+        scenarios=(MODEL_ROUTING_SCENARIO,),
+        required_checks=_MODEL_ROUTING_REQUIRED_CHECKS,
         required_cli_commands=(),
     )
 
