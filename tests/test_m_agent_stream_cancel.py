@@ -1,4 +1,4 @@
-"""Ticket 08 主行为测试：流式观察 Run Update 与协作式取消。
+"""主行为测试：流式观察 Run Update 与协作式取消。
 
 验收要求（.scratch/durable-run/issues/08-stream-and-cancel-run.md）：
 
@@ -25,29 +25,23 @@ import os
 import tempfile
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicStreamingModelAdapter,
-    DeterministicTool,
     FailureClassification,
     IllegalRunTransitionError,
-    InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
     ModelDelta,
     ModelFailure,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RetryPolicy,
     Runner,
     RunStatus,
     RunUpdate,
     RunUpdateType,
     StaleRunVersionError,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     ToolCall,
@@ -57,9 +51,38 @@ from m_agent import (
     ToolRequest,
     deserialize_model_response,
 )
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicStreamingModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 
 # -- fake 流式模型（确定性，可注入失败/阻塞） --------------------------
+
+
+class ObservationOnlyModelState:
+    """Explicitly exclude test synchronization probes from model behavior."""
+
+    def _fingerprint_excluded_state(self) -> frozenset[str]:
+        return super()._fingerprint_excluded_state() | {
+            "closed",
+            "gate",
+            "release",
+            "second_started",
+            "started",
+        }
+
 
 class StreamToolThenFinal(DeterministicStreamingModelAdapter):
     """第一次流式请求工具 lookup；第二次流式返回最终内容。"""
@@ -83,6 +106,18 @@ class StreamToolThenFinal(DeterministicStreamingModelAdapter):
         else:
             yield ModelDelta(content="final")
             yield ModelResponse(content="final answer")
+
+
+class StreamResponseThenDelta(DeterministicStreamingModelAdapter):
+    """Malformed stream: a delta follows the terminal complete response."""
+
+    async def stream(
+        self, request: ModelRequest,
+    ) -> "asyncio.AsyncIterator[ModelDelta | ModelResponse]":
+        self.call_count += 1
+        self._last_request = request
+        yield ModelResponse(content="complete")
+        yield ModelDelta(content="late")
 
 
 class StreamFailsThenSucceeds(DeterministicStreamingModelAdapter):
@@ -122,7 +157,7 @@ class StreamFailsThenSucceeds(DeterministicStreamingModelAdapter):
         yield ModelResponse(content="".join(self._chunks))
 
 
-class GatedDeltaStream(DeterministicStreamingModelAdapter):
+class GatedDeltaStream(ObservationOnlyModelState, DeterministicStreamingModelAdapter):
     """第一个 delta 立即发出；第二个 delta 前阻塞在 gate。
 
     用于"运行中检查 checkpoints 为空"与"in-flight adapter 调用时取消"。
@@ -149,7 +184,7 @@ class GatedDeltaStream(DeterministicStreamingModelAdapter):
             self.closed.set()
 
 
-class BlockingNonStreamingModel(DeterministicModelAdapter):
+class BlockingNonStreamingModel(ObservationOnlyModelState, DeterministicModelAdapter):
     """已 dispatch 后阻塞的非流式 Adapter。
 
     测试通过 ``started`` 观察 Adapter 已进入真实 ``generate`` 调用，再经
@@ -161,7 +196,11 @@ class BlockingNonStreamingModel(DeterministicModelAdapter):
         super().__init__(
             responses=("unused",),
             capabilities=ModelCapabilities(
-                tool_calling=bool(response.tool_calls),
+                tool_calling=(
+                    ToolCallingMode.NATIVE
+                    if response.tool_calls
+                    else ToolCallingMode.NONE
+                ),
             ),
         )
         self._response = response
@@ -178,7 +217,9 @@ class BlockingNonStreamingModel(DeterministicModelAdapter):
         return ModelResponse(content="unexpected follow-up")
 
 
-class BlockingNonStreamingFailureModel(DeterministicModelAdapter):
+class BlockingNonStreamingFailureModel(
+    ObservationOnlyModelState, DeterministicModelAdapter
+):
     """已 dispatch 后阻塞，并返回结构化永久失败的非流式 Adapter。"""
 
     def __init__(self) -> None:
@@ -198,7 +239,9 @@ class BlockingNonStreamingFailureModel(DeterministicModelAdapter):
         )
 
 
-class ToolThenBlockedModel(DeterministicStreamingModelAdapter):
+class ToolThenBlockedModel(
+    ObservationOnlyModelState, DeterministicStreamingModelAdapter
+):
     """第一次流式请求工具；第二次流式阻塞在 gate（用于 Step 间取消：
     第二次模型调用必须被取消阻止，绝不开始）。"""
 
@@ -308,6 +351,22 @@ class DispatchGateStore(InMemoryRunStore):
             await self.release_dispatch_guard.wait()
 
 
+class ReservationGateStore(InMemoryRunStore):
+    """Pause immediately after the durable model reservation is recorded."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(payload_codec=PlaintextPayloadCodec(), **kwargs)
+        self.reserved = asyncio.Event()
+        self.release_reservation = asyncio.Event()
+
+    async def reserve_model_attempt(self, *args, **kwargs) -> bool:
+        result = await super().reserve_model_attempt(*args, **kwargs)
+        if result:
+            self.reserved.set()
+            await self.release_reservation.wait()
+        return result
+
+
 def instant_tool(name: str = "lookup") -> DeterministicTool:
     tool = DeterministicTool(
         name=name,
@@ -333,12 +392,13 @@ def make_runner(
 ) -> tuple[Runner, DefinitionRegistry, InMemoryRunStore | SQLiteRunStore]:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
-            # required 与 adapter 声明一致（注册时校验 capabilities）。
-            required_capabilities=model.capabilities,
+            model_requirements=ModelRequirements(
+                capabilities=model.capabilities
+            ),
             model_adapter=model,
             tools=tools,
             retry_policy=retry_policy,
@@ -467,7 +527,7 @@ class StreamingRunUpdateTests(unittest.IsolatedAsyncioTestCase):
         # 第一个 delta 已发布、第二个 delta 前阻塞：权威记录无 checkpoint。
         inspection = await runner.inspect_run(created.run_id)
         self.assertEqual(model_checkpoints(inspection), [])
-        self.assertEqual(len(inspection.attempts), 0)
+        self.assertEqual(len(inspection.attempts), 1)
         gate.set()  # 释放流，允许完整响应 checkpoint。
         result = await task
         await collector
@@ -489,6 +549,20 @@ class StreamingRunUpdateTests(unittest.IsolatedAsyncioTestCase):
         restored = deserialize_model_response(checkpoints[0].output)
         self.assertEqual(restored.content, "Hello world")
         self.assertEqual(restored.tool_calls, ())
+
+    async def test_stream_rejects_data_after_complete_response(self) -> None:
+        model = StreamResponseThenDelta()
+        runner, _, _ = make_runner(model)
+        created = await runner.create_run("assistant", "1.0", input="hi")
+        result = await runner.start_run(created.run_id)
+
+        self.assertIs(result.status, RunStatus.FAILED)
+        self.assertEqual(result.error_code, "MODEL_CONTRACT_VIOLATION")
+        inspection = await runner.inspect_run(created.run_id)
+        self.assertEqual(len(model_checkpoints(inspection)), 0)
+        self.assertEqual(
+            inspection.attempts[0].error_code, "MODEL_CONTRACT_VIOLATION"
+        )
 
     async def test_full_response_checkpointed_before_dependent_work(
         self,
@@ -840,13 +914,15 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_during_uncertain_non_idempotent_tool_stays_waiting(
         self,
     ) -> None:
-        # Ticket 07 边界：取消请求不能把已 dispatch、结果仍不确定的
+        # 边界：取消请求不能把已 dispatch、结果仍不确定的
         # NON_IDEMPOTENT Tool 伪造成 CANCELLED；只有 Resolution 才能处置。
         class RequestNotificationModel(DeterministicModelAdapter):
             def __init__(self) -> None:
                 super().__init__(
                     responses=("unused",),
-                    capabilities=ModelCapabilities(tool_calling=True),
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    ),
                 )
 
             async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -905,7 +981,9 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 super().__init__(
                     responses=("unused",),
-                    capabilities=ModelCapabilities(tool_calling=True),
+                    capabilities=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE
+                    ),
                 )
 
             async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -975,6 +1053,58 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inspection.attempts, [])
         self.assertEqual(inspection.checkpoints, [])
 
+    async def test_cancel_after_model_reservation_prevents_provider_call(
+        self,
+    ) -> None:
+        store = ReservationGateStore()
+        model = DeterministicModelAdapter(responses=("never",))
+        runner, _, _ = make_runner(model, store=store)
+        created = await runner.create_run("assistant", "1.0", input="hi")
+
+        advancing = asyncio.create_task(runner.start_run(created.run_id))
+        await store.reserved.wait()
+        requested = await runner.cancel_run(created.run_id)
+        self.assertEqual(requested.status, RunStatus.RUNNING)
+        store.release_reservation.set()
+        result = await advancing
+
+        self.assertEqual(result.status, RunStatus.CANCELLED)
+        self.assertEqual(model.call_count, 0)
+        inspection = await runner.inspect_run(created.run_id)
+        self.assertEqual(len(inspection.attempts), 1)
+        self.assertEqual(inspection.attempts[0].status, StepStatus.FAILED)
+        self.assertEqual(
+            inspection.attempts[0].error_code, "MODEL_DISPATCH_CANCELLED"
+        )
+        self.assertEqual(len(inspection.steps), 1)
+        self.assertEqual(inspection.steps[0].status, StepStatus.FAILED)
+        self.assertEqual(
+            inspection.steps[0].error_code, "MODEL_DISPATCH_CANCELLED"
+        )
+
+    async def test_lease_expiry_after_model_reservation_prevents_provider_call(
+        self,
+    ) -> None:
+        from datetime import timedelta
+
+        from m_agent.runtime import DEFAULT_LEASE_TTL
+        from m_agent.adapters import FakeClock
+
+        clock = FakeClock()
+        store = ReservationGateStore(clock=clock)
+        model = DeterministicModelAdapter(responses=("never",))
+        runner, _, _ = make_runner(model, store=store)
+        created = await runner.create_run("assistant", "1.0", input="hi")
+
+        advancing = asyncio.create_task(runner.start_run(created.run_id))
+        await store.reserved.wait()
+        clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
+        store.release_reservation.set()
+        with self.assertRaises(LeaseNotHeldError):
+            await advancing
+
+        self.assertEqual(model.call_count, 0)
+
     async def test_cancel_during_inflight_streaming_adapter(self) -> None:
         # AC 9/10：adapter in-flight 时请求取消——流式调用在 delta 之间
         # 被协作中断（aclose -> GeneratorExit，adapter finally 观察到），
@@ -1012,9 +1142,17 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         # 不完整响应没有成为 checkpoint。
         inspection = await runner.inspect_run(created.run_id)
         self.assertEqual(model_checkpoints(inspection), [])
+        model_steps = [
+            step for step in inspection.steps if step.step_type is StepType.MODEL
+        ]
+        self.assertEqual([step.status for step in model_steps], [StepStatus.FAILED])
+        model_attempts = [
+            attempt
+            for attempt in inspection.attempts
+            if attempt.step_id == model_steps[0].step_id
+        ]
         self.assertEqual(
-            [a for a in inspection.attempts if a.status is StepStatus.SUCCEEDED],
-            [],
+            [attempt.status for attempt in model_attempts], [StepStatus.FAILED]
         )
 
     async def test_cancel_after_terminal_is_rejected(self) -> None:
@@ -1038,8 +1176,8 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_cancel_waiting_run_reuses_resolution(self) -> None:
-        # WAITING Run 的取消复用 CANCEL_RUN resolution（Ticket 07 语义）。
-        from m_agent import (
+        # WAITING Run 的取消复用 CANCEL_RUN resolution。
+        from m_agent.runtime import (
             REASON_UNCERTAIN_NON_IDEMPOTENT,
             ToolFailure,
         )

@@ -5,16 +5,17 @@ ADR 0009：Runner 采用 async-first 嵌入式模型，不内置后台 worker、
 （`start_run(run_id)` / `resume_run(run_id)`），绝不隐式扫描
 RunStore、排队或接管租约；进程部署与任务调度完全由上层应用负责。
 
-Ticket 02 恢复语义（ADR 0003 / PRD）：
+恢复语义（ADR 0003）：
 
-- 恢复是 at-least-once：已确认持久化的 Checkpoint 被复用、不重复
-  调用模型；在 Checkpoint 落盘前中断的执行会在恢复时重新执行，
-  因此模型调用可能发生不止一次，绝不宣称 exactly-once。
+- 恢复复用已确认的 Checkpoint；Context 与可安全重放的 Tool 在
+  Checkpoint 前中断时保持 at-least-once。Model Attempt 已在 dispatch
+  前持久化 reservation，若该 reservation 没有 Model checkpoint，调用
+  是否发生不可确认，恢复 fail-closed，绝不自动重放或宣称 exactly-once。
 - 恢复只读取 Run Store 与精确 `definition_id + version` 解析的
   Definition（ADR 0023）；原版本不可用时 Run 进入 WAITING，reason
   为机器可读的 ``DEFINITION_UNAVAILABLE``，绝不回退到最新版本。
 
-Ticket 03 并发控制（ADR 0013 / PRD User Stories 21-23, 44）：
+并发控制（ADR 0013）：
 
 - Runner 在推进非终态 Run 前先从 RunStore 排他获取 Run Lease
   （``acquire_lease``）；无有效租约（被他人持有）时抛
@@ -28,7 +29,7 @@ Ticket 03 并发控制（ADR 0013 / PRD User Stories 21-23, 44）：
 - 不同 Run 的租约相互独立，可并发推进；运行时没有全局执行锁、
   后台扫描、自动 takeover、queue 或 scheduler。
 
-Ticket 07 不确定副作用处置（ADR 0008 / PRD US 13, 37-42）：
+不确定副作用处置（ADR 0008：
 
 - NON_IDEMPOTENT 工具的结果不确定（工具主动抛 UNCERTAIN 失败，或
   崩溃发生在外部效果之后、Tool Step checkpoint 提交之前）时，Run
@@ -42,7 +43,7 @@ Ticket 07 不确定副作用处置（ADR 0008 / PRD US 13, 37-42）：
 - resolution 命令受状态、Run Lease（ADR 0013）与乐观版本三重约束；
   重复、过期、非法命令以显式异常失败，绝不改动权威记录。
 
-Ticket 08 实时观察与协作式取消（ADR 0010 / 0011 / 0012）：
+实时观察与协作式取消（ADR 0010 / 0011 / 0012）：
 
 - Run Update 是稳定但**非权威**的实时契约：上层应用通过公开入口
   :meth:`subscribe_run` 订阅，模型流式增量携带 run_id / step_id /
@@ -56,7 +57,7 @@ Ticket 08 实时观察与协作式取消（ADR 0010 / 0011 / 0012）：
   （新 Step 开始前、流式 delta 之间）转 CANCELLED。取消只阻止后续
   Step 启动，**不宣称强制中断或撤销已经发出的模型 / 工具调用**——
   in-flight 调用正常完成并按需 checkpoint（外部副作用已经发生）。
-  跨进程取消不在本 Ticket 范围：取消请求是进程内协作信号，跨进程的
+  跨进程取消不在本版本 范围：取消请求是进程内协作信号，跨进程的
   取消编排由上层应用自行实现（本运行时不做消息队列 / 事件总线）。
 """
 
@@ -64,6 +65,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -72,27 +74,73 @@ from datetime import timedelta
 from ._context import (
     ContextItem,
     ContextRequest,
-    deserialize_context_items,
     serialize_context_items,
 )
+from ._compression import (
+    CompressionContract,
+    CompressionContractViolationError,
+    CompressionResult,
+    apply_compression,
+    compression_step_id,
+    compression_task_input,
+    parse_compression_output,
+    validate_compression_result,
+)
+from ._context_plan import (
+    ContextBudget,
+    ContextFrame,
+    ContextItemWithProvenance,
+    ContextPlan,
+    ContextScope,
+    ContextStage,
+    ContextStageResult,
+    ContextTransformType,
+    LEGACY_PROVIDER_STAGE_ID,
+    ModelInputSizer,
+    ProvenanceSource,
+    aggregate_frame_items,
+    legacy_provider_stage,
+    parse_stage_result,
+    stage_invocation_step_id,
+    check_frame_budget,
+)
 from ._definition import AgentDefinition, DefinitionRegistry, RetryPolicy
+from ._history import ConversationMessage
+from ._policy import (
+    PolicyAction,
+    PolicyDecision,
+    PolicyDecisionRecord,
+    PolicyGate,
+    PolicyRequest,
+    policy_input_summary,
+)
 from ._errors import (
     DefinitionNotFoundError,
     IllegalRunTransitionError,
     LeaseNotHeldError,
+    ModelCapabilityError,
+    ModelContractViolationError,
     ResolutionNotAllowedError,
     RunNotFoundError,
     StaleRunVersionError,
 )
-from ._failure import ToolFailure, classify_exception
+from ._failure import ToolFailure, classify_exception, redact_failure_message
 from ._model import (
     ModelAdapter,
+    ModelBindingSet,
     ModelDelta,
+    ModelPurpose,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
+    StreamingMode,
+    StructuredOutputMode,
+    assert_model_request_compatible,
     deserialize_model_response,
+    normalize_model_response,
     serialize_model_response,
 )
+from ._output import OutputContract, OutputFallback, validate_output
 from ._resolution import (
     ResolutionAction,
     RunResolution,
@@ -129,21 +177,54 @@ from ._updates import RunUpdate, RunUpdateType
 REASON_DEFINITION_UNAVAILABLE = "DEFINITION_UNAVAILABLE"
 
 #: UNCERTAIN NON_IDEMPOTENT Tool Step 进入 WAITING 的机器可读 reason
-#: （ADR 0007 / Ticket 06）：运行时绝不自动重放不确定的非幂等副作用，
-#: 等待上层应用通过显式 resolution（Ticket 07）处置。
+#: （ADR 0007）：运行时绝不自动重放不确定的非幂等副作用，
+#: 等待上层应用通过显式 resolution处置。
 REASON_UNCERTAIN_NON_IDEMPOTENT = "UNCERTAIN_NON_IDEMPOTENT"
+REASON_POLICY_RESOLUTION_REQUIRED = "POLICY_RESOLUTION_REQUIRED"
+ERROR_POLICY_ERROR = "POLICY_ERROR"
+ERROR_POLICY_OUTCOME_PENDING = "POLICY_OUTCOME_PENDING"
+ERROR_OUTPUT_VALIDATION_FAILED = "OUTPUT_VALIDATION_FAILED"
 
 #: 恢复时发现未确认的 NON_IDEMPOTENT 工具调用（外部效果可能已在崩溃前
 #: 发生、但 checkpoint 未提交）的失败 Attempt 机器可读错误标识
-#: （Ticket 07）：与工具主动抛 UNCERTAIN 时使用同一标识，保证恢复路径
+#: ：与工具主动抛 UNCERTAIN 时使用同一标识，保证恢复路径
 #: 与执行路径产生一致的机器可读证据。
 ERROR_EFFECT_UNCONFIRMED = "effect_unconfirmed"
+
+#: Frozen Model Execution Budget exhausted before a further provider call.
+ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED = "MODEL_EXECUTION_BUDGET_EXCEEDED"
+
+#: Complete Model Request exceeds the frozen Context Budget hard limit
+#: before dispatch. Zero model dispatch (ADR 0040).
+ERROR_CONTEXT_BUDGET_EXCEEDED = "CONTEXT_BUDGET_EXCEEDED"
+
+#: A frozen Context Plan declares a Stage the Core cannot execute at its
+#: declared lifecycle point（ADR 0040：Core 只执行 Stage 边界，SELECT/
+#: TRIM/BUDGET_SELECT 算法属于 Context Companion；Provider 缺失时
+#: PROVIDE 也无法执行）。Runner 绝不静默跳过声明的 Stage，而是以
+#: 本错误确定性失败。
+ERROR_CONTEXT_STAGE_UNSUPPORTED = "CONTEXT_STAGE_UNSUPPORTED"
+
+#: A durable Model Attempt reservation has no corresponding checkpoint after
+#: recovery. The provider call may have happened; its failed record retains
+#: this evidence before a bounded at-least-once replay gets a new identity.
+ERROR_MODEL_CHECKPOINT_UNCONFIRMED = "model_checkpoint_unconfirmed"
+
+#: A streaming Model dispatch observed a cooperative cancellation before it
+#: produced a checkpointable response. The Run is CANCELLED, while its durable
+#: Model Step and Attempt retain a terminal failure record.
+ERROR_MODEL_DISPATCH_CANCELLED = "MODEL_DISPATCH_CANCELLED"
 
 #: Run Snapshot 未提供唯一 Tool Effect 声明时的稳定错误标识。Runner 不得
 #: 使用恢复进程当前注册的 callable 来猜测该 Run 的重试安全性。
 ERROR_FROZEN_TOOL_DECLARATION_UNAVAILABLE = (
     "FROZEN_TOOL_DECLARATION_UNAVAILABLE"
 )
+
+#: Compression 输出或压缩证据违反冻结的 Compression Contract（ADR 0040）：未知派生引用、无 provenance、item 冲突、超出输出约束、
+#: 非压缩（扩张）输出或恢复时 provenance 漂移。Runner 以本错误
+#: 确定性 fail closed，并保留原始与失败证据。
+ERROR_COMPRESSION_CONTRACT_VIOLATION = "COMPRESSION_CONTRACT_VIOLATION"
 
 #: 默认租约有效期（ADR 0013）。上层应用可通过 Runner 构造参数覆盖；
 #: 租约过期后其他 Runner 才能接管。
@@ -166,6 +247,8 @@ class CrashPoint(str, enum.Enum):
     AFTER_CONTEXT_CHECKPOINT = "after_context_checkpoint"
     #: 模型调用完成之后、任何 Step 记录落盘之前。
     BEFORE_MODEL_CHECKPOINT = "before_model_checkpoint"
+    #: Model Attempt 预算已持久化、provider dispatch 尚未开始。
+    AFTER_MODEL_ATTEMPT_RESERVATION = "after_model_attempt_reservation"
     #: Model Step Checkpoint 已持久化之后、Run 终态写入之前。
     AFTER_MODEL_CHECKPOINT = "after_model_checkpoint"
     #: 工具调用完成之后、任何 Tool Step 记录落盘之前。
@@ -189,7 +272,7 @@ class Runner:
     :param crash_hook: 确定性崩溃注入回调（仅测试用，默认 None）。
         签名 ``crash_hook(point, run_id)``；在 :class:`CrashPoint`
         边界被调用，回调抛出的异常会终止推进。
-    :param telemetry_sink: 可选 Telemetry Sink（Ticket 09 / ADR 0035）。
+    :param telemetry_sink: 可选 Telemetry Sink（ADR 0035）。
         Runner 在 Run / Step / Attempt 生命周期事件上调用
         ``sink.emit(TelemetryEvent)``；事件只用于观测，不含 Run
         Payload，且 Sink 失败被隔离（捕获并继续推进），绝不覆盖或
@@ -219,11 +302,11 @@ class Runner:
         #: 因此每个 Runner 实例天然拥有不同的 owner，可被持久化、验证。
         self._owner = owner if owner is not None else f"runner-{new_id()}"
         self._lease_ttl = lease_ttl
-        #: 每个 Run 的 Run Update 订阅队列集合（Ticket 08 / ADR 0010）。
+        #: 每个 Run 的 Run Update 订阅队列集合（ADR 0010）。
         #: 进程内订阅：队列只在本 Runner 发布，订阅者断开即移除，
         #: 绝不改变 Run 执行与权威状态。
         self._subscribers: dict[str, set[asyncio.Queue[RunUpdate]]] = {}
-        #: 每个 Run 的协作取消请求（Ticket 08 / ADR 0012）。``cancel_run``
+        #: 每个 Run 的协作取消请求（ADR 0012）。``cancel_run``
         #: 在推进者持有租约时登记事件；推进者在安全边界检查并转 CANCELLED。
         #: 取消是进程内协作信号，跨进程取消由上层应用自行编排。
         self._cancel_events: dict[str, asyncio.Event] = {}
@@ -232,7 +315,7 @@ class Runner:
         #: 遗留 RUNNING"：``cancel_run`` 对活跃推进者只登记协作取消，
         #: 绝不因同 owner 续约而直接终结并释放租约。
         self._active_advancers: set[str] = set()
-        #: 可选 Telemetry Sink（Ticket 09 / ADR 0035）。事件只用于观测，
+        #: 可选 Telemetry Sink（ADR 0035）。事件只用于观测，
         #: 默认不含 Run Payload；Sink 失败被 :meth:`_emit_telemetry` 隔离。
         self._telemetry_sink = telemetry_sink
         #: Sink 异常的可观测回调（默认 None）：隔离捕获后调用，绝不
@@ -252,22 +335,41 @@ class Runner:
     # -- 公开控制入口 -------------------------------------------------
 
     async def create_run(
-        self, definition_id: str, version: str, input: str
+        self,
+        definition_id: str,
+        version: str,
+        input: str,
+        *,
+        run_id: str | None = None,
+        history: Sequence[ConversationMessage] = (),
     ) -> RunRecord:
         """在没有任何模型调用之前，持久化一个可检查的 CREATED 记录。
 
         定义在创建时即按精确 id + version 解析，缺失提前失败。
+
+        :param run_id: 预分配 run identity（ADR 0019 / ADR 0020）。
+            SessionRunner 等组合方在创建 Run 之前先用该 identity 原子
+            绑定外部占用；未提供时运行时自行生成。提供的 identity 落库
+            后被占用，重复创建确定性失败（DuplicateRunError）。
+        :param history: 创建时显式提供并冻结的 Conversation History
+            （ADR 0019）。它作为受保护 Run Payload 持久化，后续
+            start / resume / 恢复只复用该冻结输入，绝不重新读取任何
+            会话存储；sessionless Run 保持默认空历史。
         """
+        if run_id is not None and not run_id.strip():
+            raise ValueError("run_id must be a non-blank identifier")
         definition = self._registry.resolve(definition_id, version)
         run = RunRecord(
-            run_id=new_id(),
+            run_id=run_id if run_id is not None else new_id(),
             definition_id=definition.definition_id,
             definition_version=definition.version,
             input=input,
+            history=tuple(history),
             status=RunStatus.CREATED,
+            snapshot=definition.frozen_snapshot(),
         )
         result = await self._store.create_run(run)
-        # Ticket 09：Run 生命周期从 CREATED 起即可观测（与 Run Store
+        # Run 生命周期从 CREATED 起即可观测（与 Run Store
         # 的权威 CREATED 记录一一对应；telemetry 不承载 payload）。
         self._emit_telemetry(
             TelemetryEvent(
@@ -287,7 +389,7 @@ class Runner:
         回到模型，直到最终响应）-> SUCCEEDED。租约被其他 Runner
         持有时抛 :class:`LeaseNotHeldError`；定义缺失时显式报错
         （创建时已解析过）。自动重试只依据冻结在 Definition Snapshot
-        中的显式 Retry Policy（Ticket 06 / ADR 0025），无策略不重试。
+        中的显式 Retry Policy（ADR 0025），无策略不重试。
         """
         run = await self._get_existing_run(run_id)
         if run.status is not RunStatus.CREATED:
@@ -297,6 +399,7 @@ class Runner:
         definition = self._registry.resolve(
             run.definition_id, run.definition_version
         )
+        self._assert_adapter_contract_matches_snapshot(run, definition)
         # 登记本实例为活跃推进者：``cancel_run`` 据此区分"同 owner 的
         # 活跃推进者"与"无推进者的遗留 RUNNING"，只对前者登记协作取消
         # （ADR 0012），绝不因同 owner 续约而直接终结并释放租约。
@@ -319,12 +422,20 @@ class Runner:
         lease: RunLease,
     ) -> RunRecord:
         """在已持有租约的前提下从 CREATED 启动（start/resume 共用）。"""
-        snapshot = definition.frozen_snapshot()
+        try:
+            self._assert_adapter_contract_matches_snapshot(run, definition)
+        except Exception:
+            await self._release_quietly(run.run_id, lease.owner)
+            raise
+        gated = await self._enforce_policy(
+            run, definition, lease, PolicyGate.INPUT, {"input": run.input}
+        )
+        if gated.status is not RunStatus.CREATED:
+            return gated
         running = await self._store.transition_run(
             run.run_id,
             expected_version=run.version,
             status=RunStatus.RUNNING,
-            snapshot=snapshot,
             lease_owner=lease.owner,
         )
         self._publish_status(run.run_id, RunStatus.RUNNING)
@@ -436,12 +547,17 @@ class Runner:
         steps = await self._store.get_steps(run_id)
         attempts = await self._store.get_attempts(run_id)
         checkpoints = await self._store.get_checkpoints(run_id)
+        decisions = await self._store.get_policy_decisions(run_id)
         return RunInspection(
-            run=run, steps=steps, attempts=attempts, checkpoints=checkpoints
+            run=run,
+            steps=steps,
+            attempts=attempts,
+            checkpoints=checkpoints,
+            policy_decisions=decisions,
         )
 
     async def subscribe_run(self, run_id: str) -> AsyncIterator[RunUpdate]:
-        """订阅一个 Run 的实时 Run Update 流（Ticket 08 / ADR 0010）。
+        """订阅一个 Run 的实时 Run Update 流（ADR 0010）。
 
         这是唯一的 Run Update 订阅入口，面向上层应用：订阅者不需要
         访问任何内部执行对象（AC 1）。用法：
@@ -477,7 +593,7 @@ class Runner:
         run_id: str,
         expected_version: int | None = None,
     ) -> RunRecord:
-        """提交协作式 Cancellation Request（Ticket 08 / ADR 0012）。
+        """提交协作式 Cancellation Request（ADR 0012）。
 
         Cancellation Request 是"停止继续推进该 Run"的意图（CONTEXT.md），
         不是强制中断：本方法**不承诺撤销或打断已经发出的模型 / 工具
@@ -609,11 +725,11 @@ class Runner:
         resolution: RunResolution,
         expected_version: int,
     ) -> RunRecord:
-        """对 WAITING Agent Run 提交显式应用 resolution（ADR 0008 / Ticket 07）。
+        """对 WAITING Agent Run 提交显式应用 resolution（ADR 0008）。
 
         这是**唯一**的 resolution 入口，只面向上层应用：模型契约
         （ModelRequest / ModelResponse）中不存在任何 resolution 通道，
-        模型无法发出或合成 resolution 命令（Ticket 07 AC 8）。
+        模型无法发出或合成 resolution 命令。
 
         - ``RETRY_STEP``：显式授权重试等待中的 Tool Step——创建新的
           Step Attempt（同一 step_id，历史 Attempt 保留）并重新执行
@@ -636,7 +752,7 @@ class Runner:
           ``expected_version``（ADR 0013）。权威版本已推进时（并发
           resolution / 其他推进者），命令抛
           :class:`StaleRunVersionError` 且不改动任何记录——过期命令
-          据此明确失败（Ticket 07 AC 9）。
+          据此明确失败。
         """
         run = await self._get_existing_run(run_id)
         if run.status is not RunStatus.WAITING:
@@ -671,6 +787,7 @@ class Runner:
         if resolution.action in (
             ResolutionAction.RETRY_STEP,
             ResolutionAction.CONFIRM_STEP,
+            ResolutionAction.CONTINUE_RUN,
         ):
             try:
                 definition = self._registry.resolve(
@@ -730,6 +847,71 @@ class Runner:
                         else RunStatus.CANCELLED
                     ),
                 )
+            if resolution.action is ResolutionAction.CONTINUE_RUN:
+                definition = self._registry.resolve(
+                    run.definition_id, run.definition_version
+                )
+                self._assert_adapter_contract_matches_snapshot(run, definition)
+                running = await self._store.transition_run(
+                    run.run_id,
+                    expected_version=run.version,
+                    status=RunStatus.RUNNING,
+                    lease_owner=lease.owner,
+                )
+                self._publish_status(run.run_id, RunStatus.RUNNING)
+                if run.waiting_reason and run.waiting_reason.startswith(
+                    REASON_POLICY_RESOLUTION_REQUIRED + ":"
+                ):
+                    decisions = await self._store.get_policy_decisions(run.run_id)
+                    last_decision = decisions[-1] if decisions else None
+                    if last_decision is not None and (
+                        last_decision.gate is PolicyGate.TOOL_OUTCOME
+                    ):
+                        pending_attempt = await self._pending_tool_outcome(
+                            run, run.waiting_step_id
+                        )
+                        if pending_attempt is None or pending_attempt.output is None:
+                            raise RuntimeError(
+                                "policy-held Tool Outcome has no pending evidence"
+                            )
+                        pending_outcome = deserialize_tool_outcome(
+                            pending_attempt.output
+                        )
+                        running = await self._enforce_policy(
+                            running,
+                            definition,
+                            lease,
+                            PolicyGate.TOOL_OUTCOME,
+                            {
+                                "tool_name": pending_outcome.tool_name,
+                                "call_id": pending_outcome.call_id,
+                                "status": pending_outcome.status.value,
+                                "continued_by_application": True,
+                            },
+                            waiting_step_id=run.waiting_step_id,
+                        )
+                        if running.status is not RunStatus.RUNNING:
+                            return running
+                        await self._checkpoint_tool_outcome(
+                            running,
+                            lease,
+                            pending_attempt.step_id,
+                            pending_outcome,
+                            attempt_id=pending_attempt.attempt_id,
+                        )
+                self._active_advancers.add(run_id)
+                try:
+                    if not await self._store.get_checkpoints(run.run_id):
+                        gated = await self._enforce_policy(
+                            running, definition, lease, PolicyGate.INPUT,
+                            {"input": running.input},
+                        )
+                        if gated.status is not RunStatus.RUNNING:
+                            return gated
+                        return await self._execute_steps(gated, definition, lease)
+                    return await self._resume_running(running, lease)
+                finally:
+                    self._active_advancers.discard(run_id)
             try:
                 definition = self._registry.resolve(
                     run.definition_id, run.definition_version
@@ -771,7 +953,7 @@ class Runner:
         except (LeaseNotHeldError, RunNotFoundError, StaleRunVersionError):
             pass
 
-    # -- Ticket 08：Run Update 发布与协作式取消辅助 -------------------
+    # -- Run Update 发布与协作式取消辅助 -------------------
 
     def _publish(self, update: RunUpdate) -> None:
         """把一条 Run Update 投递给该 Run 的全部订阅者（尽力而为）。
@@ -811,12 +993,12 @@ class Runner:
         if status.is_terminal:
             self._clear_telemetry_timings(run_id)
 
-    # -- Ticket 09：Telemetry 发射与错误隔离 -------------------------
+    # -- Telemetry 发射与错误隔离 -------------------------
 
     def _emit_telemetry(self, event: TelemetryEvent) -> None:
         """尽力把一条 Telemetry 事件交给 Sink，失败完全隔离。
 
-        契约（Ticket 09 AC / ADR 0035）：
+        契约：
 
         - Sink 抛出的任何异常都被捕获并忽略（可选回调可观测），
           **绝不覆盖或伪造 RunStore 权威状态**、绝不改变 Run 推进；
@@ -913,6 +1095,52 @@ class Runner:
             owner=lease.owner,
         )
 
+    async def _reserve_model_attempt(
+        self,
+        run: RunRecord,
+        lease: RunLease,
+        step_id: str,
+        attempt_id: str,
+        purpose: ModelPurpose,
+    ) -> bool:
+        """Persist one model dispatch reservation under the Run's lease."""
+        assert run.snapshot is not None
+        budget = run.snapshot.model_execution_budget
+        reserve = getattr(self._store, "reserve_model_attempt", None)
+        if reserve is None:
+            # A complete pre-Ticket-08 Store has no atomic reservation. Only
+            # preserve its old, unbounded Definition behavior; a new typed
+            # budget never silently downgrades to a non-atomic dispatch.
+            return budget is None
+        reserved = await reserve(
+            StepRecord(
+                step_id=step_id,
+                run_id=run.run_id,
+                step_type=StepType.MODEL,
+                status=StepStatus.RUNNING,
+            ),
+            StepAttempt(
+                attempt_id=attempt_id,
+                step_id=step_id,
+                run_id=run.run_id,
+                status=StepStatus.RUNNING,
+                model_purpose=purpose,
+            ),
+            run_max_attempts=(
+                budget.run_max_attempts if budget is not None else None
+            ),
+            purpose_max_attempts=(
+                budget.maximum_for(purpose) if budget is not None else None
+            ),
+            expected_version=run.version,
+            lease_owner=lease.owner,
+        )
+        if reserved:
+            self._maybe_crash(
+                CrashPoint.AFTER_MODEL_ATTEMPT_RESERVATION, run.run_id
+            )
+        return reserved
+
     async def _stream_model(
         self,
         adapter: ModelAdapter,
@@ -924,20 +1152,25 @@ class Runner:
     ) -> ModelResponse | None:
         """消费流式 Model Adapter，把增量发布为 ``MODEL_DELTA`` Run Update。
 
-        契约（ADR 0011 / Ticket 08 AC 2-4）：
+        契约（ADR 0011 / AC 2-4）：
 
         - 每个 :class:`ModelDelta` 作为带 run_id / step_id / attempt_id
           的 ``MODEL_DELTA`` 发布；增量**不写入 Run Store**；
         - 流的最后一个 :class:`ModelResponse` 返回给调用方，由调用方
           checkpoint（只有完整响应成为恢复点）；
         - 增量之间检查协作取消：若已请求取消，协作中断流（``aclose``）
-          并返回 None（Run 已由 :meth:`_maybe_cancel` 转 CANCELLED），
-          不把不完整的输出当作 checkpoint。
+          并返回 None；调用方先终结已预留的 Step / Attempt，再把 Run 转
+          CANCELLED，不把不完整的输出当作 checkpoint。
         """
         generator = adapter.stream(request)
+        response: ModelResponse | None = None
         try:
             async for event in generator:
                 if isinstance(event, ModelDelta):
+                    if response is not None:
+                        raise ModelContractViolationError(
+                            "stream adapter yielded data after complete ModelResponse"
+                        )
                     self._publish(
                         RunUpdate(
                             run_id=run.run_id,
@@ -948,12 +1181,16 @@ class Runner:
                             content=event.content,
                         )
                     )
-                    if await self._maybe_cancel(run, lease) is not None:
+                    if self._cancel_requested(run.run_id):
                         return None
                 elif isinstance(event, ModelResponse):
-                    return event
+                    if response is not None:
+                        raise ModelContractViolationError(
+                            "stream adapter yielded multiple complete ModelResponses"
+                        )
+                    response = event
                 else:
-                    raise TypeError(
+                    raise ModelContractViolationError(
                         f"stream adapter {type(adapter).__name__} yielded "
                         f"{type(event).__name__}, expected ModelDelta or "
                         "ModelResponse"
@@ -965,12 +1202,14 @@ class Runner:
                 await generator.aclose()
             except (RuntimeError, StopAsyncIteration):
                 pass
-        raise RuntimeError(
+        if response is not None:
+            return response
+        raise ModelContractViolationError(
             f"stream adapter {type(adapter).__name__} ended without "
             "yielding a complete ModelResponse"
         )
 
-    # -- Ticket 07：WAITING resolution 内部实现 ----------------------
+    # -- WAITING resolution 内部实现 ----------------------
 
     async def _resolve_uncertain_continue(
         self,
@@ -991,7 +1230,7 @@ class Runner:
           重新执行工具（外部副作用只在此显式授权后发生）。
         """
         checkpoints = await self._store.get_checkpoints(run.run_id)
-        # 目标 Step 在 WAITING 记录中机器可读（Ticket 07 AC 4）。必须在
+        # 目标 Step 在 WAITING 记录中机器可读。必须在
         # 转回 RUNNING 之前保存：Store 保证 WAITING 字段只在 WAITING
         # 状态有效，转出时自动清空。
         target_step_id = run.waiting_step_id
@@ -1000,15 +1239,8 @@ class Runner:
                 f"cannot {resolution.action.value} run {run.run_id}: "
                 "no waiting step recorded"
             )
-        context_items: list[ContextItem] = []
-        if run.snapshot is not None and run.snapshot.has_context_provider:
-            context_checkpoints = [
-                c for c in checkpoints if c.step_type is StepType.CONTEXT
-            ]
-            if context_checkpoints:
-                context_items = deserialize_context_items(
-                    context_checkpoints[-1].output
-                )
+        # Context Frame Items 在模型循环内按 Context checkpoint 聚合
+        # （_prepare_model_step_context）；Resolution 路径不再单独重建。
         model_checkpoints = [
             c for c in checkpoints if c.step_type is StepType.MODEL
         ]
@@ -1055,6 +1287,23 @@ class Runner:
                 target_call.tool_name,
                 result=resolution.result,
             )
+            # Application confirmation creates a model-visible Tool Outcome.
+            # It must cross the same final authorization seam as an outcome
+            # returned by a dispatched Tool before becoming durable evidence.
+            run = await self._enforce_policy(
+                run,
+                definition,
+                lease,
+                PolicyGate.TOOL_OUTCOME,
+                {
+                    "tool_name": outcome.tool_name,
+                    "call_id": outcome.call_id,
+                    "status": outcome.status.value,
+                    "confirmed_by_application": True,
+                },
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
             await self._checkpoint_tool_outcome(
                 run, lease, target_step_id, outcome
             )
@@ -1062,7 +1311,6 @@ class Runner:
                 run,
                 definition,
                 lease,
-                context_items=context_items,
                 prior_tool_outcomes=(*confirmed, outcome),
             )
         # RETRY_STEP：同一 step_id 下创建新 Attempt 并重新执行工具。
@@ -1080,7 +1328,6 @@ class Runner:
             run,
             definition,
             lease,
-            context_items=context_items,
             prior_tool_outcomes=(*confirmed, outcome),
         )
 
@@ -1118,50 +1365,99 @@ class Runner:
     ) -> None:
         """Fail closed when an exact definition was re-registered differently.
 
-        Legacy Snapshots have no fingerprint and retain their existing
-        compatibility behavior. New Snapshots compare only non-secret digests
-        before any recovery side effect can be dispatched.
+        The complete, non-secret Contract is compared before any recovery side
+        effect can be dispatched.
         """
         snapshot = run.snapshot
-        if snapshot is None or not snapshot.adapter_contract_fingerprint:
-            return
-        if snapshot.adapter_capabilities != definition.model_adapter.capabilities:
+        if snapshot is None:
             raise RuntimeError(
-                f"run {run.run_id} snapshot adapter configuration does not "
-                "match the resolved definition; refusing to silently change "
-                "recovery behavior"
+                f"run {run.run_id} has no frozen Model Binding snapshot; "
+                "refusing to adopt current definition semantics"
             )
-        if (
-            snapshot.adapter_contract_fingerprint
-            != definition.model_adapter.definition_contract_fingerprint()
+        expected_bindings = snapshot.model_bindings
+        if expected_bindings is None:
+            # 0.2 snapshots predate purpose bindings and fingerprints. Retain
+            # their original capability-only resume check instead of making
+            # valid persisted Runs unrecoverable during the expand window.
+            if snapshot.adapter_capabilities != definition.model_adapter.capabilities:
+                raise RuntimeError(
+                    f"run {run.run_id} legacy snapshot Model Capabilities do not "
+                    "match the resolved adapter; refusing to silently change "
+                    "recovery behavior"
+                )
+            if (
+                snapshot.adapter_contract_fingerprint
+                and (
+                    definition.model_adapter.definition_contract_fingerprint()
+                    != snapshot.adapter_contract_fingerprint
+                )
+            ):
+                raise RuntimeError(
+                    f"run {run.run_id} legacy snapshot Model Contract does not "
+                    "match the resolved adapter configuration; refusing to "
+                    "silently change recovery behavior"
+                )
+            return
+        if not Runner._model_bindings_match(
+            expected_bindings, definition.effective_model_bindings()
         ):
             raise RuntimeError(
-                f"run {run.run_id} snapshot adapter configuration does not "
+                f"run {run.run_id} snapshot Model Contract Binding set does not "
                 "match the resolved definition; refusing to silently change "
                 "recovery behavior"
             )
+        for binding in expected_bindings.bindings:
+            adapter = definition.model_adapter_for(binding.purpose)
+            configuration_fingerprint = adapter.definition_contract_fingerprint()
+            if binding.adapter_configuration_fingerprint is not None:
+                if (
+                    not configuration_fingerprint
+                    or configuration_fingerprint
+                    != binding.adapter_configuration_fingerprint
+                ):
+                    raise RuntimeError(
+                        f"run {run.run_id} snapshot Model Contract does not "
+                        "match the resolved adapter configuration; refusing to "
+                        "silently change recovery behavior"
+                    )
+            elif not adapter.deterministic:
+                raise RuntimeError(
+                    f"run {run.run_id} resolved live adapter has no verifiable "
+                    "current configuration fingerprint"
+                )
+
+    @staticmethod
+    def _model_bindings_match(
+        expected: ModelBindingSet, current: ModelBindingSet
+    ) -> bool:
+        """Compare frozen bindings by purpose, not construction tuple order."""
+        return all(
+            expected.for_purpose(purpose) == current.for_purpose(purpose)
+            for purpose in ModelPurpose
+        )
 
     async def _resume_running(
         self, run: RunRecord, lease: RunLease
     ) -> RunRecord:
         """基于 RUNNING 状态的持久化记录继续推进（已持有租约）。
 
-        Ticket 05：恢复基于 Run Store 的 checkpoint 精确重建执行位置：
+        恢复基于 Run Store 的 checkpoint 精确重建执行位置：
 
         - 已确认的 Model Step Checkpoint 复用、不重复调用模型；若该
           checkpoint 的响应已请求工具，则从缺失 Outcome 的工具调用
           继续顺序执行（已确认的 Tool Outcome 一律复用，不重复外部
           副作用），再回到模型循环，直到产生不含工具请求的最终响应。
-        - 未确认的 Tool 调用按 Tool Effect 区分（Ticket 07）：READ_ONLY
+        - 未确认的 Tool 调用按 Tool Effect 区分：READ_ONLY
           与 IDEMPOTENT 工具保持 at-least-once 重放语义（checkpoint 前
           中断 = 重新执行）；**NON_IDEMPOTENT 工具绝不自动重放**——
           checkpoint 未提交意味着外部副作用可能已在崩溃前发生，结果
           不确定，Run 进入 WAITING 等待应用显式处置（ADR 0007）。
         - 已确认的 Context Step 直接复用其 Items，不重新查询外部
           数据源（外部数据即使变化也不重写 Run 的上下文）。
-        - 无任何 Model Step checkpoint 时，从 Context Step（如有）
-          与模型循环重新开始（at-least-once：checkpoint 落盘前的
-          步骤重新执行，绝不宣称 exactly-once）。
+        - 任一已持久化的 Model Attempt reservation 没有对应 checkpoint
+          时，provider dispatch 是否发生不可确认；该 Attempt 保留为
+          UNCERTAIN 的预算消耗，并在预算允许时以新的 Attempt identity
+          按 at-least-once 语义重放。
         """
         try:
             definition = self._registry.resolve(
@@ -1181,6 +1477,19 @@ class Runner:
         ]
         persisted_steps = await self._store.get_steps(run.run_id)
         persisted_attempts = await self._store.get_attempts(run.run_id)
+        pending_outcome_attempt = next(
+            (
+                attempt
+                for attempt in reversed(persisted_attempts)
+                if attempt.error_code == ERROR_POLICY_OUTCOME_PENDING
+                and attempt.output is not None
+            ),
+            None,
+        )
+        if pending_outcome_attempt is not None:
+            return await self._enter_waiting_policy_outcome(
+                run, lease, pending_outcome_attempt.step_id
+            )
         inflight_step = next(
             (
                 step
@@ -1212,20 +1521,103 @@ class Runner:
             ),
             None,
         )
+        last_model_step = next(
+            (
+                step
+                for step in reversed(persisted_steps)
+                if step.step_type is StepType.MODEL
+            ),
+            None,
+        )
+        model_steps = {
+            step.step_id: step
+            for step in persisted_steps
+            if step.step_type is StepType.MODEL
+        }
+        checkpoint_attempt_ids = {
+            checkpoint.attempt_id for checkpoint in model_checkpoints
+        }
+        # A newer checkpoint for the same Model Step is authoritative recovery
+        # truth. Do not replay an older unconfirmed reservation after a later
+        # attempt already persisted a complete response for that Step.
+        inflight_model_attempt = next(
+            (
+                attempt
+                for attempt_index, attempt in reversed(
+                    tuple(enumerate(persisted_attempts))
+                )
+                if attempt.step_id in model_steps
+                and attempt.attempt_id not in checkpoint_attempt_ids
+                and not any(
+                    newer.step_id == attempt.step_id
+                    and newer.attempt_id in checkpoint_attempt_ids
+                    for newer in persisted_attempts[attempt_index + 1 :]
+                )
+                and (
+                    attempt.status in (StepStatus.RUNNING, StepStatus.SUCCEEDED)
+                    or attempt.error_code == ERROR_MODEL_CHECKPOINT_UNCONFIRMED
+                )
+            ),
+            None,
+        )
+        recovery_model_step_id: str | None = None
+        if inflight_model_attempt is not None:
+            inflight_model_step = model_steps[inflight_model_attempt.step_id]
+            if inflight_model_attempt.status is not StepStatus.FAILED:
+                await self._record_failed_attempt(
+                    run,
+                    lease,
+                    inflight_model_step.step_id,
+                    (
+                        FailureClassification.UNCERTAIN,
+                        ERROR_MODEL_CHECKPOINT_UNCONFIRMED,
+                        "model attempt reservation has no checkpoint",
+                    ),
+                    StepType.MODEL,
+                    attempt_id=inflight_model_attempt.attempt_id,
+                    model_purpose=inflight_model_attempt.model_purpose,
+                    usage=inflight_model_attempt.usage,
+                )
+            attempts_for_step = sum(
+                attempt.step_id == inflight_model_step.step_id
+                for attempt in persisted_attempts
+            )
+            if self._recovery_replay_allowed(
+                run.snapshot.retry_policy if run.snapshot is not None else None,
+                attempts_for_step,
+            ):
+                recovery_model_step_id = inflight_model_step.step_id
+            else:
+                await self._record_failed_step(
+                    run,
+                    lease,
+                    inflight_model_step.step_id,
+                    StepType.MODEL,
+                    error_code=ERROR_MODEL_CHECKPOINT_UNCONFIRMED,
+                )
+                return await self._fail_run(
+                    run, lease, ERROR_MODEL_CHECKPOINT_UNCONFIRMED
+                )
+        if (
+            last_model_step is not None
+            and last_model_step.status is StepStatus.FAILED
+            and last_model_step.step_id != recovery_model_step_id
+        ):
+            # A terminal Model Step was already durable when process loss
+            # interrupted the Run transition. Its frozen retry decision was
+            # exhausted, so recovery must finish FAILED without another call.
+            return await self._fail_run(
+                run, lease, last_model_step.error_code
+            )
         # 是否注入外部上下文以冻结 Snapshot 的 has_context_provider 为准
         # （ADR 0022/0023：恢复行为由 Run 启动时冻结的定义决定，后续注册
-        # 的同 id+version 定义不能改变恢复行为）。已确认的 Context Step
-        # 直接复用其 Items，不重新查询外部数据源。
-        context_items: list[ContextItem] = []
+        # 的同 id+version 定义不能改变恢复行为）。已确认的 Context Stage
+        # invocation 直接复用其 Checkpoint，不重新查询外部数据源。
         if run.snapshot is not None and run.snapshot.has_context_provider:
             context_checkpoints = [
                 c for c in checkpoints if c.step_type is StepType.CONTEXT
             ]
-            if context_checkpoints:
-                context_items = deserialize_context_items(
-                    context_checkpoints[-1].output
-                )
-            else:
+            if not context_checkpoints:
                 # 上次执行在 Context checkpoint 落盘前中断
                 # （at-least-once：Context Step 重新执行）。
                 if definition.context_provider is None:
@@ -1237,42 +1629,101 @@ class Runner:
                         "provider but the resolved definition has none; "
                         "refusing to silently change recovery behavior"
                     )
-                run, context_items = await self._run_context_step(
-                    run, definition, lease
+            run = await self._run_input_context_stages(
+                run, definition, lease
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
+        # ADR 0040：compression checkpoint 是辅助 MODEL
+        # Step，绝不承载业务最终响应；恢复推进只面向业务 Model
+        # checkpoints，compression checkpoint 由聚合路径复用。
+        compression_step = (
+            compression_step_id(run.snapshot.compression_contract)
+            if run.snapshot is not None
+            and run.snapshot.compression_contract is not None
+            else None
+        )
+        if recovery_model_step_id is not None:
+            if (
+                inflight_model_attempt is not None
+                and inflight_model_attempt.model_purpose
+                is ModelPurpose.OUTPUT_REPAIR
+            ):
+                return await self._resume_output_repair(
+                    run,
+                    definition,
+                    lease,
+                    step_id=recovery_model_step_id,
+                    model_checkpoints=model_checkpoints,
+                )
+            if (
+                compression_step is not None
+                and recovery_model_step_id == compression_step
+            ):
+                # 未确认的 compression dispatch：以 CONTEXT_COMPRESSION
+                # purpose 重放该辅助 Step（与 _execute_steps 相同顺序），
+                # 绝不进入业务 agent loop 冒充 PRIMARY purpose。
+                run, _ = await self._run_compression_step(
+                    run,
+                    definition,
+                    lease,
+                    step_id=compression_step,
+                    recovery_replay=True,
                 )
                 if run.status is not RunStatus.RUNNING:
                     return run
-        if not model_checkpoints:
-            # 上次执行在模型结果持久化前中断（at-least-once：重新执行
-            # 模型循环）。
+                return await self._run_agent_loop(
+                    run,
+                    definition,
+                    lease,
+                    prior_tool_outcomes=tuple(
+                        deserialize_tool_outcome(checkpoint.output)
+                        for checkpoint in tool_checkpoints
+                    ),
+                )
             return await self._run_agent_loop(
                 run,
                 definition,
                 lease,
-                context_items=context_items,
+                prior_tool_outcomes=tuple(
+                    deserialize_tool_outcome(checkpoint.output)
+                    for checkpoint in tool_checkpoints
+                ),
+                resumed_model_step_id=recovery_model_step_id,
+                recovery_replay=True,
+            )
+        business_model_checkpoints = [
+            checkpoint
+            for checkpoint in model_checkpoints
+            if compression_step is None
+            or checkpoint.step_id != compression_step
+        ]
+        if not business_model_checkpoints:
+            # 上次执行在业务模型结果持久化前中断（at-least-once：重新
+            # 执行模型循环）。
+            return await self._run_agent_loop(
+                run,
+                definition,
+                lease,
                 resumed_model_step_id=(
                     inflight_model_step.step_id
                     if inflight_model_step is not None
+                    and (
+                        compression_step is None
+                        or inflight_model_step.step_id != compression_step
+                    )
                     else None
                 ),
             )
         # 最后一个已确认的 Model Step checkpoint：解析其完整响应。
-        last = model_checkpoints[-1]
+        last = business_model_checkpoints[-1]
         last_response = deserialize_model_response(last.output)
         if not last_response.tool_calls:
-            # 最终模型响应已确认：复用，不重复调用模型，直接写入终态。
-            result = await self._store.transition_run(
-                run.run_id,
-                expected_version=run.version,
-                status=RunStatus.SUCCEEDED,
-                output=last_response.content,
-                lease_owner=lease.owner,
+            # A checkpointed final response still goes through the frozen
+            # FINAL_OUTPUT gate and Output Contract during recovery.
+            return await self._finalize_output(
+                run, definition, lease, last_response.content
             )
-            await self._store.release_lease(
-                run.run_id, lease.owner, expected_version=result.version
-            )
-            self._publish_status(run.run_id, RunStatus.SUCCEEDED)
-            return result
         # 该响应请求了工具：重建已确认的 Tool Outcomes（按 checkpoint
         # 顺序），从缺失 Outcome 的调用继续顺序执行；已确认的调用
         # 绝不重复执行外部副作用。
@@ -1283,7 +1734,7 @@ class Runner:
         for call in last_response.tool_calls:
             if call.call_id in confirmed_call_ids:
                 continue
-            # Ticket 07：未确认的 NON_IDEMPOTENT 工具调用——外部效果可能
+            # 未确认的 NON_IDEMPOTENT 工具调用——外部效果可能
             # 已在崩溃前发生、但 checkpoint 未提交（结果不确定）。绝不
             # 自动重放（ADR 0007 fail-closed），进入 WAITING 等待应用
             # 显式处置；READ_ONLY / IDEMPOTENT 保持 at-least-once 重放
@@ -1347,7 +1798,6 @@ class Runner:
             run,
             definition,
             lease,
-            context_items=context_items,
             prior_tool_outcomes=prior_outcomes,
         )
 
@@ -1374,52 +1824,462 @@ class Runner:
     ) -> RunRecord:
         """按 Definition 声明推进一个 RUNNING Run 的全部步骤。
 
-        执行顺序（ADR 0015 / PRD User Story 25）：若 Definition 声明了
+        执行顺序（ADR 0015）：若 Definition 声明了
         Context Provider，先执行 Context Step 并完成 checkpoint，再执行
         Model Step——应用选择的上下文不依赖模型工具选择，且外部上下文
         的 checkpoint 先于依赖它的模型调用持久化。任一 Step 失败（Run
         到达 FAILED）即返回，不再继续后续 Step。
 
-        Ticket 08：入口即安全边界——已请求取消时不再启动任何 Step，
+        入口即安全边界——已请求取消时不再启动任何 Step，
         直接终结为 CANCELLED（ADR 0012 / AC 8）。
         """
         cancelled = await self._maybe_cancel(run, lease)
         if cancelled is not None:
             return cancelled
-        context_items: list[ContextItem] = []
-        if definition.context_provider is not None:
-            run, context_items = await self._run_context_step(
-                run, definition, lease
-            )
-            if run.status is not RunStatus.RUNNING:
-                return run
+        # ADR 0040：按冻结 Plan 执行 RUN_INPUT Scope Stage
+        #（无显式 Stage 时退化为 legacy Provider 路径，同样形成
+        # 带 provenance 的 Stage checkpoint）。
+        run = await self._run_input_context_stages(run, definition, lease)
+        if run.status is not RunStatus.RUNNING:
+            return run
+        # ADR 0040：显式 Semantic Compression 作为独立
+        # MODEL Step 在 RUN_INPUT Stage 之后、业务 Model Step 之前执行；
+        # 不递归触发 Pipeline，不调用业务 Tools。
+        run, _ = await self._run_compression_step(run, definition, lease)
+        if run.status is not RunStatus.RUNNING:
+            return run
         return await self._run_agent_loop(
-            run, definition, lease, context_items=context_items
+            run, definition, lease, prior_tool_outcomes=()
         )
 
-    async def _run_context_step(
+    @staticmethod
+    def _frozen_plan(run: RunRecord) -> ContextPlan:
+        """Return the Context Plan frozen into the Run Snapshot.
+
+        恢复行为由启动时冻结的 Plan 决定（ADR 0022/0023）；空 Plan
+        表示不使用 Context Pipeline（0.3 兼容）。
+        """
+        if run.snapshot is None:
+            return ContextPlan()
+        return run.snapshot.context_plan
+
+    @staticmethod
+    def _stage_checkpoint(
+        checkpoints: Sequence[StepCheckpoint],
+        stage: ContextStage,
+        boundary: int,
+    ) -> StepCheckpoint | None:
+        """Return the completed checkpoint of one Stage invocation.
+
+        依据 Checkpoint 载荷中的 Stage Result envelope（stage_id、
+        scope、boundary）定位；不存在则返回 None（该 invocation
+        尚未完成，需要执行或重新执行）。
+        """
+        for checkpoint in checkpoints:
+            if checkpoint.step_type is not StepType.CONTEXT:
+                continue
+            parsed = parse_stage_result(checkpoint.output)
+            if (
+                parsed is not None
+                and parsed.stage_id == stage.identity.stage_id
+                and parsed.scope is stage.identity.scope
+                and parsed.boundary == boundary
+            ):
+                return checkpoint
+        return None
+
+    async def _run_input_context_stages(
         self,
         run: RunRecord,
         definition: AgentDefinition,
         lease: RunLease,
-    ) -> tuple[RunRecord, list[ContextItem]]:
-        """执行一个 Context Step 并返回 (最新 Run 记录, 本次 Context Items)。
+    ) -> RunRecord:
+        """在 RUN_INPUT 生命周期点执行冻结 Plan 的 Stage（ADR 0040）。
 
-        成功：记录 CONTEXT Step + Step Attempt + Checkpoint（输出为
-        Context Items 的序列化载荷），Run 保持 RUNNING；调用方随后
-        把 Items 作为数据交给 Model Step。
-        失败：记录 FAILED Step + FAILED Step Attempt（可检查，绝不
-        压平成模型可见的上下文字符串），Run 到达终态 FAILED 并释放
-        租约，不继续执行 Model Step。
+        显式 RUN_INPUT Stage 优先；Plan 未声明时若 Definition 声明了
+        Context Provider，则执行隐式 legacy PROVIDE Stage（0.3 兼容）。
+        已完成的 (stage, boundary=0) Checkpoint 被原样跳过——恢复时
+        绝不重新读取外部事实。
         """
+        plan = self._frozen_plan(run)
+        stages = plan.stages_for_scope(ContextScope.RUN_INPUT)
+        if plan.is_empty() and definition.context_provider is not None:
+            # 仅当未声明任何显式 Plan 时才合成 legacy PROVIDE Stage；
+            # 显式 Plan（即使没有 RUN_INPUT Stage）就是完整声明。
+            stages = (legacy_provider_stage(),)
+        for stage in stages:
+            checkpoints = await self._store.get_checkpoints(run.run_id)
+            if self._stage_checkpoint(checkpoints, stage, 0) is not None:
+                continue
+            if (
+                stage.identity.stage_id == LEGACY_PROVIDER_STAGE_ID
+                and any(
+                    checkpoint.step_type is StepType.CONTEXT
+                    and parse_stage_result(checkpoint.output) is None
+                    for checkpoint in checkpoints
+                )
+            ):
+                # 跨版本恢复（0.3 -> T14）：旧格式的裸 Context Item 列表
+                # 载荷就是该隐式 PROVIDE Stage 已完成的证据——恢复时
+                # 直接复用，不重新读取外部事实（ADR 0040 AC 8）。
+                continue
+            run, _ = await self._run_context_stage(
+                run, definition, lease, stage, boundary=0
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
+        return run
+
+    @staticmethod
+    def _compression_base_items(
+        checkpoints: Sequence[StepCheckpoint],
+    ) -> tuple[ContextItem, ...]:
+        """Aggregate the RUN_INPUT base Items compression may consume.
+
+        压缩只消费 RUN_INPUT 生命周期的基础 Items：TOOL_OUTCOME 增量项
+        与 MODEL_STEP 工作项不进入压缩输入（boundary=0 语义）。
+        """
+        return aggregate_frame_items(
+            [
+                checkpoint.output
+                for checkpoint in checkpoints
+                if checkpoint.step_type is StepType.CONTEXT
+            ],
+            tool_boundary=0,
+            model_boundary=0,
+        )
+
+    @staticmethod
+    def _compression_checkpoint(
+        checkpoints: Sequence[StepCheckpoint], step_id: str
+    ) -> StepCheckpoint | None:
+        """Return the completed compression Model Step checkpoint."""
+        return next(
+            (
+                checkpoint
+                for checkpoint in checkpoints
+                if checkpoint.step_type is StepType.MODEL
+                and checkpoint.step_id == step_id
+            ),
+            None,
+        )
+
+    def _load_compression_result(
+        self,
+        contract: CompressionContract,
+        checkpoints: Sequence[StepCheckpoint],
+        checkpoint: StepCheckpoint,
+    ) -> CompressionResult:
+        """Load + re-validate one completed compression checkpoint.
+
+        校验与 dispatch 时完全一致（确定性）：重新计算契约允许的压缩
+        输入集并验证 Result 的 provenance 与输出约束。篡改 / 漂移的
+        压缩证据在此 fail closed（抛
+        :class:`CompressionContractViolationError`）。
+        """
+        base_items = self._compression_base_items(checkpoints)
+        compressible = tuple(
+            item for item in base_items if contract.allows_item(item)
+        )
+        response = deserialize_model_response(checkpoint.output)
+        result = CompressionResult.deserialize(response.content or "")
+        validate_compression_result(
+            result, contract=contract, source_items=compressible
+        )
+        return result
+
+    async def _fail_compression_evidence(
+        self,
+        run: RunRecord,
+        lease: RunLease,
+        checkpoint: StepCheckpoint,
+    ) -> RunRecord:
+        """Compression checkpoint 证据违反冻结契约：fail closed。
+
+        保留原始与失败证据：被篡改的 checkpoint 原样保留，其 Attempt
+        以 ``COMPRESSION_CONTRACT_VIOLATION`` 归一为 FAILED，Step 到达
+        终态 FAILED，Run 到达终态 FAILED。
+        """
+        attempts = await self._store.get_attempts(run.run_id)
+        attempt = next(
+            (
+                item
+                for item in attempts
+                if item.attempt_id == checkpoint.attempt_id
+            ),
+            None,
+        )
+        await self._record_failed_attempt(
+            run,
+            lease,
+            checkpoint.step_id,
+            (
+                FailureClassification.PERMANENT,
+                ERROR_COMPRESSION_CONTRACT_VIOLATION,
+                "compression checkpoint evidence violates the frozen "
+                "Compression Contract",
+            ),
+            StepType.MODEL,
+            attempt_id=checkpoint.attempt_id,
+            model_purpose=(
+                attempt.model_purpose
+                if attempt is not None
+                else ModelPurpose.CONTEXT_COMPRESSION
+            ),
+            usage=attempt.usage if attempt is not None else None,
+        )
+        await self._record_failed_step(
+            run,
+            lease,
+            checkpoint.step_id,
+            StepType.MODEL,
+            error_code=ERROR_COMPRESSION_CONTRACT_VIOLATION,
+        )
+        return await self._fail_run(
+            run, lease, ERROR_COMPRESSION_CONTRACT_VIOLATION
+        )
+
+    async def _run_compression_step(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        *,
+        step_id: str | None = None,
+        recovery_replay: bool = False,
+    ) -> tuple[RunRecord, CompressionResult | None]:
+        """执行显式 Semantic Compression（ADR 0040）。
+
+        幂等入口：已完成 compression checkpoint（step_id 由冻结契约
+        确定性派生）被原样复用并重新校验，不重新 dispatch；未完成的
+        invocation 以同一 identity 执行 / at-least-once 重放。
+
+        - 压缩输入只包含契约允许的 RUN_INPUT 基础 Items；Conversation
+          History、instructions、run input、Tool Outcomes 与 protected
+          evidence 永不进入压缩请求（受保护通道不改写）。
+        - 压缩请求不携带业务 Tools（无递归、不执行 Tool / Output
+          Repair / 另一层压缩）；instructions 来自冻结的 Compression
+          Contract，与业务 Agent Instruction 完全独立。
+        - 压缩请求自身必须通过完整硬预算检查（独立 binding 的 Model
+          Contract 窗口）；压缩输出经完整契约校验（provenance / 输出
+          约束 / 非扩张）后才作为 checkpoint 载荷持久化，attempt 独立
+          记账（usage / 预算）。
+        """
+        if run.snapshot is None:
+            return run, None
+        contract = run.snapshot.compression_contract
+        if contract is None:
+            return run, None
+        step_id = (
+            step_id if step_id is not None else compression_step_id(contract)
+        )
+        checkpoints = await self._store.get_checkpoints(run.run_id)
+        checkpoint = self._compression_checkpoint(checkpoints, step_id)
+        if checkpoint is not None:
+            try:
+                result = self._load_compression_result(
+                    contract, checkpoints, checkpoint
+                )
+            except CompressionContractViolationError:
+                return (
+                    await self._fail_compression_evidence(
+                        run, lease, checkpoint
+                    ),
+                    None,
+                )
+            return run, result
+        base_items = self._compression_base_items(checkpoints)
+        compressible = tuple(
+            item for item in base_items if contract.allows_item(item)
+        )
+        if not compressible:
+            # 契约允许范围内没有可压缩 Item：压缩为显式空操作（零
+            # dispatch），全部 Item 原样传递，不创建 compression Step。
+            return run, None
+
+        def transform(response: ModelResponse) -> ModelResponse:
+            # 压缩输出在 checkpoint 前完成完整契约校验；校验失败即
+            # PERMANENT 契约违约（fail closed，可由冻结策略重试）。
+            result = parse_compression_output(
+                response.content, contract=contract, source_items=compressible
+            )
+            return response.model_copy(update={"content": result.serialize()})
+
+        run, response = await self._run_single_model_step(
+            run,
+            definition,
+            lease,
+            compressible,
+            (),
+            step_id=step_id,
+            recovery_replay=recovery_replay,
+            purpose=ModelPurpose.CONTEXT_COMPRESSION,
+            input_override=compression_task_input(contract),
+            instructions_override=contract.instructions,
+            history_override=(),
+            allow_tools=False,
+            response_transform=transform,
+        )
+        if response is None:
+            return run, None
+        result = CompressionResult.deserialize(response.content or "")
+        return run, result
+
+    async def _prepare_model_step_context(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        tool_outcomes: Sequence[ToolOutcome],
+    ) -> tuple[RunRecord, tuple[ContextItem, ...]]:
+        """在每次 Model Step 前按 Scope 触发 Stage 并聚合 Frame Items。
+
+        - ``TOOL_OUTCOME`` Scope：仅在已有 Tool Outcome（boundary>0）
+          时触发，boundary = 已完成 Tool checkpoint 数；
+        - ``MODEL_STEP`` Scope：每次 Model Step 前触发，boundary =
+          已完成 Model checkpoint 数；
+        已完成的 (stage, boundary) Checkpoint 被跳过（恢复复用，不
+        重新读取外部事实）。Frame Items 由全部 Context checkpoint
+        按 Frame 语义聚合（基础项 + 累积增量项 + 当前步骤项）。
+        """
+        plan = self._frozen_plan(run)
+        tool_stages = plan.stages_for_scope(ContextScope.TOOL_OUTCOME)
+        model_stages = plan.stages_for_scope(ContextScope.MODEL_STEP)
+        has_context = (
+            run.snapshot is not None and run.snapshot.has_context_provider
+        )
+        if not tool_stages and not model_stages and not has_context:
+            return run, ()
+        checkpoints = await self._store.get_checkpoints(run.run_id)
+        tool_boundary = sum(
+            1 for c in checkpoints if c.step_type is StepType.TOOL
+        )
+        model_boundary = sum(
+            1 for c in checkpoints if c.step_type is StepType.MODEL
+        )
+        if tool_stages and tool_boundary > 0:
+            for stage in tool_stages:
+                if (
+                    self._stage_checkpoint(
+                        checkpoints, stage, tool_boundary
+                    )
+                    is not None
+                ):
+                    continue
+                run, _ = await self._run_context_stage(
+                    run, definition, lease, stage, boundary=tool_boundary
+                )
+                if run.status is not RunStatus.RUNNING:
+                    return run, ()
+                checkpoints = await self._store.get_checkpoints(run.run_id)
+        for stage in model_stages:
+            if (
+                self._stage_checkpoint(checkpoints, stage, model_boundary)
+                is not None
+            ):
+                continue
+            run, _ = await self._run_context_stage(
+                run, definition, lease, stage, boundary=model_boundary
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run, ()
+            checkpoints = await self._store.get_checkpoints(run.run_id)
+        items = aggregate_frame_items(
+            [
+                checkpoint.output
+                for checkpoint in checkpoints
+                if checkpoint.step_type is StepType.CONTEXT
+            ],
+            tool_boundary=tool_boundary,
+            model_boundary=model_boundary,
+        )
+        # ADR 0040：已完成 compression checkpoint 在 Frame
+        # 聚合后应用——被消费的原始 Item 被带 provenance 的派生 Item
+        # 取代，未消费 Item（含受保护来源）原样保留。压缩证据与
+        # dispatch 时同一确定性校验；篡改 / 漂移在此 fail closed。
+        contract = (
+            run.snapshot.compression_contract
+            if run.snapshot is not None
+            else None
+        )
+        if contract is not None:
+            compression_checkpoint = self._compression_checkpoint(
+                checkpoints, compression_step_id(contract)
+            )
+            if compression_checkpoint is not None:
+                try:
+                    result = self._load_compression_result(
+                        contract, checkpoints, compression_checkpoint
+                    )
+                    items = apply_compression(items, result)
+                except CompressionContractViolationError:
+                    return (
+                        await self._fail_compression_evidence(
+                            run, lease, compression_checkpoint
+                        ),
+                        (),
+                    )
+        return run, items
+
+    async def _run_context_stage(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        stage: ContextStage,
+        *,
+        boundary: int,
+        input_item_ids: Sequence[str] = (),
+    ) -> tuple[RunRecord, list[ContextItem]]:
+        """执行一次可恢复的 Context Stage invocation（ADR 0040）。
+
+        成功：记录 CONTEXT Step + Step Attempt + Checkpoint；Checkpoint
+        载荷是完整 :class:`ContextStageResult` envelope（输入引用、
+        Context Items、决策、measurement 与 direct-derivation provenance，
+        AC 3），step_id 由 (stage identity, scope, boundary) 确定性
+        派生，恢复时据此复用。失败：记录 FAILED Step（必要时 FAILED
+        Attempt），Run 到达终态 FAILED 并释放租约，不继续 Model Step。
+
+        Core 只执行 PROVIDE 边界（调用 Definition 声明的 Context
+        Provider）；SELECT/TRIM/BUDGET_SELECT 算法属于 Context
+        Companion，Provider 缺失时 PROVIDE 也无法执行——两者都以
+        :data:`ERROR_CONTEXT_STAGE_UNSUPPORTED` fail closed，绝不
+        静默跳过声明的 Stage。
+        """
+        step_id = stage_invocation_step_id(stage, boundary)
         provider = definition.context_provider
-        if provider is None:  # 防御：仅由有 provider 的路径调用
-            raise RuntimeError("definition declares no context provider")
-        step_id = new_id()
+        if (
+            stage.identity.transform_type is not ContextTransformType.PROVIDE
+            or provider is None
+        ):
+            # Fail closed：声明的 Stage 在其 lifecycle 点无法被执行，
+            # 绝不静默跳过或降级（ADR 0040 / ADR 0007 同一原则）。
+            await self._record_failed_step(
+                run,
+                lease,
+                step_id,
+                StepType.CONTEXT,
+                error_code=ERROR_CONTEXT_STAGE_UNSUPPORTED,
+            )
+            return (
+                await self._fail_run(
+                    run, lease, ERROR_CONTEXT_STAGE_UNSUPPORTED
+                ),
+                [],
+            )
         cancelled = await self._maybe_cancel(run, lease)
         if cancelled is not None:
             return cancelled, []
         await self._assert_step_dispatch(run, lease)
+        run = await self._enforce_policy(
+            run,
+            definition,
+            lease,
+            PolicyGate.CONTEXT,
+            {"input": run.input},
+        )
+        if run.status is not RunStatus.RUNNING:
+            return run, []
         attempt_id = new_id()
         self._publish(
             RunUpdate(
@@ -1470,6 +2330,18 @@ class Runner:
             cancelled = await self._maybe_cancel(run, lease)
             if cancelled is not None:
                 return cancelled, []
+            run = await self._enforce_policy(
+                run,
+                definition,
+                lease,
+                PolicyGate.CONTEXT,
+                {"input": run.input, "final_authorization": True},
+                failed_step_id=step_id,
+                failed_step_type=StepType.CONTEXT,
+                failed_attempt_id=attempt_id,
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run, []
             items = list(
                 await provider.provide(ContextRequest(input=run.input))
             )
@@ -1477,6 +2349,41 @@ class Runner:
             # metadata 是外部数据；序列化失败与 provider 异常一样形成可
             # 检查的 FAILED Attempt，绝不遗留 RUNNING identity。
             payload = serialize_context_items(items)
+            # ADR 0040 / AC 3：一次 Stage invocation 的完整
+            # 结构化输出——输入引用、输出 Items（带 direct-derivation
+            # provenance：PROVIDE 原始 Item 无派生来源）、决策、计量
+            # 与触发边界——作为 Checkpoint 载荷持久化（envelope），
+            # 恢复时据此重建 Items 与证据。
+            stage_result = ContextStageResult(
+                stage_id=stage.identity.stage_id,
+                scope=stage.identity.scope,
+                transform_type=stage.identity.transform_type,
+                input_item_ids=tuple(input_item_ids),
+                boundary=boundary,
+                output_items=tuple(
+                    ContextItemWithProvenance(
+                        item=item,
+                        provenance=ProvenanceSource(
+                            stage_id=stage.identity.stage_id,
+                            transform_type=stage.identity.transform_type,
+                            source_item_ids=(),
+                        ),
+                    )
+                    for item in items
+                ),
+                decisions={
+                    "provider": type(provider).__name__,
+                    "stage_key": stage.identity.stable_key,
+                },
+                measurement={
+                    "item_count": len(items),
+                    "output_tokens_estimate": sum(
+                        ModelInputSizer.estimate_text(item.content)
+                        for item in items
+                    ),
+                },
+            )
+            stage_payload = stage_result.serialize()
         except (LeaseNotHeldError, StaleRunVersionError):
             raise
         except Exception as exc:  # Provider 失败：可检查的失败 Attempt
@@ -1531,7 +2438,7 @@ class Runner:
             step_id=step_id,
             run_id=run.run_id,
             status=StepStatus.SUCCEEDED,
-            output=payload,
+            output=stage_payload,
         )
         await self._store.record_attempt(
             attempt,
@@ -1544,7 +2451,7 @@ class Runner:
                 step_id=step_id,
                 attempt_id=attempt.attempt_id,
                 step_type=StepType.CONTEXT,
-                output=payload,
+                output=stage_payload,
             ),
             expected_version=run.version,
             lease_owner=lease.owner,
@@ -1579,14 +2486,14 @@ class Runner:
         run: RunRecord,
         definition: AgentDefinition,
         lease: RunLease,
-        context_items: Sequence[ContextItem] = (),
         prior_tool_outcomes: Sequence[ToolOutcome] = (),
         resumed_model_step_id: str | None = None,
+        recovery_replay: bool = False,
     ) -> RunRecord:
-        """模型-工具循环：推进一个 RUNNING Run 直到最终响应（Ticket 05）。
+        """模型-工具循环：推进一个 RUNNING Run 直到最终响应。
 
         每次模型调用都是一个独立 Model Step（记录 Step / Attempt /
-        Checkpoint，checkpoint 携带完整响应，ADR 0004 / PRD US 14）；
+        Checkpoint，checkpoint 携带完整响应，ADR 0004）；
         若响应请求了工具，则同一响应内的每个工具调用**严格顺序**执行
         为一个独立 Tool Step（记录 Step / Attempt / Checkpoint），把
         Tool Outcome 作为外部数据追加进下一次模型请求（ADR 0017 /
@@ -1601,7 +2508,7 @@ class Runner:
         循环由模型响应决定终止（响应不再请求工具即结束）；本版本
         不引入隐藏的工具轮次上限，因此模型的持续工具请求会持续被
         顺序执行（自动重试只由冻结的 Retry Policy 驱动，见
-        Ticket 06 / ADR 0025）。
+        ADR 0025）。
         """
         tool_outcomes = tuple(prior_tool_outcomes)
         model_step_id = resumed_model_step_id
@@ -1610,15 +2517,26 @@ class Runner:
             cancelled = await self._maybe_cancel(run, lease)
             if cancelled is not None:
                 return cancelled
+            # ADR 0040：在声明的 lifecycle 点触发
+            # TOOL_OUTCOME / MODEL_STEP Scope Stage，并按 Frame 语义
+            # 聚合全部 Context checkpoint 为本次 Model Step 的 Items
+            #（已完成 invocation 原样复用，不重新读取外部事实）。
+            run, frame_items = await self._prepare_model_step_context(
+                run, definition, lease, tool_outcomes
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
             run, response = await self._run_single_model_step(
                 run,
                 definition,
                 lease,
-                context_items,
+                frame_items,
                 tool_outcomes,
                 step_id=model_step_id,
+                recovery_replay=recovery_replay,
             )
             model_step_id = None
+            recovery_replay = False
             if response is None:  # 模型失败 -> Run FAILED
                 return run
             # 完整 Model response 已按 _run_single_model_step 的语义
@@ -1629,21 +2547,10 @@ class Runner:
             if cancelled is not None:
                 return cancelled
             if not response.tool_calls:
-                # 最终响应：写入终态并释放租约。
-                result = await self._store.transition_run(
-                    run.run_id,
-                    expected_version=run.version,
-                    status=RunStatus.SUCCEEDED,
-                    output=response.content,
-                    lease_owner=lease.owner,
+                return await self._finalize_output(
+                    run, definition, lease, response.content
                 )
-                await self._store.release_lease(
-                    run.run_id, lease.owner, expected_version=result.version
-                )
-                self._publish_status(run.run_id, RunStatus.SUCCEEDED)
-                return result
-            # 同一响应内的多个工具调用严格顺序执行（ADR 0004 / PRD
-            # US 43）：上一个调用完成并 checkpoint 后才执行下一个。
+            # 同一响应内的多个工具调用严格顺序执行（ADR 0004）：上一个调用完成并 checkpoint 后才执行下一个。
             for call in response.tool_calls:
                 # 安全边界：每个 Tool Step 开始之前检查协作取消——
                 # 取消只阻止后续 Step，不打断已完成/已发出的调用。
@@ -1665,6 +2572,13 @@ class Runner:
         context_items: Sequence[ContextItem],
         tool_outcomes: Sequence[ToolOutcome],
         step_id: str | None = None,
+        recovery_replay: bool = False,
+        purpose: ModelPurpose = ModelPurpose.PRIMARY,
+        input_override: str | None = None,
+        allow_tools: bool = True,
+        instructions_override: str | None = None,
+        history_override: tuple[ConversationMessage, ...] | None = None,
+        response_transform: Callable[[ModelResponse], ModelResponse] | None = None,
     ) -> tuple[RunRecord, ModelResponse | None]:
         """执行一次模型调用并记录 Model Step / Attempt / Checkpoint。
 
@@ -1673,7 +2587,7 @@ class Runner:
         Agent Instruction（受信）与作为数据的 Context Items / Tool
         Outcomes（ADR 0017），Tool Outcome 绝不写入或替换 instructions。
 
-        Ticket 06 重试语义（ADR 0025）：失败分类是 Model Adapter
+        重试语义（ADR 0025）：失败分类是 Model Adapter
         结构化契约的一部分（:class:`StepFailure`，绝不解析异常消息）。
         只有冻结在 Definition Snapshot 中的显式 Retry Policy 允许
         自动重试只接受 TRANSIENT 且未超过 ``max_attempts`` 的失败，并
@@ -1683,7 +2597,7 @@ class Runner:
         每个失败 Attempt 都保留 classification / error_code / error /
         created_at 证据。
 
-        Ticket 08 流式（ADR 0011）：Adapter 声明 ``streaming=True`` 时
+        流式（ADR 0011）：Adapter 声明 ``streaming=DELTA`` 时
         通过 :meth:`_stream_model` 消费流——每个增量发布为带
         run_id / step_id / attempt_id 的 ``MODEL_DELTA`` Run Update
         （AC 2），增量**不写入 Run Store**（AC 3）；只有流结束的完整
@@ -1701,8 +2615,13 @@ class Runner:
         # 重试决策只依据 Run 启动时冻结的 Retry Policy（ADR 0022/0023），
         # 运行中修改 Agent Definition 不能改变已有 Run 的重试行为。
         policy = run.snapshot.retry_policy
-        adapter = definition.model_adapter
-        streaming = adapter.capabilities.streaming
+        adapter = definition.model_adapter_for(purpose)
+        bindings = run.snapshot.model_bindings or definition.effective_model_bindings()
+        binding = bindings.for_purpose(purpose)
+        model_contract = binding.contract
+        streaming = (
+            binding.requirements.capabilities.streaming is StreamingMode.DELTA
+        )
         step_id = step_id if step_id is not None else new_id()
         persisted_attempts = [
             attempt
@@ -1714,6 +2633,7 @@ class Runner:
             last_attempt = persisted_attempts[-1]
             if (
                 last_attempt.status is StepStatus.FAILED
+                and not recovery_replay
                 and not self._should_retry(
                     last_attempt.classification
                     if last_attempt.classification is not None
@@ -1723,9 +2643,15 @@ class Runner:
                 )
             ):
                 await self._record_failed_step(
-                    run, lease, step_id, StepType.MODEL
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=last_attempt.error_code,
                 )
-                return await self._fail_run(run, lease), None
+                return await self._fail_run(
+                    run, lease, last_attempt.error_code
+                ), None
         while True:
             attempt_count += 1
             # 安全边界：发起新的 Step Attempt 之前检查协作取消。
@@ -1736,6 +2662,84 @@ class Runner:
             cancelled = await self._maybe_cancel(run, lease)
             if cancelled is not None:
                 return cancelled, None
+            request = ModelRequest(
+                input=run.input if input_override is None else input_override,
+                instructions=(
+                    run.snapshot.instructions
+                    if instructions_override is None
+                    else instructions_override
+                ),
+                history=(
+                    run.history
+                    if history_override is None
+                    else history_override
+                ),
+                context_items=tuple(context_items),
+                tools=(
+                    tuple(tool.spec() for tool in definition.tools)
+                    if allow_tools
+                    else ()
+                ),
+                tool_outcomes=tuple(tool_outcomes),
+                structured_output=binding.requirements.capabilities.structured_output,
+                usage_reporting=binding.requirements.capabilities.usage_reporting,
+            )
+            try:
+                assert_model_request_compatible(
+                    model_contract, request, streaming=streaming
+                )
+            except ModelCapabilityError as exc:
+                await self._record_failed_step(
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=exc.code,
+                )
+                return await self._fail_run(run, lease, exc.code), None
+            except ModelContractViolationError as exc:
+                await self._record_failed_step(
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=exc.code,
+                )
+                return await self._fail_run(run, lease, exc.code), None
+            # ADR 0040: Build the complete Context Frame and
+            # enforce hard budget BEFORE any Model dispatch.  The Sizer
+            # is resolved from the frozen Model Contract so its wire-format
+            # semantics match.  If the complete request exceeds the budget,
+            # the Run fails with CONTEXT_BUDGET_EXCEEDED and zero dispatch.
+            frame = ContextFrame(
+                instructions=request.instructions,
+                run_input=request.input,
+                history=request.history,
+                context_items=request.context_items,
+                tool_outcomes=request.tool_outcomes,
+                tools=request.tools,
+                structured_output=request.structured_output,
+                usage_reporting=request.usage_reporting,
+            )
+            budget = ContextBudget.from_model_limits(
+                model_contract.limits,
+            )
+            sizer = ModelInputSizer.for_contract(model_contract)
+            sizing = check_frame_budget(frame, budget, sizer)
+            if sizing.total_tokens > budget.total_token_limit:
+                await self._record_failed_step(
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=ERROR_CONTEXT_BUDGET_EXCEEDED,
+                )
+                return (
+                    await self._fail_run(
+                        run, lease, ERROR_CONTEXT_BUDGET_EXCEEDED
+                    ),
+                    None,
+                )
             attempt_id = new_id()
             self._publish(
                 RunUpdate(
@@ -1744,6 +2748,7 @@ class Runner:
                     step_id=step_id,
                     attempt_id=attempt_id,
                     step_type=StepType.MODEL,
+                    model_purpose=purpose,
                 )
             )
             self._telemetry_started(run.run_id, step_id, attempt_id)
@@ -1754,15 +2759,13 @@ class Runner:
                     step_id=step_id,
                     attempt_id=attempt_id,
                     step_type=StepType.MODEL,
+                    model_purpose=purpose,
                 )
             )
-            request = ModelRequest(
-                input=run.input,
-                instructions=run.snapshot.instructions,
-                context_items=tuple(context_items),
-                tools=tuple(tool.spec() for tool in definition.tools),
-                tool_outcomes=tuple(tool_outcomes),
-            )
+            terminal_error_code: str | None = None
+            reserved = False
+            succeeded_attempt: StepAttempt | None = None
+            observed_usage: ModelUsage | None = None
             try:
                 # STEP_STARTED telemetry 是应用回调；它返回后再次校验，
                 # 使 guard 紧贴真正的 Model dispatch。
@@ -1773,6 +2776,77 @@ class Runner:
                 self._assert_adapter_contract_matches_snapshot(
                     run, definition
                 )
+                assert_model_request_compatible(
+                    model_contract, request, streaming=streaming
+                )
+                reserved = await self._reserve_model_attempt(
+                    run, lease, step_id, attempt_id, purpose
+                )
+                if not reserved:
+                    await self._record_failed_step(
+                        run,
+                        lease,
+                        step_id,
+                        StepType.MODEL,
+                        error_code=ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED,
+                    )
+                    return (
+                        await self._fail_run(
+                            run,
+                            lease,
+                            ERROR_MODEL_EXECUTION_BUDGET_EXCEEDED,
+                        ),
+                        None,
+                    )
+                if self._cancel_requested(run.run_id):
+                    await self._record_failed_attempt(
+                        run,
+                        lease,
+                        step_id,
+                        (
+                            FailureClassification.PERMANENT,
+                            ERROR_MODEL_DISPATCH_CANCELLED,
+                            "model dispatch cancelled after reservation",
+                        ),
+                        StepType.MODEL,
+                        attempt_id=attempt_id,
+                        model_purpose=purpose,
+                    )
+                    await self._record_failed_step(
+                        run,
+                        lease,
+                        step_id,
+                        StepType.MODEL,
+                        error_code=ERROR_MODEL_DISPATCH_CANCELLED,
+                    )
+                    cancelled = await self._maybe_cancel(run, lease)
+                    if cancelled is not None:
+                        return cancelled, None
+
+                def assert_final_model_dispatch() -> None:
+                    self._assert_adapter_contract_matches_snapshot(
+                        run, definition
+                    )
+                    assert_model_request_compatible(
+                        model_contract, request, streaming=streaming
+                    )
+
+                prepare = getattr(self._store, "prepare_model_dispatch", None)
+                if prepare is None:
+                    if run.snapshot.model_execution_budget is not None:
+                        raise RuntimeError(
+                            "typed Model Contract requires a Store with "
+                            "prepare_model_dispatch"
+                        )
+                    assert_final_model_dispatch()
+                    await self._assert_step_dispatch(run, lease)
+                else:
+                    await prepare(
+                        run.run_id,
+                        expected_version=run.version,
+                        owner=lease.owner,
+                        guard=assert_final_model_dispatch,
+                    )
                 if streaming:
                     response = await self._stream_model(
                         adapter,
@@ -1783,37 +2857,98 @@ class Runner:
                         attempt_id,
                     )
                     if response is None:
-                        # 流内安全边界已取消：Run 已转 CANCELLED。
-                        return await self._get_existing_run(run.run_id), None
+                        # The reservation is authoritative evidence that a
+                        # streaming dispatch started. Close both children
+                        # before transitioning the parent Run to CANCELLED.
+                        if not self._cancel_requested(run.run_id):
+                            raise ModelContractViolationError(
+                                "stream adapter ended without a complete "
+                                "ModelResponse"
+                            )
+                        await self._record_failed_attempt(
+                            run,
+                            lease,
+                            step_id,
+                            (
+                                FailureClassification.PERMANENT,
+                                ERROR_MODEL_DISPATCH_CANCELLED,
+                                "streaming model dispatch cancelled",
+                            ),
+                            StepType.MODEL,
+                            attempt_id=attempt_id,
+                            model_purpose=purpose,
+                        )
+                        await self._record_failed_step(
+                            run,
+                            lease,
+                            step_id,
+                            StepType.MODEL,
+                            error_code=ERROR_MODEL_DISPATCH_CANCELLED,
+                        )
+                        cancelled = await self._maybe_cancel(run, lease)
+                        if cancelled is not None:
+                            return cancelled, None
+                        raise RuntimeError(
+                            "streaming model cancellation was not finalized"
+                        )
                 else:
                     response = await adapter.generate(request)
+                self._assert_adapter_contract_matches_snapshot(run, definition)
+                if isinstance(response, ModelResponse) and isinstance(
+                    response.usage, ModelUsage
+                ):
+                    observed_usage = response.usage
+                response = adapter.validate_response(request, response)
+                self._assert_adapter_contract_matches_snapshot(run, definition)
+                response = normalize_model_response(
+                    model_contract,
+                    response,
+                    request=request,
+                    streaming=streaming,
+                )
+                if not allow_tools and response.tool_calls:
+                    raise ModelContractViolationError(
+                        f"{purpose.value} Model Step may not request "
+                        "business Tools"
+                    )
+                if response_transform is not None:
+                    # 辅助 Model Step（如 CONTEXT_COMPRESSION）在
+                    # checkpoint 前对响应做确定性变换 / 校验；变换抛出的
+                    # 契约违约按模型失败处理（fail closed）。
+                    response = response_transform(response)
             except (LeaseNotHeldError, StaleRunVersionError):
                 raise
             except Exception as exc:  # 模型失败：结构化分类 + 失败 Attempt
-                classification, code, message = classify_exception(exc)
+                if isinstance(exc, ModelCapabilityError):
+                    classification = FailureClassification.PERMANENT
+                    code = exc.code
+                    message = redact_failure_message("")
+                    terminal_error_code = code
+                elif isinstance(exc, ModelContractViolationError):
+                    classification = FailureClassification.PERMANENT
+                    code = exc.code
+                    message = redact_failure_message("")
+                    terminal_error_code = code
+                else:
+                    classification, code, message = classify_exception(exc)
                 failure = (classification, code, message)
-                # 只有 adapter 实际返回失败后才创建 Model Step。这样租约
-                # 在 STEP_STARTED telemetry 后过期时，不会留下从未 dispatch
-                # 的 Step；失败后的重启仍可由此身份恢复剩余预算。
-                if attempt_count == 1:
-                    await self._store.record_step(
-                        StepRecord(
-                            step_id=step_id,
-                            run_id=run.run_id,
-                            step_type=StepType.MODEL,
-                            status=StepStatus.RUNNING,
+                if reserved:
+                    # Reservation 已在外部 dispatch 前持久化；将同一 identity
+                    # 更新为 FAILED，恢复时才能如实保留已消耗的预算。
+                    await self._record_failed_attempt(
+                        run,
+                        lease,
+                        step_id,
+                        failure,
+                        StepType.MODEL,
+                        attempt_id=attempt_id,
+                        model_purpose=purpose,
+                        usage=(
+                            succeeded_attempt.usage
+                            if succeeded_attempt is not None
+                            else observed_usage
                         ),
-                        expected_version=run.version,
-                        lease_owner=lease.owner,
                     )
-                await self._record_failed_attempt(
-                    run,
-                    lease,
-                    step_id,
-                    failure,
-                    StepType.MODEL,
-                    attempt_id=attempt_id,
-                )
                 # 已 dispatch 的 Model 调用已经如实形成失败 Attempt；
                 # 取消请求到达时不启动 retry，也不以 FAILED 覆盖取消。
                 if self._cancel_requested(run.run_id):
@@ -1830,12 +2965,16 @@ class Runner:
                     continue
                 # 不再重试：记录 FAILED Step（最终状态）并到达终态 FAILED。
                 await self._record_failed_step(
-                    run, lease, step_id, StepType.MODEL
+                    run,
+                    lease,
+                    step_id,
+                    StepType.MODEL,
+                    error_code=terminal_error_code,
                 )
                 cancelled = await self._maybe_cancel(run, lease)
                 if cancelled is not None:
                     return cancelled, None
-                result = await self._fail_run(run, lease)
+                result = await self._fail_run(run, lease, terminal_error_code)
                 return result, None
 
             # 成功：Step + Attempt + 完成的 Checkpoint 依次持久化（checkpoint
@@ -1861,12 +3000,15 @@ class Runner:
                 run_id=run.run_id,
                 status=StepStatus.SUCCEEDED,
                 output=payload,
+                model_purpose=purpose,
+                usage=response.usage,
             )
             await self._store.record_attempt(
                 attempt,
                 expected_version=run.version,
                 lease_owner=lease.owner,
             )
+            succeeded_attempt = attempt
             await self._store.record_checkpoint(
                 StepCheckpoint(
                     run_id=run.run_id,
@@ -1888,7 +3030,7 @@ class Runner:
                     step_type=StepType.MODEL,
                 )
             )
-            # Ticket 09：Model Step 完成事件携带 Adapter 提供的 usage
+            # Model Step 完成事件携带 Adapter 提供的 usage
             # （仅当响应实际携带 usage 时；绝不回填或猜测）。
             self._emit_telemetry(
                 TelemetryEvent(
@@ -1897,6 +3039,7 @@ class Runner:
                     step_id=step_id,
                     attempt_id=attempt_id,
                     step_type=StepType.MODEL,
+                    model_purpose=purpose,
                     step_status=StepStatus.SUCCEEDED,
                     duration_ms=self._telemetry_duration_ms(
                         run.run_id, step_id, attempt_id
@@ -1905,6 +3048,222 @@ class Runner:
                 )
             )
             return run, response
+
+    async def _finalize_output(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        output: str,
+        *,
+        repair: bool = False,
+    ) -> RunRecord:
+        """Apply FINAL_OUTPUT policy then frozen Output Contract/repair."""
+        run = await self._enforce_policy(
+            run,
+            definition,
+            lease,
+            PolicyGate.FINAL_OUTPUT,
+            {"output": output, "repair": True} if repair else {"output": output},
+        )
+        if run.status is not RunStatus.RUNNING:
+            return run
+        contract = run.snapshot.output_contract if run.snapshot is not None else None
+        if contract is not None:
+            valid, validation_error = validate_output(contract, output)
+            if not valid:
+                if contract.structured_output is StructuredOutputMode.JSON_SCHEMA_STRICT:
+                    return await self._fail_strict_output_contract(
+                        run, lease, ModelContractViolationError.code
+                    )
+                if contract.fallback is OutputFallback.REPAIR:
+                    return await self._repair_output(
+                        run,
+                        definition,
+                        lease,
+                        output,
+                        validation_error or ERROR_OUTPUT_VALIDATION_FAILED,
+                        contract.repair.max_attempts,
+                    )
+                return await self._fail_run(
+                    run, lease, ERROR_OUTPUT_VALIDATION_FAILED
+                )
+        result = await self._store.transition_run(
+            run.run_id,
+            expected_version=run.version,
+            status=RunStatus.SUCCEEDED,
+            output=output,
+            lease_owner=lease.owner,
+        )
+        await self._store.release_lease(
+            run.run_id, lease.owner, expected_version=result.version
+        )
+        self._publish_status(run.run_id, RunStatus.SUCCEEDED)
+        return result
+
+    async def _repair_output(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        invalid_output: str,
+        validation_error: str,
+        max_attempts: int,
+    ) -> RunRecord:
+        """Run bounded OUTPUT_REPAIR Steps with no tools/context/recursion."""
+        candidate = invalid_output
+        contract = run.snapshot.output_contract
+        assert contract is not None
+        used_attempts = sum(
+            attempt.model_purpose is ModelPurpose.OUTPUT_REPAIR
+            for attempt in await self._store.get_attempts(run.run_id)
+        )
+        for _ in range(max(0, max_attempts - used_attempts)):
+            run, response = await self._run_single_model_step(
+                run,
+                definition,
+                lease,
+                (),
+                (),
+                purpose=ModelPurpose.OUTPUT_REPAIR,
+                input_override=self._output_repair_input(
+                    contract, candidate, validation_error
+                ),
+                allow_tools=False,
+            )
+            if response is None:
+                return run
+            candidate = response.content
+            run = await self._enforce_policy(
+                run,
+                definition,
+                lease,
+                PolicyGate.FINAL_OUTPUT,
+                {"output": candidate, "repair": True},
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run
+            valid, validation_error = validate_output(contract, candidate)
+            if valid:
+                result = await self._store.transition_run(
+                    run.run_id,
+                    expected_version=run.version,
+                    status=RunStatus.SUCCEEDED,
+                    output=candidate,
+                    lease_owner=lease.owner,
+                )
+                await self._store.release_lease(
+                    run.run_id, lease.owner, expected_version=result.version
+                )
+                self._publish_status(run.run_id, RunStatus.SUCCEEDED)
+                return result
+        return await self._fail_run(run, lease, ERROR_OUTPUT_VALIDATION_FAILED)
+
+    async def _resume_output_repair(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        *,
+        step_id: str,
+        model_checkpoints: Sequence[StepCheckpoint],
+    ) -> RunRecord:
+        """Replay an uncertain repair reservation using only frozen evidence."""
+        if run.snapshot is None or run.snapshot.output_contract is None:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery requires a frozen Output Contract"
+            )
+        contract = run.snapshot.output_contract
+        if contract.fallback is not OutputFallback.REPAIR:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery requires a frozen REPAIR fallback"
+            )
+        if not model_checkpoints:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery requires an invalid model checkpoint"
+            )
+        candidate_response = deserialize_model_response(model_checkpoints[-1].output)
+        if candidate_response.tool_calls or candidate_response.content is None:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery requires a checkpointed final output"
+            )
+        valid, validation_error = validate_output(contract, candidate_response.content)
+        if valid:
+            raise RuntimeError(
+                "OUTPUT_REPAIR recovery cannot replay a valid checkpointed output"
+            )
+        run, response = await self._run_single_model_step(
+            run,
+            definition,
+            lease,
+            (),
+            (),
+            step_id=step_id,
+            recovery_replay=True,
+            purpose=ModelPurpose.OUTPUT_REPAIR,
+            input_override=self._output_repair_input(
+                contract,
+                candidate_response.content,
+                validation_error or ERROR_OUTPUT_VALIDATION_FAILED,
+            ),
+            allow_tools=False,
+        )
+        if response is None:
+            return run
+        return await self._finalize_output(
+            run, definition, lease, response.content or "", repair=True
+        )
+
+    @staticmethod
+    def _output_repair_input(
+        contract: OutputContract,
+        invalid_output: str,
+        validation_error: str,
+    ) -> str:
+        """Build the stable repair request from frozen contract evidence."""
+        return json.dumps(
+            {
+                "invalid_output": invalid_output,
+                "validation_error": validation_error,
+                "output_contract": {
+                    "contract_id": contract.contract_id,
+                    "version": contract.version,
+                    "schema": contract.schema_definition,
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    async def _fail_strict_output_contract(
+        self, run: RunRecord, lease: RunLease, error_code: str
+    ) -> RunRecord:
+        """Preserve the raw checkpoint but classify a strict-provider lie."""
+        checkpoints = await self._store.get_checkpoints(run.run_id)
+        latest = next(
+            (checkpoint for checkpoint in reversed(checkpoints) if checkpoint.step_type is StepType.MODEL),
+            None,
+        )
+        if latest is not None:
+            attempts = await self._store.get_attempts(run.run_id)
+            attempt = next(
+                (item for item in attempts if item.attempt_id == latest.attempt_id), None
+            )
+            await self._record_failed_attempt(
+                run,
+                lease,
+                latest.step_id,
+                (FailureClassification.PERMANENT, error_code, "strict output contract violated"),
+                StepType.MODEL,
+                attempt_id=latest.attempt_id,
+                model_purpose=(attempt.model_purpose if attempt is not None else None),
+                usage=attempt.usage if attempt is not None else None,
+            )
+            await self._record_failed_step(
+                run, lease, latest.step_id, StepType.MODEL, error_code=error_code
+            )
+        return await self._fail_run(run, lease, error_code)
 
     async def _run_tool_step(
         self,
@@ -1919,8 +3278,8 @@ class Runner:
     ) -> tuple[RunRecord, ToolOutcome | None]:
         """执行一次工具调用并记录独立 Tool Step / Attempt / Checkpoint。
 
-        每个工具调用形成一个独立 Tool Step（ADR 0004 / PRD US 16），
-        在下一个工具调用或模型调用之前完成 checkpoint（PRD US 18）。
+        每个工具调用形成一个独立 Tool Step（ADR 0004），
+        在下一个工具调用或模型调用之前完成 checkpoint。
 
         - 显式 ``SUCCESS`` / ``REJECTED`` Outcome 都是正常完成：记录
           SUCCEEDED Step + Attempt + Checkpoint（ADR 0024），Outcome
@@ -1929,19 +3288,19 @@ class Runner:
           + 时间证据），**绝不**把异常包装成自然语言工具结果交给模型
           （ADR 0024）。
 
-        ``step_id`` 可选（Ticket 07）：RETRY_STEP 显式授权重试时传入
+        ``step_id`` 可选：RETRY_STEP 显式授权重试时传入
         WAITING 记录的 step_id，从而在同一 Run Step 下创建**新的 Step
         Attempt**（历史 Attempt 保留）；默认生成全新 Step。
 
-        Ticket 06 重试语义（ADR 0025）：只有冻结的 Retry Policy 允许
+        重试语义（ADR 0025）：只有冻结的 Retry Policy 允许
         自动重试，且必须同时满足——分类为 TRANSIENT、未超过
         ``max_attempts``，以及 Tool Effect 允许（**UNCERTAIN
         NON_IDEMPOTENT 绝不自动重放**：Run 进入 WAITING，等待上层应用
-        显式处置，Ticket 07）。
+        显式处置）。
         每次重试都创建新的 Step Attempt（同一 step_id，新 attempt_id），
         历史 Attempt 保留。
 
-        Ticket 08：每次 attempt 发布 ``STEP_STARTED``，失败发布
+        每次 attempt 发布 ``STEP_STARTED``，失败发布
         ``ATTEMPT_FAILED``，checkpoint 后由 :meth:`_checkpoint_tool_outcome`
         发布 ``STEP_COMPLETED``；发起新 attempt 之前检查协作取消
         （ADR 0012 / AC 8）。in-flight 的工具调用**不会被取消打断**：
@@ -2002,6 +3361,19 @@ class Runner:
             if cancelled is not None:
                 return cancelled, None
             await self._assert_step_dispatch(run, lease)
+            run = await self._enforce_policy(
+                run,
+                definition,
+                lease,
+                PolicyGate.TOOL_REQUEST,
+                {
+                    "tool_name": call.tool_name,
+                    "call_id": call.call_id,
+                    "arguments": call.arguments,
+                },
+            )
+            if run.status is not RunStatus.RUNNING:
+                return run, None
             attempt_id = new_id()
             self._publish(
                 RunUpdate(
@@ -2068,6 +3440,23 @@ class Runner:
                 self._assert_adapter_contract_matches_snapshot(
                     run, definition
                 )
+                run = await self._enforce_policy(
+                    run,
+                    definition,
+                    lease,
+                    PolicyGate.TOOL_REQUEST,
+                    {
+                        "tool_name": call.tool_name,
+                        "call_id": call.call_id,
+                        "arguments": call.arguments,
+                        "final_authorization": True,
+                    },
+                    failed_step_id=step_id,
+                    failed_step_type=StepType.TOOL,
+                    failed_attempt_id=attempt_id,
+                )
+                if run.status is not RunStatus.RUNNING:
+                    return run, None
                 outcome = await tool.invoke(
                     request
                 )
@@ -2086,10 +3475,25 @@ class Runner:
                     outcome.call_id != call.call_id
                     or outcome.tool_name != call.tool_name
                 ):
-                    raise ValueError(
-                        "tool outcome does not match the dispatched call"
-                    )
+                    raise ValueError("tool outcome does not match the dispatched call")
                 serialize_tool_outcome(outcome)
+                run = await self._enforce_policy(
+                    run,
+                    definition,
+                    lease,
+                    PolicyGate.TOOL_OUTCOME,
+                    {
+                        "tool_name": outcome.tool_name,
+                        "call_id": outcome.call_id,
+                        "status": outcome.status.value,
+                    },
+                    failed_step_id=step_id,
+                    failed_step_type=StepType.TOOL,
+                    failed_attempt_id=attempt_id,
+                    pending_tool_outcome=outcome,
+                )
+                if run.status is not RunStatus.RUNNING:
+                    return run, None
             except (LeaseNotHeldError, StaleRunVersionError):
                 raise
             except Exception as exc:  # 意外异常：失败 Attempt，不交给模型
@@ -2103,9 +3507,8 @@ class Runner:
                     StepType.TOOL,
                     attempt_id=attempt_id,
                 )
-                # UNCERTAIN + NON_IDEMPOTENT：绝不自动重放（ADR 0007 /
-                # PRD US 37）。无论是否配置策略都进入 WAITING，把处置
-                # 权显式留给上层应用（Ticket 07）；Step 未完成，只保留
+                # UNCERTAIN + NON_IDEMPOTENT：绝不自动重放（ADR 0007）。无论是否配置策略都进入 WAITING，把处置
+                # 权显式留给上层应用；Step 未完成，只保留
                 # 失败 Attempt 证据。
                 if (
                     classification is FailureClassification.UNCERTAIN
@@ -2159,7 +3562,7 @@ class Runner:
         """把一次工具结果写成权威的 SUCCEEDED Step / Attempt / Checkpoint。
 
         成功路径（工具执行返回 outcome）与 CONFIRM_STEP（应用确认结果，
-        不执行工具）共用本 helper（Ticket 07 AC 5）：二者都产生完全一致
+        不执行工具）共用本 helper：二者都产生完全一致
         的持久化记录，后续恢复不区分来源。Checkpoint 先于后续工作落盘
         （ADR 0006），崩溃注入点 BEFORE/AFTER_TOOL_CHECKPOINT 在此边界。
 
@@ -2226,7 +3629,7 @@ class Runner:
             )
         )
 
-    # -- Ticket 06：结构化失败分类与有界重试辅助 ---------------------
+    # -- 结构化失败分类与有界重试辅助 ---------------------
 
     async def _record_failed_attempt(
         self,
@@ -2236,12 +3639,14 @@ class Runner:
         failure: tuple[FailureClassification, str, str],
         step_type: StepType,
         attempt_id: str | None = None,
+        model_purpose: ModelPurpose | None = None,
+        usage: ModelUsage | None = None,
     ) -> None:
         """记录一次失败 Step Attempt，保留分类 / 错误标识 / 时间证据。
 
         每次失败都生成新的 attempt_id，历史 Attempt 永不覆盖；同时发布
         ``ATTEMPT_FAILED`` Run Update（携带 attempt_id），供订阅者丢弃
-        或替换该 attempt 的部分输出（Ticket 08 / ADR 0011）。
+        或替换该 attempt 的部分输出（ADR 0011）。
 
         ``attempt_id`` 可选：调用方（Model / Tool / Context Step）在发起
         尝试时已生成 attempt_id 并发布 ``STEP_STARTED``，失败时必须传入
@@ -2259,6 +3664,8 @@ class Runner:
                 error=message,
                 classification=classification,
                 error_code=code,
+                model_purpose=model_purpose,
+                usage=usage,
             ),
             expected_version=run.version,
             lease_owner=lease.owner,
@@ -2273,7 +3680,7 @@ class Runner:
                 step_type=step_type,
             )
         )
-        # Ticket 09：失败 Attempt 事件携带结构化分类 + 机器可读错误码
+        # 失败 Attempt 事件携带结构化分类 + 机器可读错误码
         # + 耗时（分类来自 Adapter 契约，绝不解析异常文本）。
         self._emit_telemetry(
             TelemetryEvent(
@@ -2282,6 +3689,7 @@ class Runner:
                 step_id=step_id,
                 attempt_id=attempt_id,
                 step_type=step_type,
+                model_purpose=model_purpose,
                 step_status=StepStatus.FAILED,
                 classification=classification,
                 error_code=code,
@@ -2297,6 +3705,8 @@ class Runner:
         lease: RunLease,
         step_id: str,
         step_type: StepType,
+        *,
+        error_code: str | None = None,
     ) -> None:
         """在 Step 到达最终失败状态时记录 FAILED StepRecord。
 
@@ -2309,6 +3719,7 @@ class Runner:
                 run_id=run.run_id,
                 step_type=step_type,
                 status=StepStatus.FAILED,
+                error_code=error_code,
             ),
             expected_version=run.version,
             lease_owner=lease.owner,
@@ -2321,7 +3732,7 @@ class Runner:
         attempt_count: int,
         effect: ToolEffect | None = None,
     ) -> bool:
-        """判定一次失败是否允许自动重试（ADR 0025 / Ticket 06）。
+        """判定一次失败是否允许自动重试（ADR 0025）。
 
         - 无 Retry Policy：不自动重试（fail-closed）；
         - 只有 TRANSIENT 允许进入预算判断；PERMANENT、UNCERTAIN 与
@@ -2342,18 +3753,28 @@ class Runner:
         return attempt_count < policy.max_attempts
 
     @staticmethod
+    def _recovery_replay_allowed(
+        policy: RetryPolicy | None, attempt_count: int
+    ) -> bool:
+        """Require explicit frozen retry authority for uncertain re-dispatch."""
+        return policy is not None and attempt_count < policy.max_attempts
+
+    @staticmethod
     async def _sleep(delay: timedelta) -> None:
         """重试之间的确定性固定等待（非随机 backoff；默认 0 立即重试）。"""
         total = delay.total_seconds()
         if total > 0:
             await asyncio.sleep(total)
 
-    async def _fail_run(self, run: RunRecord, lease: RunLease) -> RunRecord:
+    async def _fail_run(
+        self, run: RunRecord, lease: RunLease, error_code: str | None = None
+    ) -> RunRecord:
         """把 Run 转换到终态 FAILED 并释放租约（不再重试后的统一路径）。"""
         result = await self._store.transition_run(
             run.run_id,
             expected_version=run.version,
             status=RunStatus.FAILED,
+            error_code=error_code,
             lease_owner=lease.owner,
         )
         await self._store.release_lease(
@@ -2362,12 +3783,215 @@ class Runner:
         self._publish_status(run.run_id, RunStatus.FAILED)
         return result
 
+    async def _enforce_policy(
+        self,
+        run: RunRecord,
+        definition: AgentDefinition,
+        lease: RunLease,
+        gate: PolicyGate,
+        payload: dict[str, object],
+        failed_step_id: str | None = None,
+        failed_step_type: StepType | None = None,
+        failed_attempt_id: str | None = None,
+        pending_tool_outcome: ToolOutcome | None = None,
+        waiting_step_id: str | None = None,
+    ) -> RunRecord:
+        """Evaluate and durably evidence one gate before its protected action.
+
+        The policy port is synchronous by design: asynchronous/model judgement
+        is a separate Model Step, never an authorization race hidden here.
+        """
+        identity = run.snapshot.policy_identity if run.snapshot is not None else None
+        try:
+            if identity is None or definition.run_policy.identity != identity:
+                raise RuntimeError("frozen Run Policy identity is unavailable")
+            decision = PolicyDecision.model_validate(
+                definition.run_policy.evaluate(
+                    PolicyRequest(gate=gate, run_id=run.run_id, payload=payload)
+                )
+            )
+        except Exception:
+            # A policy implementation fault must fail closed and remains
+            # inspectable without persisting the policy input itself.
+            fault_identity = identity or definition.run_policy.identity
+            record = PolicyDecisionRecord(
+                run_id=run.run_id,
+                gate=gate,
+                action=PolicyAction.REJECT,
+                reason_code=ERROR_POLICY_ERROR,
+                policy_id=fault_identity.policy_id,
+                policy_version=fault_identity.version,
+                policy_fingerprint=fault_identity.fingerprint,
+                input_summary=policy_input_summary(payload),
+            )
+            await self._store.record_policy_decision(
+                record, expected_version=run.version, lease_owner=lease.owner
+            )
+            if failed_step_id is not None and failed_step_type is not None:
+                await self._record_failed_attempt(
+                    run,
+                    lease,
+                    failed_step_id,
+                    (
+                        FailureClassification.PERMANENT,
+                        ERROR_POLICY_ERROR,
+                        "policy implementation fault",
+                    ),
+                    failed_step_type,
+                    attempt_id=failed_attempt_id,
+                )
+                await self._record_failed_step(
+                    run,
+                    lease,
+                    failed_step_id,
+                    failed_step_type,
+                    error_code=ERROR_POLICY_ERROR,
+                )
+            return await self._fail_run(run, lease, ERROR_POLICY_ERROR)
+        record = PolicyDecisionRecord(
+            run_id=run.run_id,
+            gate=gate,
+            action=decision.action,
+            reason_code=decision.reason_code,
+            policy_id=identity.policy_id,
+            policy_version=identity.version,
+            policy_fingerprint=identity.fingerprint,
+            input_summary=policy_input_summary(payload),
+        )
+        await self._store.record_policy_decision(
+            record, expected_version=run.version, lease_owner=lease.owner
+        )
+        if decision.action is PolicyAction.ALLOW:
+            return run
+        if decision.action is PolicyAction.REQUIRE_RESOLUTION:
+            if pending_tool_outcome is not None:
+                if failed_step_id is None:
+                    raise RuntimeError(
+                        "policy-held Tool Outcome requires a Tool Step identity"
+                    )
+                await self._record_pending_tool_outcome(
+                    run,
+                    lease,
+                    failed_step_id,
+                    pending_tool_outcome,
+                    attempt_id=failed_attempt_id,
+                )
+            result = await self._store.transition_run(
+                run.run_id,
+                expected_version=run.version,
+                status=RunStatus.WAITING,
+                waiting_reason=(
+                    f"{REASON_POLICY_RESOLUTION_REQUIRED}:{decision.reason_code}"
+                ),
+                waiting_step_id=waiting_step_id or failed_step_id,
+                lease_owner=lease.owner,
+            )
+            await self._store.release_lease(
+                run.run_id, lease.owner, expected_version=result.version
+            )
+            self._publish_status(run.run_id, RunStatus.WAITING)
+            return result
+        if failed_step_id is not None and failed_step_type is not None:
+            await self._record_failed_attempt(
+                run,
+                lease,
+                failed_step_id,
+                (
+                    FailureClassification.PERMANENT,
+                    decision.reason_code,
+                    "policy rejected the completed step result",
+                ),
+                failed_step_type,
+                attempt_id=failed_attempt_id,
+            )
+            await self._record_failed_step(
+                run,
+                lease,
+                failed_step_id,
+                failed_step_type,
+                error_code=decision.reason_code,
+            )
+        if decision.action is PolicyAction.REJECT:
+            result = await self._store.transition_run(
+                run.run_id,
+                expected_version=run.version,
+                status=RunStatus.REJECTED,
+                error_code=decision.reason_code,
+                lease_owner=lease.owner,
+            )
+            await self._store.release_lease(
+                run.run_id, lease.owner, expected_version=result.version
+            )
+            self._publish_status(run.run_id, RunStatus.REJECTED)
+            return result
+        raise AssertionError("unreachable policy decision")
+
+    async def _pending_tool_outcome(
+        self, run: RunRecord, step_id: str | None
+    ) -> StepAttempt | None:
+        if step_id is None:
+            return None
+        attempts = await self._store.get_attempts(run.run_id)
+        return next(
+            (
+                attempt
+                for attempt in reversed(attempts)
+                if attempt.step_id == step_id
+                and attempt.error_code == ERROR_POLICY_OUTCOME_PENDING
+                and attempt.output is not None
+            ),
+            None,
+        )
+
+    async def _record_pending_tool_outcome(
+        self,
+        run: RunRecord,
+        lease: RunLease,
+        step_id: str,
+        outcome: ToolOutcome,
+        *,
+        attempt_id: str | None,
+    ) -> None:
+        """Store a held outcome as protected evidence, never a checkpoint."""
+        await self._store.record_attempt(
+            StepAttempt(
+                attempt_id=attempt_id if attempt_id is not None else new_id(),
+                step_id=step_id,
+                run_id=run.run_id,
+                status=StepStatus.FAILED,
+                output=serialize_tool_outcome(outcome),
+                error="policy outcome awaits explicit continuation",
+                classification=FailureClassification.PERMANENT,
+                error_code=ERROR_POLICY_OUTCOME_PENDING,
+            ),
+            expected_version=run.version,
+            lease_owner=lease.owner,
+        )
+
+    async def _enter_waiting_policy_outcome(
+        self, run: RunRecord, lease: RunLease, step_id: str
+    ) -> RunRecord:
+        result = await self._store.transition_run(
+            run.run_id,
+            expected_version=run.version,
+            status=RunStatus.WAITING,
+            waiting_reason=(
+                f"{REASON_POLICY_RESOLUTION_REQUIRED}:{ERROR_POLICY_OUTCOME_PENDING}"
+            ),
+            waiting_step_id=step_id,
+            lease_owner=lease.owner,
+        )
+        await self._store.release_lease(
+            run.run_id, lease.owner, expected_version=result.version
+        )
+        self._publish_status(run.run_id, RunStatus.WAITING)
+        return result
+
     async def _enter_waiting_uncertain(
         self, run: RunRecord, lease: RunLease, step_id: str
     ) -> RunRecord:
-        """UNCERTAIN NON_IDEMPOTENT Tool Step -> WAITING（ADR 0007 / PRD
-        US 37）。reason 与目标 Step（``waiting_step_id``）机器可读，留给
-        上层应用显式处置（Ticket 07）；与 DEFINITION_UNAVAILABLE 的
+        """UNCERTAIN NON_IDEMPOTENT Tool Step -> WAITING（ADR 0007）。reason 与目标 Step（``waiting_step_id``）机器可读，留给
+        上层应用显式处置；与 DEFINITION_UNAVAILABLE 的
         WAITING 路径保持一致，不在此处释放租约——resolution 命令持有
         同一租约即可继续（同进程续约或租约过期后新 owner 接管）。
         """
@@ -2394,7 +4018,7 @@ class Runner:
         step_id: str | None = None,
         attempt_id: str | None = None,
     ) -> RunRecord:
-        """恢复时发现未确认的 NON_IDEMPOTENT 调用 -> WAITING（Ticket 07）。
+        """恢复时发现未确认的 NON_IDEMPOTENT 调用 -> WAITING。
 
         崩溃发生在工具外部效果之后、Tool Step checkpoint 提交之前：
         checkpoint 缺失 = 该副作用是否已发生无法确认。运行时**绝不自动

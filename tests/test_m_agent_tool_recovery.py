@@ -1,6 +1,6 @@
-"""Ticket 05 恢复测试：工具执行过程中断后，从 Run Store 精确恢复。
+"""恢复测试：工具执行过程中断后，从 Run Store 精确恢复。
 
-恢复语义（ADR 0003 at-least-once / Ticket 02 既有契约）扩展到 Tool
+恢复语义（ADR 0003 at-least-once / 既有契约）扩展到 Tool
 Step：
 
 - 已确认的 Tool Step checkpoint 复用：恢复**不重复执行**外部副作用，
@@ -24,23 +24,17 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    FakeClock,
-    InMemoryRunStore,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RetryPolicy,
     Runner,
     RunStatus,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     ToolCall,
@@ -49,8 +43,25 @@ from m_agent import (
     deserialize_model_response,
     deserialize_tool_outcome,
 )
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
-TOOL_CALLING_CAPABILITIES = ModelCapabilities(tool_calling=True)
+TOOL_CALLING_CAPABILITIES = ModelCapabilities(
+    tool_calling=ToolCallingMode.NATIVE
+)
 
 
 class LookupTool(DeterministicTool):
@@ -166,11 +177,13 @@ def build_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=TOOL_CALLING_CAPABILITIES,
+            model_requirements=ModelRequirements(
+                capabilities=TOOL_CALLING_CAPABILITIES
+            ),
             model_adapter=model,
             tools=tools,
             retry_policy=retry_policy,

@@ -1,4 +1,4 @@
-"""Durable Support Agent 跨进程执行脚本（Ticket 11 示例，仅离线使用）。
+"""Durable Support Agent 跨进程执行脚本。
 
 两个进程通过**公开 Runner API**（``create_run`` / ``start_run`` /
 ``resume_run`` / ``resolve_run``）与真实 ``SQLiteRunStore`` 推进同一个
@@ -52,15 +52,21 @@ from support_agent import (
     open_after_crash,
 )
 
-from m_agent import (
+from m_agent.runtime import (
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     CrashPoint,
-    PlaintextPayloadCodec,
     RunResolution,
     RunStatus,
     Runner,
-    SQLiteRunStore,
     allowed_resolutions,
+)
+from m_agent.adapters import (
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    RunStatus,
+    Runner,
 )
 
 _CRASH_EXIT_CODE = 17
@@ -73,7 +79,7 @@ def _crash_after_notification(
 
     ``BEFORE_TOOL_CHECKPOINT`` 对每个工具都会触发；只有外部 notify
     journal 已有 1 行（= 通知效果已发生）时才硬崩溃，保证恰好一次
-    通知效果发生在崩溃之前（Ticket 11 AC 5）。
+    通知效果发生在崩溃之前。
     """
 
     def crash_hook(point: CrashPoint, run_id: str) -> None:

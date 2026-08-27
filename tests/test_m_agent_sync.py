@@ -6,17 +6,13 @@ import asyncio
 import threading
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
     FailureClassification,
-    InMemoryRunStore,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RunResolution,
     RunStatus,
     Runner,
@@ -27,6 +23,20 @@ from m_agent import (
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    RunStatus,
+    Runner,
+    SyncRunner,
+)
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 
 class FailingModel(DeterministicModelAdapter):
@@ -47,7 +57,9 @@ class UncertainTool(DeterministicTool):
 
 class ToolRequestingModel(DeterministicModelAdapter):
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
@@ -61,12 +73,16 @@ class ToolRequestingModel(DeterministicModelAdapter):
 def make_sync(model, tools=()) -> SyncRunner:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="be deterministic",
-            required_capabilities=(
-                ModelCapabilities(tool_calling=True) if tools else ModelCapabilities()
+            model_requirements=ModelRequirements(
+                capabilities=(
+                    ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+                    if tools
+                    else ModelCapabilities()
+                )
             ),
             model_adapter=model,
             tools=tuple(tools),
@@ -110,6 +126,12 @@ class SyncRunnerTests(unittest.TestCase):
                 super().__init__()
                 self.started = threading.Event()
                 self.release = threading.Event()
+
+            def _fingerprint_excluded_state(self) -> frozenset[str]:
+                return super()._fingerprint_excluded_state() | {
+                    "started",
+                    "release",
+                }
 
             async def generate(self, request: ModelRequest) -> ModelResponse:
                 self.call_count += 1

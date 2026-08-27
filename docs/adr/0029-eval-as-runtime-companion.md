@@ -4,4 +4,4 @@ status: accepted
 
 # Eval 作为 Runtime Companion 保留
 
-Eval 由 M-Agent 作为 Runtime Companion 维护，可以启动受控测试 Agent Run 或读取已有 Run Record，评测最终输出、结构化字段、Tool/Context 轨迹、Policy Decision 与恢复行为；Eval Report 独立保存，不参与 Runner 核心循环，也不改变生产 Run Store。默认 evaluator 保持确定性，LLM-as-judge 必须表现为显式、可追踪的评测 Agent Run，从而保留回归测量价值而不把线上 Policy 与离线 Eval 混合。
+Eval 由 M-Agent 作为 Runtime Companion 维护，以隔离的 `EXECUTE` 模式启动受控 Agent Run，或以严格只读的 `OBSERVE` 模式评估应用显式选择的已有 Run；两种模式都归一化为不可变 Eval Observation，并通过授权 Observation Projection、版本化 Evidence Adapter 和稳定 Evidence View 交给 Evaluator。Eval Execution、不可变 Eval Report revision 和显式 Baseline 保存在独立 Eval Store，不能修改生产 Run Store、Session Store 或被评估 Run；默认发布门槛只依赖确定性 hard/safety evaluator，多维质量、成本和延迟不压成单一总分。LLM-as-judge 必须表现为专用 Eval Run Store 中独立、版本化、无业务 Tool 和写能力的 Agent Run，只接收最小脱敏 Projection，且永远不能覆盖 required deterministic 或 safety failure；该隔离增加了证据、存储与版本管理成本，却避免评估规则成为生产副作用入口、数据权限旁路或不可复现的模型比较。

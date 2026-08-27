@@ -1,46 +1,43 @@
-"""RunStore 协议与 InMemoryRunStore 实现。
+"""Runtime Core RunStore protocol and shared serialization primitives.
 
 ADR 0006：Run Store 是持久化权威 Run Status、Run Step 与 Checkpoint
 的边界，恢复只读取 Run Store。
 ADR 0033：可查询的 Run Metadata 与 Run Payload 分离，Payload 只能经
 上层应用显式配置的 :class:`PayloadCodec` 读写——本模块的内部存储
-布局（内存 dict 与 SQLite 表）在两种实现中保持一致：
+布局由 Adapter 实现保持一致：
 metadata 不含任何内容字段，内容一律以编码字节存入 payload 区。
-PRD：InMemoryRunStore 用于确定性测试与本地实验；测试断言只通过
-公开 Runner 与检查 API 驱动，本模块的协议是唯一低层补充边界。
+具体的内存与 SQLite Adapter 位于 :mod:`m_agent.adapters`；本模块只保留
+Runtime Core 所需的协议、Lease 与与内容无关的共享序列化逻辑。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol, runtime_checkable
 
-from ._clock import Clock, SystemClock
 from ._codec import PayloadCodec
 from ._definition import DefinitionSnapshot
 from ._failure import sanitize_error_code
-from ._errors import (
-    DuplicateRunError,
-    LeaseNotHeldError,
-    RunNotFoundError,
-    StaleRunVersionError,
-)
+from ._history import ConversationMessage
 from ._run import RunRecord
-from ._status import RunStatus, validate_transition
+from ._model import ModelPurpose, ModelUsage
+from ._status import RunStatus
 from ._steps import (
     FailureClassification,
     StepAttempt,
     StepCheckpoint,
     StepRecord,
     StepStatus,
-    utc_now,
 )
+from ._policy import PolicyDecisionRecord
 
 #: Payload 区内字段名（metadata 与 payload 的固定拆分键）。
 FIELD_RUN_INPUT = "run:input"
 FIELD_RUN_OUTPUT = "run:output"
 FIELD_RUN_SNAPSHOT = "run:snapshot"
+FIELD_RUN_HISTORY = "run:history"
 
 
 def attempt_output_field(attempt_id: str) -> str:
@@ -80,6 +77,7 @@ class _StoredRun:
     version: int
     waiting_reason: str | None
     waiting_step_id: str | None
+    error_code: str | None
     lease_owner: str | None
     lease_expires_at: datetime | None
     created_at: datetime
@@ -90,17 +88,20 @@ class _StoredRun:
         input: str,
         output: str | None,
         snapshot: DefinitionSnapshot | None,
+        history: tuple[ConversationMessage, ...] = (),
     ) -> RunRecord:
         return RunRecord(
             run_id=self.run_id,
             definition_id=self.definition_id,
             definition_version=self.definition_version,
             input=input,
+            history=history,
             status=self.status,
             snapshot=snapshot,
             output=output,
             waiting_reason=self.waiting_reason,
             waiting_step_id=self.waiting_step_id,
+            error_code=self.error_code,
             version=self.version,
             lease_owner=self.lease_owner,
             lease_expires_at=self.lease_expires_at,
@@ -120,6 +121,8 @@ class _StoredAttempt:
     error: str | None
     classification: str | None
     error_code: str | None
+    model_purpose: str | None
+    usage: ModelUsage | None
     created_at: datetime
 
     def to_record(self, output: str | None, error: str | None) -> StepAttempt:
@@ -136,6 +139,12 @@ class _StoredAttempt:
                 else None
             ),
             error_code=self.error_code,
+            model_purpose=(
+                ModelPurpose(self.model_purpose)
+                if self.model_purpose is not None
+                else None
+            ),
+            usage=self.usage,
             created_at=self.created_at,
         )
 
@@ -174,6 +183,9 @@ class RunStore(Protocol):
     Run transition 的每个权威 mutation 都必须携带 ``expected_version``；
     Runner 写入还会原子校验调用方仍持有**未过期**的租约。dispatch 前
     的 ``assert_lease`` 执行相同 guard，杜绝过期 owner 启动新 Step。
+    ``prepare_model_dispatch`` 与 ``reserve_model_attempt`` 是 typed Model Contract 的可选增强：内置 Store 实现它们以原子预留预算
+    并在无 await 间隙内执行最终 guard。0.2 自定义 Store 不需要实现它们；
+    只有仍使用旧 Definition 路径的 Run 可以走兼容 dispatch。
     """
 
     async def create_run(self, run: RunRecord) -> RunRecord: ...
@@ -209,6 +221,7 @@ class RunStore(Protocol):
         output: str | None = None,
         waiting_reason: str | None = None,
         waiting_step_id: str | None = None,
+        error_code: str | None = None,
         lease_owner: str | None = None,
     ) -> RunRecord: ...
 
@@ -242,6 +255,42 @@ class RunStore(Protocol):
 
     async def get_checkpoints(self, run_id: str) -> list[StepCheckpoint]: ...
 
+    async def record_policy_decision(
+        self,
+        record: PolicyDecisionRecord,
+        *,
+        expected_version: int,
+        lease_owner: str | None = None,
+    ) -> PolicyDecisionRecord: ...
+
+    async def get_policy_decisions(
+        self, run_id: str
+    ) -> list[PolicyDecisionRecord]: ...
+
+
+def _serialize_history(history: tuple[ConversationMessage, ...]) -> str:
+    """把冻结 Conversation History 序列化为稳定的 JSON 载荷。"""
+    return json.dumps(
+        [
+            {"role": message.role.value, "content": message.content}
+            for message in history
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _restore_history(payload: str | None) -> tuple[ConversationMessage, ...]:
+    """从受保护 payload 还原冻结 Conversation History；缺失视为空。"""
+    if payload is None:
+        return ()
+    data = json.loads(payload)
+    if not isinstance(data, list):
+        raise ValueError("run history payload is malformed")
+    return tuple(
+        ConversationMessage.model_validate(message) for message in data
+    )
+
 
 def _split_run(run: RunRecord, codec: PayloadCodec) -> tuple[_StoredRun, dict[str, bytes]]:
     """把公共 RunRecord 拆成 metadata 视图 + 编码后的 payload 区。"""
@@ -250,6 +299,8 @@ def _split_run(run: RunRecord, codec: PayloadCodec) -> tuple[_StoredRun, dict[st
         payloads[FIELD_RUN_OUTPUT] = codec.encode(run.output)
     if run.snapshot is not None:
         payloads[FIELD_RUN_SNAPSHOT] = codec.encode(run.snapshot.model_dump_json())
+    if run.history:
+        payloads[FIELD_RUN_HISTORY] = codec.encode(_serialize_history(run.history))
     stored = _StoredRun(
         run_id=run.run_id,
         definition_id=run.definition_id,
@@ -259,6 +310,7 @@ def _split_run(run: RunRecord, codec: PayloadCodec) -> tuple[_StoredRun, dict[st
         version=run.version,
         waiting_reason=run.waiting_reason,
         waiting_step_id=run.waiting_step_id,
+        error_code=run.error_code,
         lease_owner=run.lease_owner,
         lease_expires_at=run.lease_expires_at,
         created_at=run.created_at,
@@ -295,6 +347,12 @@ def _split_attempt(
             if attempt.error_code is not None
             else None
         ),
+        model_purpose=(
+            attempt.model_purpose.value
+            if attempt.model_purpose is not None
+            else None
+        ),
+        usage=attempt.usage,
         created_at=attempt.created_at,
     )
     return stored, payloads
@@ -344,361 +402,3 @@ def _split_checkpoint(
         created_at=checkpoint.created_at,
     )
     return stored, payloads
-
-
-class InMemoryRunStore:
-    """进程内 RunStore，用于确定性测试与本地实验。
-
-    Metadata 与编码后的 Payload 分离存储：``_payloads`` 只保存经
-    :class:`PayloadCodec` 编码的字节，任何内容字段都不以明文形式
-    出现在 metadata 区。状态转换做集中合法性校验
-    （IllegalRunTransitionError），状态更新做乐观版本控制
-    （StaleRunVersionError），失败均不改动权威记录。
-    """
-
-    def __init__(
-        self,
-        payload_codec: PayloadCodec,
-        clock: Clock | None = None,
-    ) -> None:
-        self._codec = payload_codec
-        self._clock = clock if clock is not None else SystemClock()
-        self._runs: dict[str, _StoredRun] = {}
-        self._payloads: dict[tuple[str, str], bytes] = {}
-        self._steps: dict[str, list[StepRecord]] = {}
-        self._attempts: dict[str, list[_StoredAttempt]] = {}
-        self._checkpoints: dict[str, list[_StoredCheckpoint]] = {}
-
-    # -- Run Lease ----------------------------------------------------
-
-    async def acquire_lease(
-        self,
-        run_id: str,
-        owner: str,
-        ttl: timedelta,
-        *,
-        expected_version: int,
-    ) -> RunLease:
-        """排他获取或续约 Run Lease。
-
-        无有效租约 / 已过期 / 原 owner 续约时成功并原子更新持久状态；
-        其他 owner 持有 active lease 时抛 :class:`LeaseNotHeldError`。
-        """
-        current = self._runs.get(run_id)
-        if current is None:
-            raise RunNotFoundError(f"run {run_id} not found")
-        if current.version != expected_version:
-            raise StaleRunVersionError(
-                f"stale lease acquisition for run {run_id}: expected version "
-                f"{expected_version}, authoritative version is "
-                f"{current.version}; lease was not mutated"
-            )
-        now = self._clock.now()
-        if (
-            current.lease_owner is not None
-            and current.lease_owner != owner
-            and current.lease_expires_at is not None
-            and current.lease_expires_at > now
-        ):
-            raise LeaseNotHeldError(
-                f"cannot acquire lease for run {run_id}: held by "
-                f"{current.lease_owner!r} until {current.lease_expires_at}"
-            )
-        expires_at = now + ttl
-        self._runs[run_id] = replace(
-            current, lease_owner=owner, lease_expires_at=expires_at
-        )
-        return RunLease(run_id=run_id, owner=owner, expires_at=expires_at)
-
-    async def release_lease(
-        self, run_id: str, owner: str, *, expected_version: int
-    ) -> None:
-        """owner 匹配时清除租约；不匹配抛 :class:`LeaseNotHeldError`。"""
-        current = self._runs.get(run_id)
-        if current is None:
-            raise RunNotFoundError(f"run {run_id} not found")
-        if current.version != expected_version:
-            raise StaleRunVersionError(
-                f"stale lease release for run {run_id}: expected version "
-                f"{expected_version}, authoritative version is "
-                f"{current.version}; lease was not mutated"
-            )
-        if current.lease_owner != owner:
-            raise LeaseNotHeldError(
-                f"cannot release lease for run {run_id}: owner is "
-                f"{current.lease_owner!r}, not {owner!r}"
-            )
-        self._runs[run_id] = replace(
-            current, lease_owner=None, lease_expires_at=None
-        )
-
-    async def get_lease(self, run_id: str) -> RunLease | None:
-        stored = self._runs.get(run_id)
-        if (
-            stored is None
-            or stored.lease_owner is None
-            or stored.lease_expires_at is None
-        ):
-            return None
-        return RunLease(
-            run_id=run_id,
-            owner=stored.lease_owner,
-            expires_at=stored.lease_expires_at,
-        )
-
-    async def assert_lease(
-        self, run_id: str, expected_version: int, owner: str
-    ) -> None:
-        """校验 Step dispatch 使用的权威版本与有效租约，不做续租。"""
-        current = self._runs.get(run_id)
-        if current is None:
-            raise RunNotFoundError(f"run {run_id} not found")
-        if current.version != expected_version:
-            raise StaleRunVersionError(
-                f"stale dispatch for run {run_id}: expected version "
-                f"{expected_version}, authoritative version is "
-                f"{current.version}; no step was started"
-            )
-        self._check_lease(current, owner)
-
-    def _check_lease(self, stored: _StoredRun, owner: str) -> None:
-        """owner 必须持有未过期租约，否则抛 :class:`LeaseNotHeldError`。"""
-        now = self._clock.now()
-        if (
-            stored.lease_owner != owner
-            or stored.lease_expires_at is None
-            or stored.lease_expires_at <= now
-        ):
-            raise LeaseNotHeldError(
-                f"run {stored.run_id} lease is not held by {owner!r} "
-                f"(owner={stored.lease_owner!r}, "
-                f"expires={stored.lease_expires_at}, now={now})"
-            )
-
-    # -- Run 生命周期 -------------------------------------------------
-
-    async def create_run(self, run: RunRecord) -> RunRecord:
-        if run.run_id in self._runs:
-            raise DuplicateRunError(f"run {run.run_id} already exists")
-        stored, payloads = _split_run(run, self._codec)
-        self._runs[run.run_id] = stored
-        for field, encoded in payloads.items():
-            self._payloads[(run.run_id, field)] = encoded
-        return stored.to_record(
-            input=self._codec.decode(payloads[FIELD_RUN_INPUT]),
-            output=(
-                self._codec.decode(payloads[FIELD_RUN_OUTPUT])
-                if FIELD_RUN_OUTPUT in payloads
-                else None
-            ),
-            snapshot=_restore_snapshot(
-                stored.snapshot,
-                self._codec.decode(payloads[FIELD_RUN_SNAPSHOT])
-                if FIELD_RUN_SNAPSHOT in payloads
-                else None,
-            ),
-        )
-
-    async def get_run(self, run_id: str) -> RunRecord | None:
-        stored = self._runs.get(run_id)
-        if stored is None:
-            return None
-        return stored.to_record(
-            input=self._read_payload(run_id, FIELD_RUN_INPUT),
-            output=self._read_payload(run_id, FIELD_RUN_OUTPUT),
-            snapshot=_restore_snapshot(
-                stored.snapshot,
-                self._read_payload(run_id, FIELD_RUN_SNAPSHOT),
-            ),
-        )
-
-    async def transition_run(
-        self,
-        run_id: str,
-        expected_version: int,
-        *,
-        status: RunStatus,
-        snapshot: DefinitionSnapshot | None = None,
-        output: str | None = None,
-        waiting_reason: str | None = None,
-        waiting_step_id: str | None = None,
-        lease_owner: str | None = None,
-    ) -> RunRecord:
-        current = self._runs.get(run_id)
-        if current is None:
-            raise RunNotFoundError(f"run {run_id} not found")
-        if current.version != expected_version:
-            raise StaleRunVersionError(
-                f"stale update for run {run_id}: expected version "
-                f"{expected_version}, authoritative version is "
-                f"{current.version}; run record was not mutated"
-            )
-        if lease_owner is not None:
-            self._check_lease(current, lease_owner)
-        validate_transition(current.status, status)
-        # WAITING 字段只在 WAITING 状态有效（Ticket 07）：转入 WAITING
-        # 用参数写入 reason / 目标 Step；转出 WAITING（RUNNING / 终态）
-        # 一律清空，保证权威记录里不会残留过期目标。
-        if status is RunStatus.WAITING:
-            new_waiting_reason = waiting_reason
-            new_waiting_step_id = waiting_step_id
-        else:
-            new_waiting_reason = None
-            new_waiting_step_id = None
-        updated = _StoredRun(
-            run_id=current.run_id,
-            definition_id=current.definition_id,
-            definition_version=current.definition_version,
-            status=status,
-            snapshot=(
-                _snapshot_metadata(snapshot)
-                if snapshot is not None
-                else current.snapshot
-            ),
-            version=current.version + 1,
-            waiting_reason=new_waiting_reason,
-            waiting_step_id=new_waiting_step_id,
-            lease_owner=current.lease_owner,
-            lease_expires_at=current.lease_expires_at,
-            created_at=current.created_at,
-            updated_at=utc_now(),
-        )
-        self._runs[run_id] = updated
-        if output is not None:
-            self._payloads[(run_id, FIELD_RUN_OUTPUT)] = self._codec.encode(
-                output
-            )
-        if snapshot is not None:
-            self._payloads[(run_id, FIELD_RUN_SNAPSHOT)] = self._codec.encode(
-                snapshot.model_dump_json()
-            )
-        return updated.to_record(
-            input=self._read_payload(run_id, FIELD_RUN_INPUT),
-            output=self._read_payload(run_id, FIELD_RUN_OUTPUT),
-            snapshot=_restore_snapshot(
-                updated.snapshot,
-                self._read_payload(run_id, FIELD_RUN_SNAPSHOT),
-            ),
-        )
-
-    # -- Step 记录 ----------------------------------------------------
-
-    async def record_step(
-        self,
-        step: StepRecord,
-        *,
-        expected_version: int,
-        lease_owner: str | None = None,
-    ) -> StepRecord:
-        current = self._runs.get(step.run_id)
-        if current is None:
-            raise RunNotFoundError(f"run {step.run_id} not found")
-        if current.version != expected_version:
-            raise StaleRunVersionError(
-                f"stale Step mutation for run {step.run_id}: expected version "
-                f"{expected_version}, authoritative version is "
-                f"{current.version}; Step was not recorded"
-            )
-        if lease_owner is not None:
-            self._check_lease(current, lease_owner)
-        stored_step = step.model_copy(deep=True)
-        steps = self._steps.setdefault(step.run_id, [])
-        for index, existing in enumerate(steps):
-            if existing.step_id == step.step_id:
-                steps[index] = stored_step
-                break
-        else:
-            steps.append(stored_step)
-        return stored_step
-
-    async def record_attempt(
-        self,
-        attempt: StepAttempt,
-        *,
-        expected_version: int,
-        lease_owner: str | None = None,
-    ) -> StepAttempt:
-        current = self._runs.get(attempt.run_id)
-        if current is None:
-            raise RunNotFoundError(f"run {attempt.run_id} not found")
-        if current.version != expected_version:
-            raise StaleRunVersionError(
-                f"stale Attempt mutation for run {attempt.run_id}: expected "
-                f"version {expected_version}, authoritative version is "
-                f"{current.version}; Attempt was not recorded"
-            )
-        if lease_owner is not None:
-            self._check_lease(current, lease_owner)
-        stored, payloads = _split_attempt(attempt, self._codec)
-        attempts = self._attempts.setdefault(attempt.run_id, [])
-        for index, existing in enumerate(attempts):
-            if existing.attempt_id == attempt.attempt_id:
-                attempts[index] = stored
-                break
-        else:
-            attempts.append(stored)
-        for field, encoded in payloads.items():
-            self._payloads[(attempt.run_id, field)] = encoded
-        return stored.to_record(output=attempt.output, error=attempt.error)
-
-    async def record_checkpoint(
-        self,
-        checkpoint: StepCheckpoint,
-        *,
-        expected_version: int,
-        lease_owner: str | None = None,
-    ) -> StepCheckpoint:
-        current = self._runs.get(checkpoint.run_id)
-        if current is None:
-            raise RunNotFoundError(f"run {checkpoint.run_id} not found")
-        if current.version != expected_version:
-            raise StaleRunVersionError(
-                f"stale Checkpoint mutation for run {checkpoint.run_id}: "
-                f"expected version {expected_version}, authoritative version "
-                f"is {current.version}; Checkpoint was not recorded"
-            )
-        if lease_owner is not None:
-            self._check_lease(current, lease_owner)
-        stored, payloads = _split_checkpoint(checkpoint, self._codec)
-        self._checkpoints.setdefault(checkpoint.run_id, []).append(stored)
-        for field, encoded in payloads.items():
-            self._payloads[(checkpoint.run_id, field)] = encoded
-        return stored.to_record(output=checkpoint.output)
-
-    async def get_steps(self, run_id: str) -> list[StepRecord]:
-        return [s.model_copy(deep=True) for s in self._steps.get(run_id, [])]
-
-    async def get_attempts(self, run_id: str) -> list[StepAttempt]:
-        return [
-            a.to_record(
-                output=self._read_payload(
-                    run_id, attempt_output_field(a.attempt_id)
-                ),
-                error=self._read_payload(
-                    run_id, attempt_error_field(a.attempt_id)
-                ),
-            )
-            for a in self._attempts.get(run_id, [])
-        ]
-
-    async def get_checkpoints(self, run_id: str) -> list[StepCheckpoint]:
-        return [
-            c.to_record(
-                output=self._read_payload(
-                    run_id, checkpoint_output_field(c.step_id)
-                )
-            )
-            for c in self._checkpoints.get(run_id, [])
-        ]
-
-    # -- 内部 payload 读取 -------------------------------------------
-
-    def _read_payload(self, run_id: str, field: str) -> str | None:
-        encoded = self._payloads.get((run_id, field))
-        if encoded is None:
-            return None
-        return self._codec.decode(encoded)
-
-    def raw_payload_bytes(self, run_id: str, field: str) -> bytes | None:
-        """返回未经解码的编码字节（仅测试用：验证确实经过 Codec）。"""
-        return self._payloads.get((run_id, field))

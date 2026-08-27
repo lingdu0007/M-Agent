@@ -1,4 +1,4 @@
-"""Ticket 09 测试：Telemetry Sink 契约、本地 JSONL、payload 脱敏与失败隔离。
+"""测试：Telemetry Sink 契约、本地 JSONL、payload 脱敏与失败隔离。
 
 只通过公开 Runner 构造参数（``telemetry_sink``）驱动，断言外部可观测
 的 Telemetry 事件与落盘 JSONL；验证：
@@ -21,26 +21,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     ContextItem,
     DefinitionRegistry,
-    DeterministicContextProvider,
-    DeterministicModelAdapter,
-    DeterministicTool,
     FailureClassification,
-    InMemoryRunStore,
-    JsonlTelemetrySink,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
     ModelUsage,
-    PlaintextPayloadCodec,
     ResolutionAction,
     RunResolution,
     Runner,
     RunStatus,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     TelemetryEvent,
@@ -51,6 +44,22 @@ from m_agent import (
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.adapters import (
+    DeterministicContextProvider,
+    DeterministicModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    JsonlTelemetrySink,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.runtime import ModelRequirements, ToolCallingMode, UsageProvenance
 
 #: 穿过 Run input / 模型 / Context / Tool / resolution 路径的哨兵值，
 #: 断言它们绝不出现在 telemetry JSONL 中。
@@ -72,7 +81,7 @@ _ALL_SENTINELS = (
     SENTINEL_RESOLUTION,
 )
 
-_TOOL_CALLING = ModelCapabilities(tool_calling=True)
+_TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 
 class CollectingSink:
@@ -119,7 +128,11 @@ class UsageReportingAdapter(DeterministicModelAdapter):
         response = await super().generate(request)
         return ModelResponse(
             content=response.content,
-            usage=ModelUsage(input_tokens=11, output_tokens=7),
+            usage=ModelUsage(
+                input_tokens=11,
+                output_tokens=7,
+                provenance=UsageProvenance.RUNTIME_SIZED,
+            ),
         )
 
 
@@ -204,11 +217,11 @@ def build_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="telemetry_agent",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=model.capabilities,
+            model_requirements=ModelRequirements(capabilities=model.capabilities),
             model_adapter=model,
             tools=tools,
             context_provider=context_provider,

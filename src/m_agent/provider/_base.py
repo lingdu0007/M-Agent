@@ -1,4 +1,4 @@
-"""Live provider Model Adapter 共享基础（Ticket 10 / ADR 0030 / ADR 0038）。
+"""Live provider Model Adapter 共享基础（ADR 0030 / ADR 0038）。
 
 本子包提供访问真实供应商 HTTP API 的 live Model Adapter。它是
 :class:`m_agent.ModelAdapter` 的**扩展实现**，与核心
@@ -10,7 +10,7 @@ False，且只在调用方显式提供凭证后才会发起网络请求。
 安装（``pip install ".[provider]"``）。核心 ``m_agent`` 包不依赖
 ``httpx``，默认安装也不会导入本子包。
 
-凭证边界（ADR 0033 / Ticket 10 AC）：
+凭证边界（ADR 0033 / AC）：
 
 - 凭证（API Key）只从 embedding environment 读取，**永不写入**
   Definition Snapshot、Run Payload、Checkpoint、Run Update、
@@ -31,16 +31,22 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import AsyncIterator, Sequence
+import re
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
 from m_agent._context import ContextItem
+from m_agent._errors import ModelCapabilityError, ModelContractViolationError
 from m_agent._failure import FailureClassification, ModelFailure
 from m_agent._model import (
     ModelAdapter,
+    ModelCapabilityCombination,
+    ModelCapabilities,
+    ModelContract,
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    StructuredOutputMode,
 )
 from m_agent._tools import ToolCall, ToolSpec
 
@@ -157,7 +163,7 @@ def _strip_endpoint_path(path: str) -> str:
 
 
 def classify_provider_status(status_code: int) -> tuple[FailureClassification, str]:
-    """把 provider HTTP 状态归一为结构化分类（Ticket 06 / ADR 0025）。
+    """把 provider HTTP 状态归一为结构化分类（ADR 0025）。
 
     - 429 / 5xx：瞬时（可能恢复），分类 ``TRANSIENT``；
     - 其余 4xx：请求本身被拒绝，分类 ``PERMANENT``（不自动重试）。
@@ -172,28 +178,34 @@ def classify_provider_status(status_code: int) -> tuple[FailureClassification, s
 def provider_error(
     status_code: int, *, operation: str
 ) -> ModelFailure:
+    # Endpoint configuration is deployment-sensitive and must never cross the
+    # adapter error boundary.  Keep ``operation`` for source compatibility with
+    # the endpoint implementations, but deliberately do not retain it.
+    del operation
     classification, code = classify_provider_status(status_code)
     return ModelFailure(
         classification,
         code,
-        f"{operation} failed with HTTP {status_code}",
+        f"provider request failed with HTTP {status_code}",
     )
 
 
 def transport_error(exc: BaseException, *, operation: str) -> ModelFailure:
     """网络 / 超时 / 传输错误：瞬时分类；消息不含任何请求内容。"""
+    del operation
     return ModelFailure(
         FailureClassification.TRANSIENT,
         "provider_transport_error",
-        f"{operation} failed at the transport layer: {type(exc).__name__}",
+        f"provider request failed at the transport layer: {type(exc).__name__}",
     )
 
 
 def invalid_response(operation: str, detail: str) -> ModelFailure:
+    del operation
     return ModelFailure(
         FailureClassification.PERMANENT,
         "provider_response_invalid",
-        f"{operation} returned an unparseable response: {detail}",
+        f"provider response is invalid: {detail}",
     )
 
 
@@ -295,15 +307,60 @@ def extract_usage(data: dict[str, Any]) -> ModelUsage | None:
     usage = data.get("usage")
     if not isinstance(usage, dict):
         return None
-    input_tokens = usage.get("input_tokens")
-    if input_tokens is None:
-        input_tokens = usage.get("prompt_tokens")
-    output_tokens = usage.get("output_tokens")
-    if output_tokens is None:
-        output_tokens = usage.get("completion_tokens")
-    if input_tokens is None and output_tokens is None:
+    input_key = (
+        "input_tokens" if usage.get("input_tokens") is not None else "prompt_tokens"
+    )
+    output_key = (
+        "output_tokens"
+        if usage.get("output_tokens") is not None
+        else "completion_tokens"
+    )
+    input_tokens = usage.get(input_key)
+    output_tokens = usage.get(output_key)
+    input_details_name = "input_tokens_details"
+    input_details = usage.get(input_details_name)
+    if not isinstance(input_details, dict):
+        input_details_name = "prompt_tokens_details"
+        input_details = usage.get(input_details_name)
+    output_details_name = "output_tokens_details"
+    output_details = usage.get(output_details_name)
+    if not isinstance(output_details, dict):
+        output_details_name = "completion_tokens_details"
+        output_details = usage.get(output_details_name)
+    cached_input_tokens = usage.get("cached_input_tokens")
+    if cached_input_tokens is None and isinstance(input_details, dict):
+        cached_input_tokens = input_details.get("cached_tokens")
+    reasoning_tokens = usage.get("reasoning_tokens")
+    if reasoning_tokens is None and isinstance(output_details, dict):
+        reasoning_tokens = output_details.get("reasoning_tokens")
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and cached_input_tokens is None
+        and reasoning_tokens is None
+    ):
         return None
-    return ModelUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+    mappings = []
+    if input_tokens is not None:
+        mappings.append(f"{input_key}->input_tokens")
+    if output_tokens is not None:
+        mappings.append(f"{output_key}->output_tokens")
+    if cached_input_tokens is not None:
+        mappings.append("cached_input_tokens->cached_input_tokens")
+        if isinstance(input_details, dict) and "cached_tokens" in input_details:
+            mappings[-1] = f"{input_details_name}.cached_tokens->cached_input_tokens"
+    if reasoning_tokens is not None:
+        mappings.append("reasoning_tokens->reasoning_tokens")
+        if isinstance(output_details, dict) and "reasoning_tokens" in output_details:
+            mappings[-1] = f"{output_details_name}.reasoning_tokens->reasoning_tokens"
+    return ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=reasoning_tokens,
+        raw_unit="tokens",
+        normalization_source="openai-compatible-usage-v1:" + ",".join(mappings),
+    )
 
 
 def parse_chat_tool_calls(message: dict[str, Any]) -> tuple[ToolCall, ...]:
@@ -380,6 +437,248 @@ def build_responses_structured_output(
     }
 
 
+_JSON_SCHEMA_ANNOTATIONS = frozenset(
+    {
+        "$id",
+        "$schema",
+        "default",
+        "deprecated",
+        "description",
+        "examples",
+        "readOnly",
+        "title",
+        "writeOnly",
+    }
+)
+_JSON_SCHEMA_KEYWORDS = _JSON_SCHEMA_ANNOTATIONS | {
+    "$defs",
+    "$ref",
+    "additionalProperties",
+    "allOf",
+    "anyOf",
+    "const",
+    "else",
+    "enum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "if",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maxProperties",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minProperties",
+    "minimum",
+    "multipleOf",
+    "not",
+    "oneOf",
+    "pattern",
+    "prefixItems",
+    "properties",
+    "required",
+    "then",
+    "type",
+    "uniqueItems",
+}
+
+
+def _json_equal(left: object, right: object) -> bool:
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    return left == right
+
+
+def _resolve_schema_ref(root: dict[str, Any], reference: object) -> object:
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        return False
+    value: object = root
+    for part in reference[2:].split("/"):
+        if not isinstance(value, dict):
+            return False
+        value = value.get(part.replace("~1", "/").replace("~0", "~"), False)
+    return value
+
+
+def _matches_json_schema(
+    value: object, schema: object, root: dict[str, Any]
+) -> bool:
+    """Validate the strict-schema subset we can prove without a dependency."""
+    if schema is True:
+        return True
+    if schema is False or not isinstance(schema, dict):
+        return False
+    if set(schema) - _JSON_SCHEMA_KEYWORDS:
+        return False
+    reference = schema.get("$ref")
+    if reference is not None and not _matches_json_schema(
+        value, _resolve_schema_ref(root, reference), root
+    ):
+        return False
+    for keyword, expected in (("allOf", True), ("anyOf", False), ("oneOf", None)):
+        branches = schema.get(keyword)
+        if branches is None:
+            continue
+        if not isinstance(branches, list):
+            return False
+        matches = sum(_matches_json_schema(value, branch, root) for branch in branches)
+        if (expected is True and matches != len(branches)) or (
+            expected is False and matches == 0
+        ) or (expected is None and matches != 1):
+            return False
+    if "not" in schema and _matches_json_schema(value, schema["not"], root):
+        return False
+    condition = schema.get("if")
+    if condition is not None:
+        branch = schema.get("then") if _matches_json_schema(value, condition, root) else schema.get("else")
+        if branch is not None and not _matches_json_schema(value, branch, root):
+            return False
+    if "const" in schema and not _json_equal(value, schema["const"]):
+        return False
+    if "enum" in schema and (
+        not isinstance(schema["enum"], list)
+        or not any(_json_equal(value, item) for item in schema["enum"])
+    ):
+        return False
+    declared_type = schema.get("type")
+    types = (declared_type,) if isinstance(declared_type, str) else declared_type
+    if declared_type is not None:
+        if not isinstance(types, list | tuple) or not any(
+            _matches_json_type(value, candidate) for candidate in types
+        ):
+            return False
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            return False
+        if not all(isinstance(key, str) and key in value for key in required):
+            return False
+        if not _in_range(len(value), schema, "minProperties", "maxProperties"):
+            return False
+        extra = set(value) - set(properties)
+        additional = schema.get("additionalProperties", True)
+        if additional is False and extra:
+            return False
+        if additional is not True and additional is not False and not isinstance(additional, dict):
+            return False
+        for key, item in value.items():
+            child = properties.get(key, additional)
+            if child is not True and not _matches_json_schema(item, child, root):
+                return False
+    if isinstance(value, list):
+        if not _in_range(len(value), schema, "minItems", "maxItems"):
+            return False
+        if schema.get("uniqueItems") is True:
+            serialized = [json.dumps(item, sort_keys=True) for item in value]
+            if len(serialized) != len(set(serialized)):
+                return False
+        prefixes = schema.get("prefixItems", ())
+        if not isinstance(prefixes, list):
+            return False
+        if any(
+            not _matches_json_schema(item, prefixes[index], root)
+            for index, item in enumerate(value[: len(prefixes)])
+        ):
+            return False
+        items = schema.get("items", True)
+        if items is not True and any(
+            not _matches_json_schema(item, items, root)
+            for item in value[len(prefixes) :]
+        ):
+            return False
+    if isinstance(value, str):
+        if not _in_range(len(value), schema, "minLength", "maxLength"):
+            return False
+        pattern = schema.get("pattern")
+        if pattern is not None:
+            if not isinstance(pattern, str):
+                return False
+            try:
+                if re.search(pattern, value) is None:
+                    return False
+            except re.error:
+                return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not _matches_number(value, schema):
+            return False
+    return True
+
+
+def _matches_json_type(value: object, declared: object) -> bool:
+    return {
+        "array": isinstance(value, list),
+        "boolean": isinstance(value, bool),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "null": value is None,
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+        "object": isinstance(value, dict),
+        "string": isinstance(value, str),
+    }.get(declared, False)
+
+
+def _in_range(
+    value: int, schema: dict[str, Any], minimum: str, maximum: str
+) -> bool:
+    lower = schema.get(minimum)
+    upper = schema.get(maximum)
+    return (
+        (lower is None or isinstance(lower, int) and value >= lower)
+        and (upper is None or isinstance(upper, int) and value <= upper)
+    )
+
+
+def _matches_number(value: int | float, schema: dict[str, Any]) -> bool:
+    for keyword, comparison in (
+        ("minimum", value.__ge__),
+        ("maximum", value.__le__),
+        ("exclusiveMinimum", value.__gt__),
+        ("exclusiveMaximum", value.__lt__),
+    ):
+        bound = schema.get(keyword)
+        if bound is not None and (
+            not isinstance(bound, (int, float))
+            or isinstance(bound, bool)
+            or not comparison(bound)
+        ):
+            return False
+    multiple = schema.get("multipleOf")
+    return multiple is None or (
+        isinstance(multiple, (int, float))
+        and not isinstance(multiple, bool)
+        and multiple > 0
+        and value / multiple == round(value / multiple)
+    )
+
+
+def _capability_ceiling_supports(
+    ceiling: ModelCapabilities, declared: ModelCapabilities
+) -> bool:
+    """Check every declared protocol combination against the class ceiling."""
+    combinations: tuple[ModelCapabilityCombination, ...] = (
+        declared.supported_combinations
+        or (
+            ModelCapabilityCombination(
+                streaming=declared.streaming,
+                tool_calling=declared.tool_calling,
+                structured_output=declared.structured_output,
+                usage_reporting=declared.usage_reporting,
+            ),
+        )
+    )
+    for combination in combinations:
+        values = combination.model_dump()
+        active = sum(value.value != "NONE" for value in values.values())
+        required = ModelCapabilities(
+            **values,
+            supported_combinations=(combination,) if active > 1 else (),
+        )
+        if not ceiling.supports(required):
+            return False
+    return True
+
+
 # -- 共享 live Adapter 基类 --------------------------------------------
 
 
@@ -400,12 +699,16 @@ class ProviderModelAdapter(ModelAdapter):
         model: str | None = None,
         base_url: str | None = None,
         timeout: float = 120.0,
+        model_contract: ModelContract | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         structured_output_schema: dict[str, Any] | None = None,
         structured_output_name: str = "result",
     ) -> None:
         self.model: str = resolve_model(model)
         self.base_url: str = resolve_base_url(base_url)
         self.timeout: float = timeout
+        self._model_contract = model_contract
+        self._contract_configuration_fingerprint: str | None = None
         self.structured_output_schema: dict[str, Any] | None = (
             structured_output_schema
         )
@@ -413,8 +716,51 @@ class ProviderModelAdapter(ModelAdapter):
         #: 已发出请求的端点记录（不含凭证），供测试断言无请求发生。
         self.requests: list[str] = []
         self._client: httpx.AsyncClient | None = None
-        #: 可替换的本地 HTTP transport（测试用，不改变 provider 协议）。
-        self._transport: httpx.AsyncBaseTransport | None = None
+        #: Publicly injectable offline transport.  It is useful for contract
+        #: fixtures and never supplies credentials or enables live access.
+        self._transport = transport
+
+    @property
+    def model_contract(self) -> ModelContract:
+        if self._model_contract is None:
+            return super().model_contract
+        if not _capability_ceiling_supports(
+            self.capabilities, self._model_contract.capabilities
+        ):
+            raise ValueError(
+                "provider instance ModelContract exceeds class capability ceiling"
+            )
+        if self._model_contract.model_identity != self.model:
+            raise ValueError(
+                "provider instance ModelContract model_identity does not match "
+                "the configured model"
+            )
+        declared_structured_output = (
+            self._model_contract.capabilities.structured_output
+        )
+        current = self.definition_contract_fingerprint()
+        if self._model_contract.configuration_fingerprint != current:
+            raise ValueError(
+                "provider instance configuration fingerprint does not match "
+                "its ModelContract configuration fingerprint"
+            )
+        if (
+            declared_structured_output
+            is StructuredOutputMode.JSON_SCHEMA_STRICT
+            and self.structured_output_schema is None
+        ):
+            raise ValueError(
+                "provider instance strict JSON Schema ModelContract requires "
+                "a configured structured_output_schema"
+            )
+        if self._contract_configuration_fingerprint is None:
+            self._contract_configuration_fingerprint = current
+        elif self._contract_configuration_fingerprint != current:
+            raise ValueError(
+                "provider instance configuration changed after ModelContract "
+                "was frozen"
+            )
+        return self._model_contract
 
     def _definition_contract_configuration(self) -> dict[str, Any]:
         """Return semantic provider configuration without credential material.
@@ -449,6 +795,67 @@ class ProviderModelAdapter(ModelAdapter):
                 "provider adapter configuration must be JSON-serializable"
             ) from exc
         return hashlib.sha256(encoded).hexdigest()
+
+    def validate_response(
+        self, request: ModelRequest, response: ModelResponse
+    ) -> ModelResponse:
+        if (
+            request.structured_output is StructuredOutputMode.JSON_SCHEMA_STRICT
+            and not response.tool_calls
+        ):
+            schema = self.structured_output_schema
+            if schema is None:
+                raise ModelContractViolationError(
+                    "strict JSON Schema output requires an adapter schema"
+                )
+            try:
+                content = json.loads(response.content or "")
+            except (AttributeError, json.JSONDecodeError):
+                raise ModelContractViolationError(
+                    "strict structured response is not valid JSON"
+                ) from None
+            if not _matches_json_schema(content, schema, schema):
+                raise ModelContractViolationError(
+                    "strict structured response violates the configured JSON Schema"
+                )
+        return response
+
+    def assert_output_contract_schema(
+        self,
+        mode: StructuredOutputMode,
+        schema: Mapping[str, Any],
+    ) -> None:
+        """Bind native strict output to the Definition's frozen schema."""
+        if mode is not StructuredOutputMode.JSON_SCHEMA_STRICT:
+            return
+        configured = self.structured_output_schema
+        if configured is None:
+            raise ModelCapabilityError(
+                "provider strict output requires an Output Contract schema"
+            )
+        try:
+            configured_schema = json.dumps(
+                configured,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            contract_schema = json.dumps(
+                schema,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ModelCapabilityError(
+                "provider strict Output Contract schema is not JSON-serializable"
+            ) from exc
+        if configured_schema != contract_schema:
+            raise ModelCapabilityError(
+                "provider strict schema does not match Output Contract schema"
+            )
 
     # -- 供子类使用的 HTTP 基础设施 -----------------------------------
 
@@ -492,7 +899,7 @@ class ProviderModelAdapter(ModelAdapter):
                 url, json=payload, headers=self._headers(api_key)
             )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
-            raise transport_error(exc, operation=url) from exc
+            raise transport_error(exc, operation=url) from None
         if 300 <= response.status_code < 400:
             raise provider_error(response.status_code, operation=url)
         if response.status_code >= 400:
@@ -502,7 +909,7 @@ class ProviderModelAdapter(ModelAdapter):
         except ValueError as exc:
             raise invalid_response(
                 url, f"expected JSON body ({type(exc).__name__})"
-            ) from exc
+            ) from None
 
     async def aclose(self) -> None:
         """关闭底层 HTTP 客户端（幂等；应用在进程退出前调用）。"""
@@ -514,7 +921,7 @@ class ProviderModelAdapter(ModelAdapter):
 
     @property
     def _structured_output_payload(self) -> dict[str, Any] | None:
-        if not self.capabilities.structured_output:
+        if self.capabilities.structured_output is StructuredOutputMode.NONE:
             return None
         return build_structured_output(
             self.structured_output_schema, name=self.structured_output_name
@@ -522,7 +929,7 @@ class ProviderModelAdapter(ModelAdapter):
 
     @property
     def _structured_output_responses_payload(self) -> dict[str, Any] | None:
-        if not self.capabilities.structured_output:
+        if self.capabilities.structured_output is StructuredOutputMode.NONE:
             return None
         return build_responses_structured_output(
             self.structured_output_schema, name=self.structured_output_name
@@ -544,4 +951,4 @@ async def consume_sse_events(
         except ValueError as exc:
             raise invalid_response(
                 "stream", f"invalid SSE JSON ({type(exc).__name__})"
-            ) from exc
+            ) from None

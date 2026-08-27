@@ -14,6 +14,14 @@ class MAgentError(Exception):
 class ModelCapabilityError(MAgentError):
     """Definition 要求的 Model Capabilities 未被所选 Model Adapter 声明。"""
 
+    code = "MODEL_CAPABILITY_UNSUPPORTED"
+
+
+class ModelContractViolationError(MAgentError):
+    """Adapter response failed the frozen Model Contract at normalization."""
+
+    code = "MODEL_CONTRACT_VIOLATION"
+
 
 class DefinitionConflictError(MAgentError):
     """同一 definition_id + version 已被注册，不可变 Definition 禁止覆盖。"""
@@ -46,6 +54,17 @@ class LeaseNotHeldError(MAgentError):
     获取失败（他人持有 active lease）、提交失败（owner 不匹配或
     租约过期）与释放失败（owner 不匹配）都使用本类型。
     """
+
+
+class ContextBudgetExceededError(MAgentError):
+    """完整 Model Request 超过冻结的 Context Budget 硬上限。
+
+    超限发生在 Model Step dispatch 之前，产生零 model dispatch
+    （ADR 0040）。Runner 不隐式裁剪、压缩或等待，而是以
+    ``CONTEXT_BUDGET_EXCEEDED`` 确定性失败。
+    """
+
+    code = "CONTEXT_BUDGET_EXCEEDED"
 
 
 class ResolutionNotAllowedError(MAgentError):

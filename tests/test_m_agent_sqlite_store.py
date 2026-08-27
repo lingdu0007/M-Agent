@@ -1,7 +1,7 @@
 """SQLiteRunStore 行为契约与持久化专属测试。
 
 - 共享契约：与 InMemoryRunStore 相同的生命周期、Step、Step Attempt、
-  Checkpoint、版本控制与 Payload 处理契约（PRD Testing Decisions）；
+  Checkpoint、版本控制与 Payload 处理契约；
 - SQLite 专属：进程重启（关闭连接后重开）数据仍完整、Metadata 与
   Payload 分表存储、明文编码字节带显式标记、无 Codec 构造被拒绝、
   原始 payload 字节不可绕过 Codec 读取。
@@ -13,12 +13,17 @@ import sqlite3
 import tempfile
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
+    RunStatus,
+    StaleRunVersionError,
+)
+from m_agent.adapters import (
     InMemoryRunStore,
     PlaintextPayloadCodec,
-    RunStatus,
     SQLiteRunStore,
-    StaleRunVersionError,
+)
+from m_agent import (
+    RunStatus,
 )
 
 from store_contract import RunStoreContractMixin, created_record, snapshot

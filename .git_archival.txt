@@ -1,0 +1,2 @@
+commit $Format:%H$
+tree $Format:%T$

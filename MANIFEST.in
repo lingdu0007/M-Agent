@@ -10,3 +10,4 @@ prune .github
 prune .reasonix
 prune benchmarks/results
 exclude .env.example
+include .git_archival.txt

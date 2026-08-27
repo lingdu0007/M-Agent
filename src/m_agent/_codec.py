@@ -10,7 +10,7 @@ Run Store 把可查询的 Run Metadata 与包含模型内容、Context Item、
   RunStore 时显式选择；它不宣称提供静态加密或任何保护。
 
 生产集成必须选择符合自身安全要求的受保护 Codec（security extras，
-本 Ticket 范围外）。
+本版本 范围外）。
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ class PlaintextPayloadCodec(PayloadCodec):
 
     .. warning::
         明文编码不提供任何保密性，绝不可用于含敏感内容的真实负载；
-        它只用于确定性测试与本地实验（PRD User Story 56）。
+        它只用于确定性测试与本地实验。
     """
 
     name: str = "plaintext-dev"

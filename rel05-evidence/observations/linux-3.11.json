@@ -1,0 +1,22 @@
+[
+  {
+    "platform": "linux",
+    "python": "3.11",
+    "level": "CONTRACT",
+    "role": "required",
+    "status": "PASS",
+    "evidence_source": "Docker linux/arm64 bookworm CPython 3.11 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+    "evidence_digest": "sha256:03afa42bd2bb7cd9fb50f3a15e131d291a113c831bec0c8e836717c0fe391034",
+    "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27"
+  },
+  {
+    "platform": "linux",
+    "python": "3.11",
+    "level": "HOST",
+    "role": "primary",
+    "status": "PASS",
+    "evidence_source": "Docker linux/arm64 bookworm CPython 3.11 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+    "evidence_digest": "sha256:d340bf02512b53a6ea435e8280c603e5aef7bb33ad94f0c45d9764d9acbe64ae",
+    "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27"
+  }
+]

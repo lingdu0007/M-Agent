@@ -1,4 +1,4 @@
-"""Ticket 04 主行为测试：Context Provider 注入与 checkpoint 复用。
+"""主行为测试：Context Provider 注入与 checkpoint 复用。
 
 验收要求（.scratch/durable-run/issues/04-checkpoint-context-items.md）：
 
@@ -23,7 +23,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     ContextItem,
@@ -31,17 +31,24 @@ from m_agent import (
     ContextRequest,
     CrashPoint,
     DefinitionRegistry,
+    Runner,
+    RunStatus,
+    StepStatus,
+    StepType,
+)
+from m_agent.adapters import (
     DeterministicContextProvider,
     DeterministicModelAdapter,
     FakeClock,
     InMemoryRunStore,
-    ModelCapabilities,
     PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
     Runner,
     RunStatus,
-    SQLiteRunStore,
-    StepStatus,
-    StepType,
 )
 
 from fixtures.sentinel_payload_worker import SentinelPayloadCodec
@@ -115,11 +122,10 @@ class IdentityObservingProvider(DeterministicContextProvider):
 def make_context_definition(
     provider: ContextProvider | None,
 ) -> AgentDefinition:
-    return AgentDefinition(
+    return AgentDefinition.for_adapter(
         definition_id="assistant",
         version="1.0",
         instructions="Answer deterministically.",
-        required_capabilities=ModelCapabilities(),
         model_adapter=DeterministicModelAdapter(
             responses=("context-aware answer",)
         ),
@@ -190,7 +196,7 @@ class ContextStepContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_identity_is_authoritative_before_provider_dispatch(
         self,
     ) -> None:
-        # Ticket 04：Provider 外部调用前已经存在权威 CONTEXT Step / Attempt
+        # Provider 外部调用前已经存在权威 CONTEXT Step / Attempt
         # identity。Provider 只读取 RunStore 的公开查询面，不接触 Runner
         # 私有状态。
         store = InMemoryRunStore(payload_codec=PlaintextPayloadCodec())
@@ -328,7 +334,7 @@ class ProviderFailureTests(unittest.IsolatedAsyncioTestCase):
         registry = DefinitionRegistry()
         adapter = DeterministicModelAdapter(responses=("never used",))
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="x",
@@ -373,7 +379,7 @@ class ProviderFailureTests(unittest.IsolatedAsyncioTestCase):
         registry = DefinitionRegistry()
         adapter = DeterministicModelAdapter(responses=("never used",))
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="x",
@@ -423,7 +429,7 @@ class ContextPayloadSecurityTests(unittest.IsolatedAsyncioTestCase):
             db_path = os.path.join(tmp, "context.db")
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="assistant",
                     version="1.0",
                     instructions="Answer only from data.",
@@ -468,7 +474,7 @@ class ContextPayloadSecurityTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertTrue(payloads)
                 self.assertTrue(
-                    any(payload.startswith(b"ticket02-sentinel:") for payload in payloads)
+                    any(payload.startswith(b"protected-payload-sentinel:") for payload in payloads)
                 )
                 self.assertTrue(
                     all(sensitive_content.encode() not in payload for payload in payloads)
@@ -491,9 +497,22 @@ class ContextPayloadSecurityTests(unittest.IsolatedAsyncioTestCase):
                 for checkpoint in checkpoints
                 if checkpoint.step_type is StepType.CONTEXT
             )
+            # T14（ADR 0040 AC 3）：Checkpoint 载荷是 ContextStageResult
+            # envelope（输入引用、Items、决策、measurement、provenance），
+            # Item 完整嵌套于 output_items[0].item 并保留全部敏感字段。
+            envelope = json.loads(context_checkpoint.output)
+            self.assertEqual(envelope["stage_id"], "context-provider")
+            self.assertEqual(envelope["scope"], "RUN_INPUT")
+            self.assertEqual(envelope["boundary"], 0)
             self.assertEqual(
-                json.loads(context_checkpoint.output), [item.model_dump(mode="json")]
+                envelope["output_items"][0]["item"],
+                item.model_dump(mode="json"),
             )
+            self.assertEqual(
+                envelope["output_items"][0]["provenance"]["stage_id"],
+                "context-provider",
+            )
+            self.assertEqual(envelope["measurement"]["item_count"], 1)
 
 
 class ContextCrashRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -603,7 +622,7 @@ class ContextCrashRecoveryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         # 恢复行为以冻结 Snapshot 为准：第二进程注册同 id+version 但
         # 无 provider 的定义时，已 checkpoint 的 Context Items 仍被复用，
-        # 而不是静默降级为空上下文（ADR 0022/0023，PRD US 6/7）。
+        # 而不是静默降级为空上下文（ADR 0022/0023）。
         def hook(p: CrashPoint, run_id: str) -> None:
             if p is CrashPoint.AFTER_CONTEXT_CHECKPOINT:
                 raise RuntimeError("injected crash")

@@ -1,4 +1,4 @@
-"""Ticket 11: idempotent support-ticket updates have one external effect."""
+"""idempotent support-ticket updates have one external effect."""
 
 from __future__ import annotations
 
@@ -17,17 +17,23 @@ _EXAMPLE_DIR = os.path.abspath(
 if _EXAMPLE_DIR not in sys.path:
     sys.path.insert(0, _EXAMPLE_DIR)
 
-from m_agent import (
+from m_agent.runtime import (
     ERROR_EFFECT_UNCONFIRMED,
     DefinitionRegistry,
     FailureClassification,
-    PlaintextPayloadCodec,
     Runner,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     ToolRequest,
     deserialize_tool_outcome,
+)
+from m_agent.adapters import (
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    DefinitionRegistry,
+    Runner,
 )
 from support_agent import TICKET_ID, TicketUpdateTool, journal_count
 

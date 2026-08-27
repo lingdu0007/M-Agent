@@ -1,4 +1,4 @@
-"""Responses 风格 live Model Adapter（Ticket 10）。
+"""Responses 风格 live Model Adapter。
 
 适配 OpenAI 兼容的 Responses API 端点（``{base_url}{responses_path}``，
 默认 ``https://api.openai.com/v1/responses``；也兼容不带 ``/v1`` 前缀
@@ -6,11 +6,11 @@
 
 能力声明（ADR 0030，如实且完整）：
 
-- ``streaming=True``：SSE 事件流（``response.output_text.delta`` /
+- ``streaming=DELTA``：SSE 事件流（``response.output_text.delta`` /
   ``response.function_call_arguments.delta`` / ``response.completed``）；
-- ``tool_calling=True``：``tools``（function 工具）；
-- ``structured_output=True``：``text.format``（json_schema）；
-- ``usage_reporting=True``：usage 从 provider 返回时映射为
+- ``tool_calling=NATIVE``：``tools``（function 工具）；
+- ``structured_output=NATIVE``：``text.format``（json_schema）；
+- ``usage_reporting=PROVIDER_REPORTED``：usage 从 provider 返回时映射为
   :class:`ModelUsage`，缺失时显式为 None（不伪造）。
 
 本 Adapter 是 live 实现（``deterministic=False``），构造不触网、不
@@ -36,19 +36,35 @@ from ._base import (
     tool_spec_to_responses_schema,
     transport_error,
 )
+from ._base import httpx
 from m_agent._model import (
+    ModelCapabilityCombination,
     ModelCapabilities,
+    ModelContract,
     ModelDelta,
     ModelRequest,
     ModelResponse,
+    StreamingMode,
+    StructuredOutputMode,
+    ToolCallingMode,
+    UsageReportingMode,
 )
+from m_agent._errors import ModelContractViolationError
 
 #: Responses 兼容端点能力声明：四类语义全部如实支持。
 RESPONSES_CAPABILITIES = ModelCapabilities(
-    streaming=True,
-    tool_calling=True,
-    structured_output=True,
-    usage_reporting=True,
+    streaming=StreamingMode.DELTA,
+    tool_calling=ToolCallingMode.NATIVE,
+    structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+    usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+    supported_combinations=(
+        ModelCapabilityCombination(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+            usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+        ),
+    ),
 )
 
 
@@ -66,6 +82,8 @@ class ResponsesModelAdapter(ProviderModelAdapter):
     :param responses_path: 端点路径，默认 ``/responses``（也读取
         ``M_AGENT_OPENAI_RESPONSES_PATH`` / ``OPENAI_RESPONSES_PATH`` /
         ``AGENT_RESPONSES_PATH``）。
+    :param model_contract: 当前 model/deployment 的显式实例 Contract；
+        缺失时 Adapter 可构造但不能注册进 DefinitionRegistry。
     :param structured_output_schema: 可选 JSON Schema；声明
         structured_output 时随请求发送（json_schema）。
     """
@@ -78,6 +96,8 @@ class ResponsesModelAdapter(ProviderModelAdapter):
         model: str | None = None,
         base_url: str | None = None,
         timeout: float = 120.0,
+        model_contract: ModelContract | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         responses_path: str | None = None,
         structured_output_schema: dict[str, Any] | None = None,
         structured_output_name: str = "result",
@@ -86,6 +106,8 @@ class ResponsesModelAdapter(ProviderModelAdapter):
             model=model,
             base_url=base_url,
             timeout=timeout,
+            model_contract=model_contract,
+            transport=transport,
             structured_output_schema=structured_output_schema,
             structured_output_name=structured_output_name,
         )
@@ -112,23 +134,45 @@ class ResponsesModelAdapter(ProviderModelAdapter):
             payload["tools"] = [
                 tool_spec_to_responses_schema(spec) for spec in request.tools
             ]
-        structured = self._structured_output_responses_payload
-        if structured is not None:
-            payload["text"] = {"format": structured}
+        if request.structured_output is not StructuredOutputMode.NONE:
+            if request.structured_output is StructuredOutputMode.JSON_OBJECT:
+                payload["text"] = {"format": {"type": "json_object"}}
+            elif request.structured_output is not StructuredOutputMode.JSON_SCHEMA_STRICT:
+                raise ModelContractViolationError(
+                    "Responses adapter does not provide the requested "
+                    "structured-output guarantee"
+                )
+            else:
+                structured = self._structured_output_responses_payload
+                if structured is None:
+                    raise ModelContractViolationError(
+                        "strict JSON Schema output requires an adapter schema"
+                    )
+                payload["text"] = {"format": structured}
         return payload
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         url = self.endpoint_url
         _, data = await self._post_json(url, self._build_payload(request))
-        output = data.get("output")
-        if not isinstance(output, list):
-            raise invalid_response(url, "missing field 'output'")
-        content, tool_calls = parse_responses_output(output)
-        return ModelResponse(
-            content=content or None,
-            tool_calls=tool_calls,
-            usage=extract_usage(data),
-        )
+        try:
+            output = data.get("output")
+            if not isinstance(output, list):
+                raise ModelContractViolationError(
+                    "provider response is missing required protocol structure"
+                )
+            content, tool_calls = parse_responses_output(output)
+            return ModelResponse(
+                content=content or None,
+                tool_calls=tool_calls,
+                usage=extract_usage(data),
+                actual_revision=(
+                    data["model"] if isinstance(data.get("model"), str) else None
+                ),
+            )
+        except (AttributeError, TypeError, ValueError):
+            raise ModelContractViolationError(
+                "provider response cannot be normalized"
+            ) from None
 
     async def stream(
         self, request: ModelRequest,
@@ -176,6 +220,11 @@ class ResponsesModelAdapter(ProviderModelAdapter):
                             content=content or None,
                             tool_calls=tool_calls,
                             usage=extract_usage(complete),
+                            actual_revision=(
+                                complete["model"]
+                                if isinstance(complete.get("model"), str)
+                                else None
+                            ),
                         )
                         return
                     elif event_type == "response.failed":
@@ -187,7 +236,11 @@ class ResponsesModelAdapter(ProviderModelAdapter):
                     url, "stream ended without response.completed"
                 )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
-            raise transport_error(exc, operation=url) from exc
+            raise transport_error(exc, operation=url) from None
+        except (AttributeError, TypeError, ValueError):
+            raise ModelContractViolationError(
+                "provider response cannot be normalized"
+            ) from None
 
     async def aclose(self) -> None:
         await super().aclose()

@@ -99,7 +99,7 @@ wheels = [
 
 [[package]]
 name = "m-agent"
-version = "0.2.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -108,20 +108,26 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "httpx" },
+    { name = "packaging" },
     { name = "pytest" },
 ]
 provider = [
     { name = "httpx" },
+]
+testing = [
+    { name = "packaging" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'provider'", specifier = ">=0.27" },
+    { name = "packaging", marker = "extra == 'dev'", specifier = ">=23" },
+    { name = "packaging", marker = "extra == 'testing'", specifier = ">=23" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
 ]
-provides-extras = ["dev", "provider", "storage", "telemetry", "security"]
+provides-extras = ["dev", "provider", "storage", "telemetry", "security", "testing"]
 
 [[package]]
 name = "packaging"

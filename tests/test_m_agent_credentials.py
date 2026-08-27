@@ -1,4 +1,4 @@
-"""凭证隔离测试（Ticket 02 AC：provider 凭证不进入任何持久化位置）。
+"""凭证隔离测试。
 
 ADR 0033：API Key、访问令牌等凭据始终由 Adapter 从外部配置读取，
 不进入 Definition Snapshot 或 Run Payload；Trace 默认只记录元数据。
@@ -19,18 +19,26 @@ import os
 import tempfile
 import unittest
 
+from m_agent.runtime import (
+    AgentDefinition,
+    DefinitionRegistry,
+    ModelRequest,
+    ModelResponse,
+    Runner,
+    RunStatus,
+    StepStatus,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
 from m_agent import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    InMemoryRunStore,
-    ModelRequest,
-    ModelResponse,
-    PlaintextPayloadCodec,
     Runner,
     RunStatus,
-    SQLiteRunStore,
-    StepStatus,
 )
 
 from store_contract import SpyCodec
@@ -47,6 +55,10 @@ class KeyedAdapter(DeterministicModelAdapter):
         super().__init__(responses=responses)
         self.api_key = api_key
 
+    def _fingerprint_excluded_state(self) -> frozenset[str]:
+        """The credential is intentionally non-behavioral test state."""
+        return super()._fingerprint_excluded_state() | {"api_key"}
+
 
 class ExplodingKeyedAdapter(KeyedAdapter):
     """模拟错误 Adapter：把自身凭证误写入裸异常消息。"""
@@ -59,7 +71,7 @@ class ExplodingKeyedAdapter(KeyedAdapter):
 def build_registry(adapter: DeterministicModelAdapter) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",

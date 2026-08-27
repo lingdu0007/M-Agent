@@ -1,0 +1,74 @@
+{
+  "baseline_identity": {
+    "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+    "manifest_digest": "sha256:560156e5ca26cc706c31c7231fbe7329ba56c3f800fd6fc1f0700758a6e6f2be"
+  },
+  "database": {
+    "foreign_key_violations": 0,
+    "integrity_check": "ok",
+    "journal_mode": "delete",
+    "orphan_counts": {
+      "attempts_without_step": 0,
+      "checkpoints_without_step": 0,
+      "steps_without_run": 0
+    },
+    "path": "benchmarks/results/rel05-durable-run-local.sqlite",
+    "row_counts": {
+      "runs": 100,
+      "step_attempts": 300,
+      "step_checkpoints": 300,
+      "steps": 300
+    },
+    "synchronous": 2
+  },
+  "environment": {
+    "cpu": {
+      "logical_count": 14,
+      "machine": "arm64",
+      "processor": "arm"
+    },
+    "os": {
+      "release": "25.2.0",
+      "system": "Darwin",
+      "version": "Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:56 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6041"
+    },
+    "python": {
+      "implementation": "CPython",
+      "version": "3.11.15"
+    }
+  },
+  "measurement": {
+    "concurrency": 100,
+    "definition": "wall clock from barrier release through concurrent public Runner.create_run + Runner.start_run completion; validation and inspection excluded",
+    "elapsed_seconds": 1.3815474170260131,
+    "run_count": 100
+  },
+  "metrics": {
+    "persistence_overhead_ms_per_step": {
+      "definition": "sum of record_step, record_attempt, and record_checkpoint wall time for each completed Step",
+      "mean": 1.1067424054878454,
+      "p50": 0.981271150521934,
+      "p95": 1.7112141242250802
+    },
+    "run_latency_ms": {
+      "p50": 13.589250156655908,
+      "p95": 15.883591084275393
+    },
+    "throughput_runs_per_second": 72.382604294006
+  },
+  "qualification": "Comparative local evidence only; not production QPS, latency, scalability, or availability proof.",
+  "schema_version": 1,
+  "validation": {
+    "attempts": 300,
+    "checkpoints": 300,
+    "problems": [],
+    "side_effect_count": 100,
+    "status": "PASS",
+    "steps": 300,
+    "terminal_runs": 100
+  },
+  "warmup": {
+    "definition": "SQLite schema initialization before measurement",
+    "run_count": 0
+  }
+}

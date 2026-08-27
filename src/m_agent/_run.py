@@ -7,8 +7,10 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from ._definition import DefinitionSnapshot
+from ._history import ConversationMessage
 from ._status import RunStatus
 from ._steps import StepAttempt, StepCheckpoint, StepRecord, utc_now
+from ._policy import PolicyDecisionRecord
 
 
 class RunRecord(BaseModel):
@@ -23,14 +25,20 @@ class RunRecord(BaseModel):
     definition_id: str
     definition_version: str
     input: str
+    #: 创建时显式提供并冻结的 Conversation History（ADR 0019）。
+    #: 它是受保护 Run Payload 的一部分：start / resume / 恢复只复用
+    #: 该冻结输入，绝不重新读取任何会话存储；sessionless Run 恒为空。
+    history: tuple[ConversationMessage, ...] = ()
     status: RunStatus = RunStatus.CREATED
     snapshot: DefinitionSnapshot | None = None
     output: str | None = None
     waiting_reason: str | None = None
-    #: WAITING 时目标 Step 的 step_id（Ticket 07 / ADR 0008）。
+    #: WAITING 时目标 Step 的 step_id（ADR 0008）。
     #: UNCERTAIN NON_IDEMPOTENT WAITING 指向等待处置的 Tool Step；
     #: DEFINITION_UNAVAILABLE WAITING 无目标 Step，为 None。
     waiting_step_id: str | None = None
+    #: 终态失败的稳定 machine-readable code，不携带 provider 文本。
+    error_code: str | None = None
     version: int = 1
     #: 当前租约 owner（ADR 0013）；无有效租约时为 None。
     lease_owner: str | None = None
@@ -47,3 +55,4 @@ class RunInspection(BaseModel):
     steps: list[StepRecord] = Field(default_factory=list)
     attempts: list[StepAttempt] = Field(default_factory=list)
     checkpoints: list[StepCheckpoint] = Field(default_factory=list)
+    policy_decisions: list[PolicyDecisionRecord] = Field(default_factory=list)

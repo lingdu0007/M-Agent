@@ -1,4 +1,4 @@
-"""Durable Support Agent 旗舰示例的确定性验收测试（Ticket 11）。
+"""Durable Support Agent 旗舰示例的确定性验收测试。
 
 通过**真实子进程**运行示例的一键入口（``run_acceptance.py``）与
 确定性 Eval（``eval.py``），断言：
@@ -6,7 +6,7 @@
 - 一键运行退出码反映 acceptance 成败（全部检查通过 = 0）；
 - Eval 报告独立于 RunStore 写入 report/ 目录，且内容覆盖 context
   provenance、tool trajectory、一次通知、WAITING 转换、resolution、
-  终态与最终结构化结果（PRD「Flagship acceptance」）；
+  终态与最终结构化结果；
 - Eval 真的检测副作用次数：通知 journal 出现第二行时
   ``notification_once`` 失败、退出码为 1；
 - Eval 对缺失证据（找不到 Run）明确失败而非崩溃。
@@ -35,14 +35,22 @@ _WORKER = os.path.join(_EXAMPLE_DIR, "worker.py")
 if _EXAMPLE_DIR not in sys.path:
     sys.path.insert(0, _EXAMPLE_DIR)
 
+from m_agent.runtime import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
 from m_agent import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    PlaintextPayloadCodec,
     Runner,
     RunStatus,
-    SQLiteRunStore,
 )
 from support_agent import TicketContextProvider
 
@@ -342,7 +350,7 @@ class DurableSupportAgentExampleTests(unittest.TestCase):
                 try:
                     registry = DefinitionRegistry()
                     registry.register(
-                        AgentDefinition(
+                        AgentDefinition.for_adapter(
                             definition_id="wrong-trajectory",
                             version="1.0",
                             instructions="Return a deterministic answer.",

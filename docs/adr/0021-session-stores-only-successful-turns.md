@@ -4,4 +4,4 @@ status: accepted
 
 # Session 只保存成功 Run 的最终对话轮次
 
-Agent Run 只有进入 `SUCCEEDED` 后才向 Session Store 提交 Session Turn，默认内容仅包含用户输入、最终输出、`run_id` 和必要时间元数据；Context Item、模型中间响应、工具调用与结果仍归 Run Store，失败、取消或等待中的 Run 不写入 Session。该选择减少后续上下文中的冗余和敏感数据传播，但要求上层应用把需要长期复用的事实显式保存并通过 Context Provider 再次提供。
+Agent Run 只有在 Run Store 权威地进入 `SUCCEEDED` 后，SessionRunner 才以冻结的 Session 历史版本和 `run_id` 向 Session Store 提交 Session Turn；Session Store 在一个原子操作中以 CAS 追加不可变 Turn、按 `run_id` 去重并清除 Session Run Claim。`REJECTED`、`FAILED` 与 `CANCELLED` 只清除 Claim，`WAITING` 不提交也不释放；Context Item、模型中间响应、工具调用与结果仍归 Run Store。该选择需要处理 Core 已成功但 Session 提交仍为 pending/conflict 的可见中间状态，却能在没有跨 Store 分布式事务的前提下通过幂等对账避免重复 Turn，并减少后续上下文中的冗余和敏感数据传播。

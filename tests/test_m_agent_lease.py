@@ -1,6 +1,6 @@
-"""Ticket 03 并发租约测试：同一 Run 只允许一个有效推进者。
+"""并发租约测试：同一 Run 只允许一个有效推进者。
 
-验收对照（ADR 0013 / PRD User Stories 21-23, 44）：
+验收对照（ADR 0013）：
 
 - 同一 Run 双 Runner 争抢 -> 一个有效 lease owner（另一个被拒）；
 - 无有效租约的 Runner 不能开始下一 Step 或提交权威进度；
@@ -14,7 +14,7 @@
 - 运行时没有引入后台扫描、自动 takeover、queue 或 scheduler。
 
 模型调用计数：两个 Runner 的确定性 Adapter 把每次调用追加到同一个
-日志文件，断言文件行数即总模型调用次数（同 Ticket 02 的证据模式）。
+日志文件，断言文件行数即总模型调用次数（同 的证据模式）。
 """
 
 from __future__ import annotations
@@ -25,25 +25,19 @@ import tempfile
 import unittest
 from datetime import timedelta
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicContextProvider,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    FakeClock,
     IllegalRunTransitionError,
-    InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
+    RetryPolicy,
     Runner,
     RunStatus,
-    SQLiteRunStore,
     StaleRunVersionError,
     StepType,
     TelemetryEvent,
@@ -53,6 +47,22 @@ from m_agent import (
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.adapters import (
+    DeterministicContextProvider,
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.runtime import ToolCallingMode
 
 _ANSWER = "deterministic answer"
 
@@ -79,6 +89,10 @@ class GatedLoggingAdapter(DeterministicModelAdapter):
         self._entered = entered
         self._gate = gate
 
+    def _fingerprint_excluded_state(self) -> frozenset[str]:
+        """Lease coordination controls do not select model behavior."""
+        return super()._fingerprint_excluded_state() | {"_entered", "_gate"}
+
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
         with open(self._log_path, "a", encoding="utf-8") as fh:
@@ -96,13 +110,14 @@ def make_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
             model_adapter=GatedLoggingAdapter(
                 log_path=log_path, entered=entered, gate=gate
             ),
+            retry_policy=RetryPolicy(max_attempts=2),
         )
     )
     return registry
@@ -119,7 +134,9 @@ class ToolThenAnswerAdapter(DeterministicModelAdapter):
     """第一次请求工具，第二次给出最终响应。"""
 
     def __init__(self) -> None:
-        super().__init__(capabilities=ModelCapabilities(tool_calling=True))
+        super().__init__(
+            capabilities=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
@@ -167,7 +184,7 @@ def make_tool_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Use the declared tool.",
@@ -269,9 +286,10 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_lease_takeover_and_stale_owner_rejected(
         self,
     ) -> None:
-        # AC4/AC6：租约过期（FakeClock advance）后 B 接管并完成；
-        # 旧 owner A 的迟到提交被拒，最终记录只反映 B 的推进，
-        # 模型调用次数 = A 1 次（被浪费）+ B 1 次 = 2。
+        # AC4/AC6：租约过期（FakeClock advance）后 B 接管。A 已持久化
+        # Model reservation 但没有 checkpoint，B 将原 Attempt 标为
+        # UNCERTAIN 并以新的受预算 Attempt 重放；旧 owner A 的迟到提交
+        # 仍被拒绝。
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "run.db")
             log = os.path.join(tmp, "model_calls.log")
@@ -287,7 +305,7 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             # 确定性推进时钟：A 的租约过期。
             clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
 
-            # B 接管并推进到 SUCCEEDED（A 尚无 checkpoint，B 重新执行）。
+            # B 接管，保留 A 的未确认 Attempt 后重新执行。
             terminal_b = await r_b.resume_run(created.run_id)
             self.assertEqual(terminal_b.status, RunStatus.SUCCEEDED)
             self.assertEqual(terminal_b.output, _ANSWER)
@@ -300,16 +318,14 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await task
 
-            # 最终权威记录：Run 与 Step 只反映 B 的推进。
+            # 最终权威记录：Run 与 Step 只反映 B 的重放结果。
             final = await r_b.get_run(created.run_id)
             self.assertEqual(final.status, RunStatus.SUCCEEDED)
             self.assertEqual(final.output, _ANSWER)
             inspection = await r_b.inspect_run(created.run_id)
             self.assertEqual(len(inspection.steps), 1)
-            self.assertEqual(len(inspection.attempts), 1)
+            self.assertEqual(len(inspection.attempts), 2)
             self.assertEqual(len(inspection.checkpoints), 1)
-            # A 调用一次（迟到、被拒）+ B 调用一次 = 2 次模型调用，
-            # 证明没有双重推进（不会出现 3+ 次或两套 Step 记录）。
             self.assertEqual(count_model_calls(log), 2)
             s_a.close()
             s_b.close()
@@ -374,23 +390,18 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             r_a, r_b, s_a, s_b, entered, gate = self.make_contenders(
                 db, clock, log
             )
-            # B 在 checkpoint 落盘前中断（模拟 B 也在推进中）：
-            # 租约归 B，Run 保持 RUNNING。
-            def crash_hook_b(point: CrashPoint, run_id: str) -> None:
-                if point is CrashPoint.BEFORE_MODEL_CHECKPOINT:
-                    raise RuntimeError("b interrupted")
-
-            reg_b = make_registry(log)
-            r_b = Runner(
-                registry=reg_b, store=s_b, crash_hook=crash_hook_b
-            )
-
             created = await r_a.create_run("assistant", "1.0", input="hi")
             task = asyncio.create_task(r_a.start_run(created.run_id))
             await entered.wait()
             clock.advance(DEFAULT_LEASE_TTL + timedelta(seconds=1))
-            with self.assertRaises(RuntimeError):
-                await r_b.resume_run(created.run_id)
+            before_takeover = await s_b.get_run(created.run_id)
+            assert before_takeover is not None
+            await s_b.acquire_lease(
+                created.run_id,
+                r_b.owner,
+                DEFAULT_LEASE_TTL,
+                expected_version=before_takeover.version,
+            )
 
             # 当前权威状态：RUNNING、version=2、租约归 B。
             current = await s_a.get_run(created.run_id)
@@ -466,7 +477,7 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
             model = DeterministicModelAdapter(responses=(_ANSWER,))
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="assistant",
                     version="1.0",
                     instructions="Answer deterministically.",
@@ -504,7 +515,10 @@ class SQLiteContentionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "run.db")
             clock = FakeClock()
-            model = DeterministicModelAdapter(responses=(_ANSWER,))
+            # 的 request preflight 会在 telemetry 前拒绝不支持
+            # 工具的模型；此处需使用支持工具的 Adapter，才会覆盖 lease
+            # 在 STEP_STARTED hook 之后、真正 model dispatch 之前的守卫。
+            model = ToolThenAnswerAdapter()
             store = SQLiteRunStore(
                 db, payload_codec=PlaintextPayloadCodec(), clock=clock
             )

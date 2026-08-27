@@ -1,4 +1,4 @@
-"""结构化 Step Failure 契约（Ticket 06 / ADR 0025）。
+"""结构化 Step Failure 契约（ADR 0025）。
 
 Model 与 Tool Adapter 把失败归一化为 :class:`FailureClassification`
 （``TRANSIENT`` / ``PERMANENT`` / ``UNCERTAIN``），并作为**结构化
@@ -12,7 +12,7 @@ Adapter 未显式分类的裸异常由 :func:`classify_exception` 按
 fail-closed 原则归一为 ``PERMANENT``（不自动重试）。运行时仅保留
 异常类型构成的安全诊断，绝不把 ``str(exc)`` 的原始内容交给持久化层，
 避免 provider/tool 把凭证或请求内容误带入异常时变成 Run Payload
-（Ticket 02 / Ticket 06 AC 1）。
+。
 """
 
 from __future__ import annotations
@@ -32,11 +32,18 @@ SAFE_ERROR_CODES = frozenset(
     {
         DEFAULT_FAILURE_CODE,
         "FROZEN_TOOL_DECLARATION_UNAVAILABLE",
+        "COMPRESSION_CONTRACT_VIOLATION",
+        "MODEL_CAPABILITY_UNSUPPORTED",
+        "MODEL_CONTRACT_VIOLATION",
+        "MODEL_DISPATCH_CANCELLED",
+        "POLICY_ERROR",
+        "POLICY_OUTCOME_PENDING",
         "effect_unconfirmed",
         "invalid_request",
         "lookup_broken",
         "lookup_rejected",
         "model_rejected",
+        "model_checkpoint_unconfirmed",
         "provider_credentials_missing",
         "provider_request_failed",
         "provider_response_invalid",

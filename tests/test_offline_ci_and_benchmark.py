@@ -1,4 +1,4 @@
-"""Ticket 12 contracts for the offline CI gate and SQLite benchmark."""
+"""contracts for the offline CI gate and SQLite benchmark."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from benchmarks.durable_run_sqlite import (
     format_report,
     validate_inspection,
 )
-from m_agent import (
+from m_agent.runtime import (
     RunInspection,
     RunRecord,
     RunStatus,
@@ -24,6 +24,11 @@ from m_agent import (
     StepRecord,
     StepStatus,
     StepType,
+)
+from m_agent import (
+    RunInspection,
+    RunRecord,
+    RunStatus,
 )
 
 

@@ -53,8 +53,8 @@ class ContextItem(BaseModel, frozen=True):
 class ContextRequest(BaseModel, frozen=True):
     """一次 Context Provider 调用的输入。
 
-    本版本只有 Run 输入；Session 历史等输入由后续 Ticket 的 Session
-    Snapshot 提供，不在本 Ticket 范围。
+    本版本只有 Run 输入；Session 历史等输入由后续版本 的 Session
+    Snapshot 提供，不在本版本 范围。
     """
 
     input: str

@@ -1,0 +1,12 @@
+[
+  {
+    "platform": "linux",
+    "python": "3.13",
+    "level": "CONTRACT",
+    "role": "required",
+    "status": "PASS",
+    "evidence_source": "Docker linux/arm64 bookworm CPython 3.13 isolated venv: foundation-release-0-5 pack execution (six scenario bundles)",
+    "evidence_digest": "sha256:8a10b2c1d655c4c490b813e330817841d96bf2e391e58e52125fcf0bbbbd979d",
+    "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27"
+  }
+]

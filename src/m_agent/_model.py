@@ -13,45 +13,841 @@ Live 与 deterministic（fake）Adapter 是明显不同的类型：
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+import enum
+import hashlib
+import inspect
+import json
+from pathlib import Path
+from typing import Any, Self
 
-from pydantic import BaseModel, Field
-
-from ._context import ContextItem
-from ._tools import ToolCall, ToolOutcome, ToolSpec
-
-_CAPABILITY_FIELDS = (
-    "streaming",
-    "tool_calling",
-    "structured_output",
-    "usage_reporting",
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
 )
 
+from ._context import ContextItem
+from ._errors import ModelCapabilityError, ModelContractViolationError
+from ._history import ConversationMessage
+from ._tools import ToolCall, ToolOutcome, ToolSpec
 
-class ModelCapabilities(BaseModel, frozen=True):
-    """Model Adapter 对语义支持的明确声明。"""
+class _CapabilityMode(str, enum.Enum):
+    """Base type for explicit model capability modes."""
 
-    streaming: bool = False
-    tool_calling: bool = False
-    structured_output: bool = False
-    usage_reporting: bool = False
+    def __bool__(self) -> bool:
+        """Retain 0.2 truthiness while the package remains in its expand window."""
+        return self.value != "NONE"
+
+
+class StreamingMode(_CapabilityMode):
+    NONE = "NONE"
+    DELTA = "DELTA"
+
+
+class ToolCallingMode(_CapabilityMode):
+    NONE = "NONE"
+    NATIVE = "NATIVE"
+
+
+class StructuredOutputMode(_CapabilityMode):
+    NONE = "NONE"
+    JSON_OBJECT = "JSON_OBJECT"
+    JSON_SCHEMA_STRICT = "JSON_SCHEMA_STRICT"
+
+
+class UsageReportingMode(_CapabilityMode):
+    NONE = "NONE"
+    PROVIDER_REPORTED = "PROVIDER_REPORTED"
+
+
+def _capability_mode_supports(
+    field: str, available: _CapabilityMode, required: _CapabilityMode
+) -> bool:
+    """Return whether one typed capability mode satisfies another."""
+    if required.value == "NONE":
+        return True
+    if field == "structured_output":
+        return available is required or (
+            available is StructuredOutputMode.JSON_SCHEMA_STRICT
+            and required is StructuredOutputMode.JSON_OBJECT
+        )
+    return available is required
+
+
+_CAPABILITY_MODE_TYPES: dict[str, type[_CapabilityMode]] = {
+    "streaming": StreamingMode,
+    "tool_calling": ToolCallingMode,
+    "structured_output": StructuredOutputMode,
+    "usage_reporting": UsageReportingMode,
+}
+
+
+def _typed_capability_mode(field: str, value: _CapabilityMode | bool) -> _CapabilityMode:
+    """Return the explicit mode behind either public capability representation."""
+    mode_type = _CAPABILITY_MODE_TYPES[field]
+    if type(value) is bool:
+        return (
+            next(mode for mode in mode_type if mode is not mode_type.NONE)
+            if value
+            else mode_type.NONE
+        )
+    if isinstance(value, mode_type):
+        return value
+    raise TypeError(f"invalid {field} capability mode: {value!r}")
+
+
+class RevisionStability(str, enum.Enum):
+    PINNED = "PINNED"
+    PROVIDER_ALIAS = "PROVIDER_ALIAS"
+
+
+class ModelPurpose(str, enum.Enum):
+    PRIMARY = "PRIMARY"
+    CONTEXT_COMPRESSION = "CONTEXT_COMPRESSION"
+    OUTPUT_REPAIR = "OUTPUT_REPAIR"
+
+
+class UsageFieldGuarantee(str, enum.Enum):
+    REQUIRED = "REQUIRED"
+    OPTIONAL = "OPTIONAL"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class UsageProvenance(str, enum.Enum):
+    PROVIDER_REPORTED = "PROVIDER_REPORTED"
+    RUNTIME_SIZED = "RUNTIME_SIZED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class _FrozenModelValue(BaseModel, frozen=True):
+    """values reject unknown fields rather than silently weakening."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ModelCapabilityCombination(_FrozenModelValue):
+    """One explicitly supported concurrent protocol-mode combination."""
+
+    streaming: StreamingMode = StreamingMode.NONE
+    tool_calling: ToolCallingMode = ToolCallingMode.NONE
+    structured_output: StructuredOutputMode = StructuredOutputMode.NONE
+    usage_reporting: UsageReportingMode = UsageReportingMode.NONE
 
     def supports(self, required: "ModelCapabilities") -> bool:
-        """required 中每个声明为 True 的能力都必须被本声明覆盖。"""
+        """Whether this combination contains every requested non-NONE mode."""
         return all(
-            not getattr(required, name) or getattr(self, name)
-            for name in _CAPABILITY_FIELDS
+            _capability_mode_supports(
+                field, getattr(self, field), getattr(required, field)
+            )
+            for field in (
+                "streaming",
+                "tool_calling",
+                "structured_output",
+                "usage_reporting",
+            )
         )
 
 
-class ModelUsage(BaseModel, frozen=True):
-    """模型调用用量（仅当 Adapter 声明 usage_reporting 时提供）。"""
+class ModelRequirementReason(str, enum.Enum):
+    SATISFIED = "SATISFIED"
+    STREAMING_UNSUPPORTED = "STREAMING_UNSUPPORTED"
+    TOOL_CALLING_UNSUPPORTED = "TOOL_CALLING_UNSUPPORTED"
+    STRUCTURED_OUTPUT_UNSUPPORTED = "STRUCTURED_OUTPUT_UNSUPPORTED"
+    USAGE_REPORTING_UNSUPPORTED = "USAGE_REPORTING_UNSUPPORTED"
+    CAPABILITY_COMBINATION_UNSUPPORTED = "CAPABILITY_COMBINATION_UNSUPPORTED"
+    CONTEXT_WINDOW_TOO_SMALL = "CONTEXT_WINDOW_TOO_SMALL"
+    MAX_OUTPUT_TOO_SMALL = "MAX_OUTPUT_TOO_SMALL"
+
+
+class ModelCapabilities(_FrozenModelValue):
+    """Typed Model Contract capability modes.
+
+    New Contracts and Requirements use explicit modes. Direct 0.2 root calls
+    retain their historical boolean values and serialized shape until the 0.3
+    transition; typed consumers call :meth:`as_typed` at their boundary.
+    """
+
+    streaming: StreamingMode | bool = False
+    tool_calling: ToolCallingMode | bool = False
+    structured_output: StructuredOutputMode | bool = False
+    usage_reporting: UsageReportingMode | bool = False
+    #: Concurrent protocol modes that this Contract expressly permits.  A
+    #: multi-mode Contract without this list is invalid rather than implying
+    #: that every Cartesian-product pairing is available.
+    supported_combinations: tuple[ModelCapabilityCombination, ...] = Field(
+        default_factory=tuple
+    )
+
+    # Keep direct 0.2 capability declarations tolerant of extension fields.
+    # Typed Contract values below remain closed once a protocol mode is named.
+    model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unknown_typed_fields(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        values = dict(value)
+        known = set(_CAPABILITY_MODE_TYPES) | {"supported_combinations"}
+        unknown = set(values) - known
+        typed = any(
+            field in values and not isinstance(values[field], bool)
+            for field in _CAPABILITY_MODE_TYPES
+        )
+        if unknown and typed:
+            raise ValueError("typed model capabilities reject unknown fields")
+        return values
+
+    @property
+    def _uses_legacy_boolean_surface(self) -> bool:
+        return not any(
+            isinstance(getattr(self, field), _CapabilityMode)
+            for field in _CAPABILITY_MODE_TYPES
+        )
+
+    def _mode_for(self, field: str) -> _CapabilityMode:
+        return _typed_capability_mode(field, getattr(self, field))
+
+    def as_typed(self) -> "ModelCapabilities":
+        """Convert a 0.2 boolean declaration into explicit Contract modes."""
+        values = {
+            field: self._mode_for(field) for field in _CAPABILITY_MODE_TYPES
+        }
+        active = sum(mode.value != "NONE" for mode in values.values())
+        combinations = self.supported_combinations
+        if active > 1 and not combinations:
+            combinations = (ModelCapabilityCombination(**values),)
+        return ModelCapabilities(
+            **values,
+            supported_combinations=combinations,
+        )
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        dumped = super().model_dump(*args, **kwargs)
+        if self._uses_legacy_boolean_surface:
+            dumped.pop("supported_combinations", None)
+        return dumped
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        if not self._uses_legacy_boolean_surface:
+            return super().model_dump_json(*args, **kwargs)
+        payload = json.loads(super().model_dump_json(*args, **kwargs))
+        if isinstance(payload, dict):
+            payload.pop("supported_combinations", None)
+        return json.dumps(
+            payload,
+            ensure_ascii=kwargs.get("ensure_ascii", False),
+            indent=kwargs.get("indent"),
+            separators=(",", ":") if kwargs.get("indent") is None else None,
+        )
+
+    @model_validator(mode="after")
+    def _validate_supported_combinations(self) -> "ModelCapabilities":
+        fields = (
+            "streaming",
+            "tool_calling",
+            "structured_output",
+            "usage_reporting",
+        )
+        active = [field for field in fields if self._mode_for(field).value != "NONE"]
+        if (
+            len(active) > 1
+            and not self.supported_combinations
+            and not self._uses_legacy_boolean_surface
+        ):
+            raise ValueError(
+                "multiple capability modes require supported_combinations"
+            )
+        seen: set[tuple[str, str, str, str]] = set()
+        for combination in self.supported_combinations:
+            key = tuple(getattr(combination, field).value for field in fields)
+            if key in seen:
+                raise ValueError("supported_combinations must be unique")
+            seen.add(key)
+            for field in fields:
+                mode = getattr(combination, field)
+                available = self._mode_for(field)
+                if not _capability_mode_supports(field, available, mode):
+                    raise ValueError(
+                        "supported combination declares a mode absent from "
+                        f"capabilities: {field}={mode.value}"
+                    )
+        for field in active:
+            if self.supported_combinations and not any(
+                getattr(combination, field) == self._mode_for(field)
+                for combination in self.supported_combinations
+            ):
+                raise ValueError(
+                    "supported_combinations must declare every enabled mode: "
+                    f"{field}"
+                )
+        return self
+
+    def _supports_combination(self, required: "ModelCapabilities") -> bool:
+        requested = sum(
+            required._mode_for(field).value != "NONE"
+            for field in (
+                "streaming",
+                "tool_calling",
+                "structured_output",
+                "usage_reporting",
+            )
+        )
+        if requested <= 1:
+            return True
+        if self._uses_legacy_boolean_surface and not self.supported_combinations:
+            return True
+        return any(
+            combination.supports(required)
+            for combination in self.supported_combinations
+        )
+
+    def supports(self, required: "ModelCapabilities") -> bool:
+        """Return whether every requested non-NONE mode is available."""
+        modes_match = all(
+            _capability_mode_supports(
+                field, self._mode_for(field), required._mode_for(field)
+            )
+            for field in (
+                "streaming",
+                "tool_calling",
+                "structured_output",
+                "usage_reporting",
+            )
+        )
+        return modes_match and self._supports_combination(required)
+
+    def capability_ceiling_match(
+        self, declared: "ModelCapabilities"
+    ) -> "ModelRequirementMatch":
+        """Check every protocol the instance Contract declares against this ceiling."""
+        combinations = declared.supported_combinations or (
+            ModelCapabilityCombination(
+                streaming=declared._mode_for("streaming"),
+                tool_calling=declared._mode_for("tool_calling"),
+                structured_output=declared._mode_for("structured_output"),
+                usage_reporting=declared._mode_for("usage_reporting"),
+            ),
+        )
+        for combination in combinations:
+            values = combination.model_dump()
+            active = sum(value.value != "NONE" for value in values.values())
+            required = ModelCapabilities(
+                **values,
+                supported_combinations=(combination,) if active > 1 else (),
+            )
+            for field, reason in (
+                ("streaming", ModelRequirementReason.STREAMING_UNSUPPORTED),
+                ("tool_calling", ModelRequirementReason.TOOL_CALLING_UNSUPPORTED),
+                (
+                    "structured_output",
+                    ModelRequirementReason.STRUCTURED_OUTPUT_UNSUPPORTED,
+                ),
+                (
+                    "usage_reporting",
+                    ModelRequirementReason.USAGE_REPORTING_UNSUPPORTED,
+                ),
+            ):
+                if (
+                    required._mode_for(field).value != "NONE"
+                    and not _capability_mode_supports(
+                        field,
+                        self._mode_for(field),
+                        required._mode_for(field),
+                    )
+                ):
+                    return ModelRequirementMatch(compatible=False, reason=reason)
+            if not self.supports(required):
+                return ModelRequirementMatch(
+                    compatible=False,
+                    reason=ModelRequirementReason.CAPABILITY_COMBINATION_UNSUPPORTED,
+                )
+        return ModelRequirementMatch(
+            compatible=True, reason=ModelRequirementReason.SATISFIED
+        )
+
+    def merged_requirements(self, other: "ModelCapabilities") -> "ModelCapabilities":
+        """Combine two minimum-capability declarations without weakening either."""
+        values: dict[str, _CapabilityMode] = {}
+        fields = (
+            "streaming",
+            "tool_calling",
+            "structured_output",
+            "usage_reporting",
+        )
+        for field in fields:
+            left = self._mode_for(field)
+            right = other._mode_for(field)
+            if left.value == "NONE":
+                values[field] = right
+            elif right.value == "NONE":
+                values[field] = left
+            elif _capability_mode_supports(field, left, right):
+                values[field] = left
+            elif _capability_mode_supports(field, right, left):
+                values[field] = right
+            else:
+                raise ValueError(f"conflicting requirements for {field}")
+        active = sum(value.value != "NONE" for value in values.values())
+        combinations = (
+            (ModelCapabilityCombination(**values),) if active > 1 else ()
+        )
+        return ModelCapabilities(
+            **values,
+            supported_combinations=combinations,
+        )
+
+
+class ModelLimits(_FrozenModelValue):
+    """Stable request-size limits declared by one Model Contract."""
+
+    context_window_tokens: int = Field(ge=1)
+    max_output_tokens: int = Field(ge=1)
+
+    @field_validator("context_window_tokens", "max_output_tokens", mode="before")
+    @classmethod
+    def _validate_limit_count(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("model limits must be positive integers")
+        return value
+
+
+class ModelUsageGuarantees(_FrozenModelValue):
+    """Field-level Model Contract guarantees, never a single usage boolean."""
+
+    input_tokens: UsageFieldGuarantee = UsageFieldGuarantee.OPTIONAL
+    output_tokens: UsageFieldGuarantee = UsageFieldGuarantee.OPTIONAL
+    cached_input_tokens: UsageFieldGuarantee = UsageFieldGuarantee.UNSUPPORTED
+    reasoning_tokens: UsageFieldGuarantee = UsageFieldGuarantee.UNSUPPORTED
+
+
+class ModelContract(_FrozenModelValue):
+    """Versioned, non-secret model/deployment contract frozen into a Run."""
+
+    contract_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    revision_stability: RevisionStability
+    model_identity: str = Field(min_length=1)
+    capabilities: ModelCapabilities = Field(
+        default_factory=lambda: ModelCapabilities().as_typed()
+    )
+    limits: ModelLimits
+    input_sizer_id: str = Field(min_length=1)
+    serialization_id: str = Field(min_length=1)
+    usage_guarantees: ModelUsageGuarantees = Field(
+        default_factory=ModelUsageGuarantees
+    )
+    #: Canonical digest of this Contract's semantic fields, including its
+    #: deployment configuration identity.
+    fingerprint: str | None = None
+    #: Non-secret provider/deployment configuration identity. Live adapters
+    #: compare it before dispatch; deterministic adapters have no such state.
+    configuration_fingerprint: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_contract_capabilities(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        values = dict(value)
+        capabilities = values.get("capabilities")
+        if capabilities is not None:
+            values["capabilities"] = ModelCapabilities.model_validate(
+                capabilities
+            ).as_typed()
+        return values
+
+    @model_validator(mode="after")
+    def _validate_usage_reporting(self) -> "ModelContract":
+        if (
+            self.capabilities._mode_for("usage_reporting")
+            is UsageReportingMode.NONE
+            and any(
+                getattr(self.usage_guarantees, field)
+                is UsageFieldGuarantee.REQUIRED
+                for field in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "reasoning_tokens",
+                )
+            )
+        ):
+            raise ValueError(
+                "usage_reporting=NONE cannot require usage fields"
+            )
+        expected_fingerprint = self.semantic_fingerprint()
+        if self.fingerprint is None:
+            object.__setattr__(self, "fingerprint", expected_fingerprint)
+        elif self.fingerprint != expected_fingerprint:
+            raise ValueError(
+                "fingerprint must match the canonical ModelContract semantics"
+            )
+        return self
+
+    def semantic_fingerprint(self) -> str:
+        """Return the stable digest for this Contract's declared semantics."""
+        encoded = json.dumps(
+            self.model_dump(
+                mode="json",
+                exclude={"fingerprint"},
+            ),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        """Recompute the digest when a frozen Contract is deliberately revised."""
+        semantic_fields = {
+            "contract_id",
+            "version",
+            "revision_stability",
+            "model_identity",
+            "capabilities",
+            "limits",
+            "input_sizer_id",
+            "serialization_id",
+            "usage_guarantees",
+            "configuration_fingerprint",
+        }
+        if update and (semantic_fields.intersection(update) or "fingerprint" in update):
+            values = self.model_dump()
+            values.update(update)
+            values["fingerprint"] = None
+            return type(self).model_validate(values)
+        return super().model_copy(update=update, deep=deep)
+
+
+class ModelRequirementMatch(_FrozenModelValue):
+    """Deterministic, inspectable result of matching requirements to a Contract."""
+
+    compatible: bool
+    reason: ModelRequirementReason
+
+
+class ModelRequirements(_FrozenModelValue):
+    """Minimum semantic and numeric requirements for one model binding."""
+
+    capabilities: ModelCapabilities = Field(
+        default_factory=lambda: ModelCapabilities().as_typed()
+    )
+    min_context_window_tokens: int = Field(default=1, ge=1)
+    min_output_tokens: int = Field(default=1, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_requirement_capabilities(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        values = dict(value)
+        capabilities = values.get("capabilities")
+        if capabilities is not None:
+            values["capabilities"] = ModelCapabilities.model_validate(
+                capabilities
+            ).as_typed()
+        return values
+
+    @field_validator("min_context_window_tokens", "min_output_tokens", mode="before")
+    @classmethod
+    def _validate_requirement_count(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("model requirements must be positive integers")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_capability_combination(self) -> "ModelRequirements":
+        if not self.capabilities.supports(self.capabilities):
+            raise ValueError(
+                "multi-mode requirements must declare one supported combination"
+            )
+        return self
+
+    def merged_with(self, other: "ModelRequirements") -> "ModelRequirements":
+        """Return the stricter requirements required by both declarations."""
+        return ModelRequirements(
+            capabilities=self.capabilities.merged_requirements(other.capabilities),
+            min_context_window_tokens=max(
+                self.min_context_window_tokens, other.min_context_window_tokens
+            ),
+            min_output_tokens=max(
+                self.min_output_tokens, other.min_output_tokens
+            ),
+        )
+
+    def effective_for(self, contract: ModelContract) -> "ModelRequirements":
+        """Include response guarantees that require a provider protocol mode."""
+        if any(
+            getattr(contract.usage_guarantees, field)
+            is UsageFieldGuarantee.REQUIRED
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "reasoning_tokens",
+            )
+        ):
+            return self.merged_with(
+                ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        usage_reporting=UsageReportingMode.PROVIDER_REPORTED
+                    )
+                )
+            )
+        return self
+
+    def match(self, contract: ModelContract) -> ModelRequirementMatch:
+        # Required usage is a provider protocol guarantee, not merely a
+        # post-dispatch response check.
+        required = self.effective_for(contract).capabilities
+        available = contract.capabilities
+        for field, reason in (
+            ("streaming", ModelRequirementReason.STREAMING_UNSUPPORTED),
+            ("tool_calling", ModelRequirementReason.TOOL_CALLING_UNSUPPORTED),
+            (
+                "structured_output",
+                ModelRequirementReason.STRUCTURED_OUTPUT_UNSUPPORTED,
+            ),
+            (
+                "usage_reporting",
+                ModelRequirementReason.USAGE_REPORTING_UNSUPPORTED,
+            ),
+        ):
+            if (
+                getattr(required, field).value != "NONE"
+                and not _capability_mode_supports(
+                    field, getattr(available, field), getattr(required, field)
+                )
+            ):
+                return ModelRequirementMatch(compatible=False, reason=reason)
+        if not available.supports(required):
+            return ModelRequirementMatch(
+                compatible=False,
+                reason=ModelRequirementReason.CAPABILITY_COMBINATION_UNSUPPORTED,
+            )
+        if contract.limits.context_window_tokens < self.min_context_window_tokens:
+            return ModelRequirementMatch(
+                compatible=False,
+                reason=ModelRequirementReason.CONTEXT_WINDOW_TOO_SMALL,
+            )
+        if contract.limits.max_output_tokens < self.min_output_tokens:
+            return ModelRequirementMatch(
+                compatible=False,
+                reason=ModelRequirementReason.MAX_OUTPUT_TOO_SMALL,
+            )
+        return ModelRequirementMatch(
+            compatible=True, reason=ModelRequirementReason.SATISFIED
+        )
+
+
+class ModelBinding(_FrozenModelValue):
+    """One selected Contract and its requirements for a Model Step purpose."""
+
+    purpose: ModelPurpose
+    contract: ModelContract
+    requirements: ModelRequirements = Field(default_factory=ModelRequirements)
+    #: Non-secret executable adapter identity frozen beside, not inside, an
+    #: explicitly declared Contract. This also binds deterministic behavior.
+    adapter_configuration_fingerprint: str | None = None
+    source_purpose: ModelPurpose | None = None
+
+    @model_validator(mode="after")
+    def _validate_source_purpose(self) -> "ModelBinding":
+        if self.purpose is ModelPurpose.PRIMARY and self.source_purpose is not None:
+            raise ValueError("PRIMARY binding cannot reuse another purpose")
+        if (
+            self.source_purpose is not None
+            and self.source_purpose is not ModelPurpose.PRIMARY
+        ):
+            raise ValueError("only explicit PRIMARY reuse is supported")
+        return self
+
+
+class ModelBindingSet(_FrozenModelValue):
+    """Frozen purpose-to-Contract selection with explicit primary reuse."""
+
+    bindings: tuple[ModelBinding, ...]
+
+    @model_validator(mode="after")
+    def _validate_complete_bindings(self) -> "ModelBindingSet":
+        purposes = [binding.purpose for binding in self.bindings]
+        if set(purposes) != set(ModelPurpose) or len(purposes) != len(set(purposes)):
+            raise ValueError(
+                "model bindings must contain every ModelPurpose exactly once"
+            )
+        primary = next(
+            binding
+            for binding in self.bindings
+            if binding.purpose is ModelPurpose.PRIMARY
+        )
+        for binding in self.bindings:
+            if binding.source_purpose is ModelPurpose.PRIMARY and (
+                binding.contract != primary.contract
+                or binding.requirements != primary.requirements
+            ):
+                raise ValueError(
+                    "PRIMARY reuse must preserve its Contract and Requirements"
+                )
+        return self
+
+    def for_purpose(self, purpose: ModelPurpose) -> ModelBinding:
+        for binding in self.bindings:
+            if binding.purpose is purpose:
+                return binding
+        raise ValueError(f"no Model Binding for purpose {purpose.value}")
+
+    def resolved(self) -> "ModelBindingSet":
+        """Return the already-complete, explicitly selected binding set."""
+        return self
+
+    @classmethod
+    def reuse_primary(
+        cls,
+        contract: ModelContract,
+        requirements: ModelRequirements | None = None,
+    ) -> "ModelBindingSet":
+        """Explicitly select PRIMARY's Contract for every supported purpose."""
+        primary = ModelBinding(
+            purpose=ModelPurpose.PRIMARY,
+            contract=contract,
+            requirements=requirements or ModelRequirements(),
+        )
+        return cls(
+            bindings=(
+                primary,
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.CONTEXT_COMPRESSION,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+                primary.model_copy(
+                    update={
+                        "purpose": ModelPurpose.OUTPUT_REPAIR,
+                        "source_purpose": ModelPurpose.PRIMARY,
+                    }
+                ),
+            )
+        )
+
+
+class ModelExecutionBudget(_FrozenModelValue):
+    """Persisted upper bounds for all model dispatch attempts in one Run."""
+
+    run_max_attempts: int = Field(default=8, ge=0)
+    primary_max_attempts: int = Field(default=8, ge=0)
+    context_compression_max_attempts: int = Field(default=8, ge=0)
+    output_repair_max_attempts: int = Field(default=8, ge=0)
+
+    @field_validator(
+        "run_max_attempts",
+        "primary_max_attempts",
+        "context_compression_max_attempts",
+        "output_repair_max_attempts",
+        mode="before",
+    )
+    @classmethod
+    def _validate_attempt_count(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("model execution budgets must be non-negative integers")
+        return value
+
+    def maximum_for(self, purpose: ModelPurpose) -> int:
+        return {
+            ModelPurpose.PRIMARY: self.primary_max_attempts,
+            ModelPurpose.CONTEXT_COMPRESSION: self.context_compression_max_attempts,
+            ModelPurpose.OUTPUT_REPAIR: self.output_repair_max_attempts,
+        }[purpose]
+
+
+class ModelUsage(_FrozenModelValue):
+    """Normalized usage with provenance retained for every usage field."""
 
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    input_tokens_provenance: UsageProvenance | None = None
+    output_tokens_provenance: UsageProvenance | None = None
+    cached_input_tokens_provenance: UsageProvenance | None = None
+    reasoning_tokens_provenance: UsageProvenance | None = None
+    #: Unit as reported by the source system, e.g. ``tokens``.  Missing usage
+    #: remains missing; Core never invents a unit.
+    raw_unit: str | None = None
+    #: Stable mapping/version that converted provider fields into this schema.
+    normalization_source: str | None = None
+    #: Compatibility summary only; field-level provenance is authoritative.
+    provenance: UsageProvenance = UsageProvenance.PROVIDER_REPORTED
+
+    @field_validator(
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens",
+        mode="before",
+    )
+    @classmethod
+    def _validate_token_count(cls, value: object) -> object:
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("usage token counts must be non-negative integers")
+        return value
+
+    @model_validator(mode="after")
+    def _normalize_field_provenance(self) -> "ModelUsage":
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "reasoning_tokens",
+        ):
+            value = getattr(self, field)
+            source = getattr(self, f"{field}_provenance")
+            if value is None and source not in (
+                None,
+                UsageProvenance.UNAVAILABLE,
+            ):
+                raise ValueError(
+                    f"missing {field} must have unavailable provenance"
+                )
+            if value is not None and source is UsageProvenance.UNAVAILABLE:
+                raise ValueError(
+                    f"reported {field} cannot have unavailable provenance"
+                )
+            object.__setattr__(
+                self,
+                f"{field}_provenance",
+                UsageProvenance.UNAVAILABLE
+                if value is None
+                else source or self.provenance
+            )
+        if all(
+            getattr(self, field) is None
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "reasoning_tokens",
+            )
+        ):
+            object.__setattr__(
+                self, "provenance", UsageProvenance.UNAVAILABLE
+            )
+        return self
 
 
-class ModelRequest(BaseModel, frozen=True):
+class ModelRequest(_FrozenModelValue):
     """一次模型请求。
 
     - ``instructions``：来自 Definition 的 Agent Instruction（受信）；
@@ -65,13 +861,21 @@ class ModelRequest(BaseModel, frozen=True):
 
     input: str
     instructions: str
+    #: 创建 Run 时冻结的 Conversation History（ADR 0019）：作为模型输入
+    #: 交付，start / resume / 恢复只复用该冻结副本；sessionless Run 为空。
+    history: tuple[ConversationMessage, ...] = Field(default_factory=tuple)
     context_items: tuple[ContextItem, ...] = Field(default_factory=tuple)
     tools: tuple[ToolSpec, ...] = Field(default_factory=tuple)
     tool_outcomes: tuple[ToolOutcome, ...] = Field(default_factory=tuple)
+    #: Native structured-output mode selected by the frozen Model Binding.
+    #: A configured provider schema is only sent when this request requires it.
+    structured_output: StructuredOutputMode = StructuredOutputMode.NONE
+    #: Usage reporting selected by the frozen Model Binding.
+    usage_reporting: UsageReportingMode = UsageReportingMode.NONE
 
 
-class ModelDelta(BaseModel, frozen=True):
-    """一次模型流式输出增量（Ticket 08 / ADR 0011）。
+class ModelDelta(_FrozenModelValue):
+    """一次模型流式输出增量（ADR 0011）。
 
     增量只作为带 ``attempt_id`` 的 Run Update 发布（:class:`RunUpdate`
     的 ``MODEL_DELTA``），**绝不写入 Run Store、不构成 checkpoint**；
@@ -83,7 +887,7 @@ class ModelDelta(BaseModel, frozen=True):
     content: str
 
 
-class ModelResponse(BaseModel, frozen=True):
+class ModelResponse(_FrozenModelValue):
     """一次模型请求的完整响应。
 
     - ``content``：文本内容；当响应只请求工具时可以为 None；
@@ -96,6 +900,214 @@ class ModelResponse(BaseModel, frozen=True):
     content: str | None = None
     tool_calls: tuple[ToolCall, ...] = Field(default_factory=tuple)
     usage: ModelUsage | None = None
+    #: Provider-reported model/revision observed for this specific dispatch.
+    #: It is a Run fact, particularly relevant for PROVIDER_ALIAS Contracts.
+    actual_revision: str | None = None
+
+
+def _reject_non_standard_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def normalize_model_response(
+    contract: ModelContract,
+    response: ModelResponse,
+    *,
+    request: ModelRequest,
+    streaming: bool,
+) -> ModelResponse:
+    """Apply field guarantees without inventing missing provider usage."""
+    if not isinstance(response, ModelResponse):
+        raise ModelContractViolationError(
+            "Model Adapter returned an unnormalizable response"
+        )
+    if (
+        not isinstance(response.tool_calls, tuple)
+        or not all(isinstance(call, ToolCall) for call in response.tool_calls)
+        or (
+            response.usage is not None
+            and not isinstance(response.usage, ModelUsage)
+        )
+    ):
+        raise ModelContractViolationError(
+            "Model Adapter returned an unnormalizable response"
+        )
+    try:
+        response = ModelResponse.model_validate(response.model_dump())
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise ModelContractViolationError(
+            "Model Adapter returned an unnormalizable response"
+        ) from exc
+    if (
+        response.tool_calls
+        and contract.capabilities.tool_calling is ToolCallingMode.NONE
+    ):
+        raise ModelContractViolationError(
+            "Model Contract does not declare native tool calling"
+        )
+    seen_call_ids: set[str] = set()
+    declared_tool_names = {tool.name for tool in request.tools}
+    for call in response.tool_calls:
+        if not call.call_id.strip():
+            raise ModelContractViolationError("tool call id must be non-empty")
+        if call.call_id in seen_call_ids:
+            raise ModelContractViolationError("tool call ids must be unique")
+        seen_call_ids.add(call.call_id)
+        if not call.tool_name.strip():
+            raise ModelContractViolationError("tool call name must be non-empty")
+        if call.tool_name not in declared_tool_names:
+            raise ModelContractViolationError(
+                f"model response requested undeclared tool: {call.tool_name}"
+            )
+        try:
+            arguments = json.loads(call.arguments)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ModelContractViolationError(
+                "tool call arguments are not valid JSON"
+            ) from exc
+        if not isinstance(arguments, dict):
+            raise ModelContractViolationError(
+                "tool call arguments must be a JSON object"
+            )
+    usage = response.usage
+    fields = (
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens",
+    )
+    provider_reported = usage is not None and any(
+        getattr(usage, field) is not None
+        and getattr(usage, f"{field}_provenance")
+        is UsageProvenance.PROVIDER_REPORTED
+        for field in fields
+    )
+    values = {
+        "streaming": StreamingMode.DELTA if streaming else StreamingMode.NONE,
+        "tool_calling": (
+            ToolCallingMode.NATIVE
+            if response.tool_calls
+            else ToolCallingMode.NONE
+        ),
+        "structured_output": request.structured_output,
+        "usage_reporting": (
+            UsageReportingMode.PROVIDER_REPORTED
+            if provider_reported
+            else request.usage_reporting
+        ),
+    }
+    active = sum(mode.value != "NONE" for mode in values.values())
+    response_modes = ModelCapabilities(
+        **values,
+        supported_combinations=(
+            (ModelCapabilityCombination(**values),) if active > 1 else ()
+        ),
+    )
+    if not contract.capabilities.supports(response_modes):
+        raise ModelContractViolationError(
+            "Model Contract does not declare the response capability combination"
+        )
+    if (
+        not response.tool_calls
+        and request.structured_output
+        in (
+            StructuredOutputMode.JSON_OBJECT,
+            StructuredOutputMode.JSON_SCHEMA_STRICT,
+        )
+    ):
+        try:
+            structured = json.loads(
+                response.content or "",
+                parse_constant=_reject_non_standard_json_constant,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ModelContractViolationError(
+                "structured response is not valid JSON"
+            ) from exc
+        if not isinstance(structured, dict):
+            raise ModelContractViolationError(
+                "structured response must be a JSON object"
+            )
+    guarantees = contract.usage_guarantees
+    if usage is None:
+        missing = [
+            field
+            for field in fields
+            if getattr(guarantees, field) is UsageFieldGuarantee.REQUIRED
+        ]
+        if missing:
+            raise ModelContractViolationError(
+                "required usage fields missing: " + ", ".join(missing)
+            )
+        return response.model_copy(
+            update={"usage": ModelUsage(provenance=UsageProvenance.UNAVAILABLE)}
+        )
+    if (
+        contract.capabilities.usage_reporting is UsageReportingMode.NONE
+        and provider_reported
+    ):
+        raise ModelContractViolationError(
+            "Model Contract does not declare provider-reported usage"
+        )
+    if (
+        contract.capabilities.usage_reporting
+        is UsageReportingMode.PROVIDER_REPORTED
+        and provider_reported
+        and (not usage.raw_unit or not usage.normalization_source)
+    ):
+        raise ModelContractViolationError(
+            "provider-reported usage requires raw_unit and normalization_source"
+        )
+    for field in fields:
+        guarantee = getattr(guarantees, field)
+        value = getattr(usage, field)
+        if guarantee is UsageFieldGuarantee.REQUIRED and value is None:
+            raise ModelContractViolationError(f"required usage field missing: {field}")
+        if (
+            guarantee is UsageFieldGuarantee.REQUIRED
+            and getattr(usage, f"{field}_provenance")
+            is not UsageProvenance.PROVIDER_REPORTED
+        ):
+            raise ModelContractViolationError(
+                f"required usage field is not provider-reported: {field}"
+            )
+        if guarantee is UsageFieldGuarantee.UNSUPPORTED and value is not None:
+            raise ModelContractViolationError(
+                f"unsupported usage field reported: {field}"
+            )
+    return response
+
+
+def assert_model_request_compatible(
+    contract: ModelContract,
+    request: ModelRequest,
+    *,
+    streaming: bool = False,
+) -> None:
+    """Reject an undeclared request protocol combination before dispatch."""
+    streaming_mode = StreamingMode.DELTA if streaming else StreamingMode.NONE
+    tool_mode = (
+        ToolCallingMode.NATIVE
+        if request.tools or request.tool_outcomes
+        else ToolCallingMode.NONE
+    )
+    values = {
+        "streaming": streaming_mode,
+        "tool_calling": tool_mode,
+        "structured_output": request.structured_output,
+        "usage_reporting": request.usage_reporting,
+    }
+    active = sum(mode.value != "NONE" for mode in values.values())
+    required = ModelCapabilities(
+        **values,
+        supported_combinations=(
+            (ModelCapabilityCombination(**values),) if active > 1 else ()
+        ),
+    )
+    if not contract.capabilities.supports(required):
+        raise ModelCapabilityError(
+            "Model Contract does not declare the requested capability combination"
+        )
 
 
 class ModelAdapter(ABC):
@@ -109,16 +1121,41 @@ class ModelAdapter(ABC):
     #: 确定性 fake 的可见标记；live adapter 恒为 False。
     deterministic: bool = False
 
-    def definition_contract_fingerprint(self) -> str:
-        """Return stable, non-secret configuration identity for a Run Snapshot.
+    @property
+    def model_contract(self) -> ModelContract:
+        """Return the explicitly declared Contract for this live instance."""
+        raise ValueError(
+            f"{type(self).__name__} must declare an instance ModelContract"
+        )
 
-        Adapters whose behavior depends on configuration beyond capabilities
-        must override this method. The default deliberately has no fingerprint:
-        arbitrary application adapters may be imported under different module
-        names across processes, so only adapters with a stable configuration
-        representation can opt into recovery comparison.
+    def definition_contract_fingerprint(self) -> str:
+        """Return the current non-secret provider configuration identity.
+
+        Adapters must override this method with a stable, non-empty fingerprint
+        before they can be frozen into a Definition. The empty default produces
+        a registration error; :class:`DeterministicModelAdapter` supplies an
+        implementation for built-in deterministic test doubles.
         """
         return ""
+
+    def validate_response(
+        self, request: ModelRequest, response: ModelResponse
+    ) -> ModelResponse:
+        """Validate provider-specific response guarantees before normalization."""
+        return response
+
+    def assert_output_contract_schema(
+        self,
+        mode: StructuredOutputMode,
+        schema: Mapping[str, Any],
+    ) -> None:
+        """Validate an Output Contract schema before a Definition is registered.
+
+        Generic and deterministic adapters have no adapter-local schema to
+        compare, so they deliberately retain a no-op implementation. Official
+        adapters override this seam for native strict structured output.
+        """
+        del mode, schema
 
     @abstractmethod
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -127,9 +1164,9 @@ class ModelAdapter(ABC):
     async def stream(
         self, request: ModelRequest,
     ) -> AsyncIterator[ModelDelta | ModelResponse]:
-        """流式生成一次模型响应（Ticket 08 / ADR 0011）。
+        """流式生成一次模型响应（ADR 0011）。
 
-        只有声明 ``capabilities.streaming=True`` 的 Adapter 才会被
+        只有声明 ``capabilities.streaming=DELTA`` 的 Adapter 才会被
         Runner 调用本方法（ADR 0030：不静默降级）。契约：
 
         - 逐个产出 :class:`ModelDelta`（文本增量）；
@@ -140,12 +1177,137 @@ class ModelAdapter(ABC):
           Retry Policy 决定是否以新 ``attempt_id`` 重试。
 
         未覆写（默认抛 NotImplementedError）意味着该 Adapter 不支持
-        流式；Runner 只在 `streaming=True` 时调用，未满足即显式失败。
+        流式；Runner 只在 ``streaming=DELTA`` 时调用，未满足即显式失败。
         """
         raise NotImplementedError(
-            f"{type(self).__name__} declares streaming=True but does not "
+            f"{type(self).__name__} declares streaming=DELTA but does not "
             "implement stream()"
         )
+
+
+def _deterministic_adapter_type_identity(adapter_type: type[object]) -> str:
+    """Identify deterministic adapter types without a process-local name."""
+    try:
+        source = inspect.getsourcefile(adapter_type)
+    except (OSError, TypeError):
+        source = None
+    if source is None:
+        return f"{adapter_type.__module__}.{adapter_type.__qualname__}"
+    source_path = Path(source)
+    if not source_path.is_file():
+        return f"{adapter_type.__module__}.{adapter_type.__qualname__}"
+    module_parts = [source_path.stem]
+    parent = source_path.parent
+    while (parent / "__init__.py").is_file():
+        module_parts.append(parent.name)
+        parent = parent.parent
+    if len(module_parts) == 1:
+        module_parts.append(source_path.parent.name)
+    module_identity = ".".join(reversed(module_parts))
+    return f"{module_identity}.{adapter_type.__qualname__}"
+
+
+_UNFINGERPRINTABLE_CONFIGURATION = object()
+_FINGERPRINT_EXCLUDED_STATE = {
+    "_last_request",
+    "_model_contract",
+    "_responses",
+    "call_count",
+    "capabilities",
+    "requests",
+}
+_SENSITIVE_CONFIGURATION_NAMES = (
+    "credential",
+    "key",
+    "password",
+    "secret",
+    "token",
+)
+
+
+def _is_sensitive_configuration_name(name: str) -> bool:
+    return any(
+        fragment in name.lower() for fragment in _SENSITIVE_CONFIGURATION_NAMES
+    )
+
+
+def _deterministic_configuration_value(
+    value: object, seen: set[int] | None = None
+) -> object:
+    """Return immutable behavior state suitable for a deterministic fingerprint."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    seen = seen if seen is not None else set()
+    value_id = id(value)
+    if value_id in seen:
+        return _UNFINGERPRINTABLE_CONFIGURATION
+    if isinstance(value, (tuple, list)):
+        seen.add(value_id)
+        values = tuple(_deterministic_configuration_value(item, seen) for item in value)
+        seen.remove(value_id)
+        if any(item is _UNFINGERPRINTABLE_CONFIGURATION for item in values):
+            return _UNFINGERPRINTABLE_CONFIGURATION
+        return values
+    if isinstance(value, Mapping):
+        seen.add(value_id)
+        values: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                seen.remove(value_id)
+                return _UNFINGERPRINTABLE_CONFIGURATION
+            if _is_sensitive_configuration_name(key):
+                seen.remove(value_id)
+                return _UNFINGERPRINTABLE_CONFIGURATION
+            normalized = _deterministic_configuration_value(item, seen)
+            if normalized is _UNFINGERPRINTABLE_CONFIGURATION:
+                seen.remove(value_id)
+                return _UNFINGERPRINTABLE_CONFIGURATION
+            values[key] = normalized
+        seen.remove(value_id)
+        return values
+    if isinstance(value, (set, frozenset)):
+        seen.add(value_id)
+        values = tuple(_deterministic_configuration_value(item, seen) for item in value)
+        seen.remove(value_id)
+        if any(item is _UNFINGERPRINTABLE_CONFIGURATION for item in values):
+            return _UNFINGERPRINTABLE_CONFIGURATION
+        return tuple(
+            sorted(
+                values,
+                key=lambda item: json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        )
+    try:
+        attributes = vars(value)
+    except TypeError:
+        return _UNFINGERPRINTABLE_CONFIGURATION
+    seen.add(value_id)
+    state: dict[str, object] = {}
+    for name, item in attributes.items():
+        if _is_sensitive_configuration_name(name):
+            seen.remove(value_id)
+            return _UNFINGERPRINTABLE_CONFIGURATION
+        normalized = _deterministic_configuration_value(item, seen)
+        if normalized is _UNFINGERPRINTABLE_CONFIGURATION:
+            seen.remove(value_id)
+            return _UNFINGERPRINTABLE_CONFIGURATION
+        state[name] = normalized
+    seen.remove(value_id)
+    return {
+        "type": _deterministic_adapter_type_identity(type(value)),
+        "state": state,
+    }
 
 
 class DeterministicModelAdapter(ModelAdapter):
@@ -161,11 +1323,22 @@ class DeterministicModelAdapter(ModelAdapter):
         self,
         responses: Sequence[str] = ("deterministic response",),
         capabilities: ModelCapabilities | None = None,
+        model_contract: ModelContract | None = None,
     ) -> None:
         if not responses:
             raise ValueError("responses must contain at least one string")
         self._responses: tuple[str, ...] = tuple(responses)
-        self.capabilities: ModelCapabilities = capabilities or ModelCapabilities()
+        if model_contract is not None and (
+            capabilities is not None
+            and capabilities != model_contract.capabilities
+        ):
+            raise ValueError("capabilities must match model_contract")
+        self._model_contract = model_contract
+        self.capabilities: ModelCapabilities = (
+            model_contract.capabilities
+            if model_contract is not None
+            else capabilities or ModelCapabilities()
+        )
         self.call_count: int = 0
         self._last_request: ModelRequest | None = None
 
@@ -173,6 +1346,71 @@ class DeterministicModelAdapter(ModelAdapter):
     def last_request(self) -> ModelRequest | None:
         """最近一次请求，供测试断言（如验证 create 之前无模型调用）。"""
         return self._last_request
+
+    def _configuration_fingerprint_payload(self) -> dict[str, Any]:
+        """Stable behavior identity, rejecting unaccounted configuration."""
+        payload: dict[str, Any] = {
+            "capabilities": self.capabilities.model_dump(mode="json"),
+            "responses": self._responses,
+        }
+        instance_configuration: dict[str, object] = {}
+        for name, value in vars(self).items():
+            if name in self._fingerprint_excluded_state():
+                continue
+            if _is_sensitive_configuration_name(name):
+                raise ValueError(
+                    "deterministic adapter state "
+                    f"{name!r} is sensitive and must be explicitly excluded "
+                    "or represented by a custom non-secret fingerprint"
+                )
+            normalized = _deterministic_configuration_value(value)
+            if normalized is _UNFINGERPRINTABLE_CONFIGURATION:
+                raise ValueError(
+                    "deterministic adapter state "
+                    f"{name!r} cannot be fingerprinted; explicitly exclude "
+                    "non-behavioral observation state or provide a custom "
+                    "configuration fingerprint"
+                )
+            instance_configuration[name] = normalized
+        if instance_configuration:
+            payload["instance_configuration"] = instance_configuration
+        return payload
+
+    def _fingerprint_excluded_state(self) -> frozenset[str]:
+        """Explicitly declare mutable observation state outside model behavior."""
+        return frozenset(_FINGERPRINT_EXCLUDED_STATE)
+
+    def definition_contract_fingerprint(self) -> str:
+        payload = self._configuration_fingerprint_payload()
+        payload["adapter_type"] = _deterministic_adapter_type_identity(type(self))
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    @property
+    def model_contract(self) -> ModelContract:
+        if self._model_contract is not None:
+            return self._model_contract
+        configuration_fingerprint = self.definition_contract_fingerprint()
+        return ModelContract(
+            contract_id=f"deterministic-{configuration_fingerprint[:16]}",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="deterministic",
+            capabilities=self.capabilities,
+            limits=ModelLimits(
+                context_window_tokens=1_000_000,
+                max_output_tokens=1_000_000,
+            ),
+            input_sizer_id="deterministic-v1",
+            serialization_id="deterministic-text-v1",
+            configuration_fingerprint=configuration_fingerprint,
+        )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.call_count += 1
@@ -182,7 +1420,7 @@ class DeterministicModelAdapter(ModelAdapter):
 
 
 class DeterministicStreamingModelAdapter(DeterministicModelAdapter):
-    """确定性流式 fake Model Adapter（Ticket 08 / ADR 0011）。
+    """确定性流式 fake Model Adapter（ADR 0011）。
 
     与 live :class:`ModelAdapter` 和普通 :class:`DeterministicModelAdapter`
     明确区分：`deterministic` 恒为 True，`capabilities.streaming` 默认
@@ -206,18 +1444,31 @@ class DeterministicStreamingModelAdapter(DeterministicModelAdapter):
     ) -> None:
         if not chunks:
             raise ValueError("chunks must contain at least one string")
-        caps = capabilities or ModelCapabilities(streaming=True)
-        if tool_calls and not caps.tool_calling:
+        caps = (
+            capabilities or ModelCapabilities(streaming=StreamingMode.DELTA)
+        ).as_typed()
+        if tool_calls and caps.tool_calling is ToolCallingMode.NONE:
             caps = ModelCapabilities(
-                streaming=True,
-                tool_calling=True,
+                streaming=StreamingMode.DELTA,
+                tool_calling=ToolCallingMode.NATIVE,
                 structured_output=caps.structured_output,
                 usage_reporting=caps.usage_reporting,
+                supported_combinations=(
+                    ModelCapabilityCombination(
+                        streaming=StreamingMode.DELTA,
+                        tool_calling=ToolCallingMode.NATIVE,
+                        structured_output=caps.structured_output,
+                        usage_reporting=caps.usage_reporting,
+                    ),
+                ),
             )
         super().__init__(responses=("",), capabilities=caps)
         self._chunks: tuple[str, ...] = tuple(chunks)
         self._tool_calls: tuple[ToolCall, ...] = tuple(tool_calls)
         self.requests: list[ModelRequest] = []
+
+    def _configuration_fingerprint_payload(self) -> dict[str, Any]:
+        return super()._configuration_fingerprint_payload()
 
     async def stream(
         self, request: ModelRequest,
@@ -238,7 +1489,7 @@ def serialize_model_response(response: ModelResponse) -> str:
 
     运行时内部使用（Runner 写入 Model Step Checkpoint）；恢复时经
     :func:`deserialize_model_response` 还原，以判断该响应是否请求了
-    工具以及是否已产生最终内容（Ticket 05：checkpoint 必须携带完整
+    工具以及是否已产生最终内容（checkpoint 必须携带完整
     响应，恢复才能精确重建执行位置）。
     """
     return response.model_dump_json()

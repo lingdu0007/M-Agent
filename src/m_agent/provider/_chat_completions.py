@@ -1,4 +1,4 @@
-"""Chat Completions 风格 live Model Adapter（Ticket 10）。
+"""Chat Completions 风格 live Model Adapter。
 
 适配 OpenAI 兼容的 ``POST {base_url}/chat/completions`` 端点
 （``{base_url}/chat/completions``，base_url 语义与官方
@@ -7,11 +7,11 @@
 
 能力声明（ADR 0030，如实且完整）：
 
-- ``streaming=True``：SSE 流式（``stream`` + ``stream_options.include_usage``）；
-- ``tool_calling=True``：``tools`` + ``tool_choice: "auto"``；
-- ``structured_output=True``：``response_format``（json_schema /
+- ``streaming=DELTA``：SSE 流式（``stream`` + ``stream_options.include_usage``）；
+- ``tool_calling=NATIVE``：``tools`` + ``tool_choice: "auto"``；
+- ``structured_output=NATIVE``：``response_format``（json_schema /
   json_object）；
-- ``usage_reporting=True``：usage 从 provider 返回时映射为
+- ``usage_reporting=PROVIDER_REPORTED``：usage 从 provider 返回时映射为
   :class:`ModelUsage`，缺失时显式为 None（不伪造）。
 
 本 Adapter 是 live 实现（``deterministic=False``），构造不触网、不
@@ -38,21 +38,37 @@ from ._base import (
     tool_spec_to_chat_schema,
     transport_error,
 )
+from ._base import httpx
 from m_agent._model import (
+    ModelCapabilityCombination,
     ModelCapabilities,
+    ModelContract,
     ModelDelta,
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    StreamingMode,
+    StructuredOutputMode,
+    ToolCallingMode,
+    UsageReportingMode,
 )
+from m_agent._errors import ModelContractViolationError
 from m_agent._tools import ToolCall
 
 #: Chat Completions 兼容端点能力声明：四类语义全部如实支持。
 CHAT_COMPLETIONS_CAPABILITIES = ModelCapabilities(
-    streaming=True,
-    tool_calling=True,
-    structured_output=True,
-    usage_reporting=True,
+    streaming=StreamingMode.DELTA,
+    tool_calling=ToolCallingMode.NATIVE,
+    structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+    usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+    supported_combinations=(
+        ModelCapabilityCombination(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+            usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+        ),
+    ),
 )
 
 
@@ -68,6 +84,8 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
         ``AGENT_BASE_URL`` 读取，最终默认
         ``https://api.openai.com/v1``。
     :param chat_completions_path: 端点路径，默认 ``/chat/completions``。
+    :param model_contract: 当前 model/deployment 的显式实例 Contract；
+        缺失时 Adapter 可构造但不能注册进 DefinitionRegistry。
     :param structured_output_schema: 可选 JSON Schema；声明
     structured_output 时随请求发送（json_schema / json_object）。
     :param structured_output_mode: 原生结构化输出模式，缺省为
@@ -84,6 +102,8 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
         model: str | None = None,
         base_url: str | None = None,
         timeout: float = 120.0,
+        model_contract: ModelContract | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         chat_completions_path: str | None = None,
         structured_output_schema: dict[str, Any] | None = None,
         structured_output_name: str = "result",
@@ -93,6 +113,8 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
             model=model,
             base_url=base_url,
             timeout=timeout,
+            model_contract=model_contract,
+            transport=transport,
             structured_output_schema=structured_output_schema,
             structured_output_name=structured_output_name,
         )
@@ -102,6 +124,21 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
         self.structured_output_mode: str = resolve_chat_structured_output_mode(
             structured_output_mode
         )
+        if self.structured_output_mode == "json_object":
+            self.capabilities = ModelCapabilities(
+                streaming=StreamingMode.DELTA,
+                tool_calling=ToolCallingMode.NATIVE,
+                structured_output=StructuredOutputMode.JSON_OBJECT,
+                usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+                supported_combinations=(
+                    ModelCapabilityCombination(
+                        streaming=StreamingMode.DELTA,
+                        tool_calling=ToolCallingMode.NATIVE,
+                        structured_output=StructuredOutputMode.JSON_OBJECT,
+                        usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+                    ),
+                ),
+            )
 
     @property
     def endpoint_url(self) -> str:
@@ -124,29 +161,52 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
                 tool_spec_to_chat_schema(spec) for spec in request.tools
             ]
             payload["tool_choice"] = "auto"
-        structured = self._structured_output_payload
-        if structured is not None:
-            if self.structured_output_mode == "json_object":
-                structured = {"type": "json_object"}
-            payload["response_format"] = structured
+        if request.structured_output is not StructuredOutputMode.NONE:
+            if (
+                request.structured_output
+                is StructuredOutputMode.JSON_SCHEMA_STRICT
+                and self.capabilities.structured_output
+                is not StructuredOutputMode.JSON_SCHEMA_STRICT
+            ):
+                raise ModelContractViolationError(
+                    "requested structured-output guarantee does not match "
+                    "the configured provider mode"
+                )
+            if request.structured_output is StructuredOutputMode.JSON_OBJECT:
+                payload["response_format"] = {"type": "json_object"}
+            else:
+                structured = self._structured_output_payload
+                if structured is None:
+                    raise ModelContractViolationError(
+                        "strict JSON Schema output requires an adapter schema"
+                    )
+                payload["response_format"] = structured
         return payload
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         url = self.endpoint_url
         _, data = await self._post_json(url, self._build_payload(request))
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise _missing_field(url, "choices")
-        message = choices[0].get("message")
-        if not isinstance(message, dict):
-            raise _missing_field(url, "choices[0].message")
-        content = message.get("content")
-        tool_calls = parse_chat_tool_calls(message)
-        return ModelResponse(
-            content=content or None,
-            tool_calls=tool_calls,
-            usage=extract_usage(data),
-        )
+        try:
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise _missing_field(url, "choices")
+            message = choices[0].get("message")
+            if not isinstance(message, dict):
+                raise _missing_field(url, "choices[0].message")
+            content = message.get("content")
+            tool_calls = parse_chat_tool_calls(message)
+            return ModelResponse(
+                content=content or None,
+                tool_calls=tool_calls,
+                usage=extract_usage(data),
+                actual_revision=(
+                    data["model"] if isinstance(data.get("model"), str) else None
+                ),
+            )
+        except (AttributeError, TypeError, ValueError):
+            raise ModelContractViolationError(
+                "provider response cannot be normalized"
+            ) from None
 
     async def stream(
         self, request: ModelRequest,
@@ -154,7 +214,8 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
         url = self.endpoint_url
         payload = self._build_payload(request)
         payload["stream"] = True
-        payload["stream_options"] = {"include_usage": True}
+        if request.usage_reporting is UsageReportingMode.PROVIDER_REPORTED:
+            payload["stream_options"] = {"include_usage": True}
         self.requests.append(url)
         api_key = self._require_api_key()
         try:
@@ -176,7 +237,10 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
                 content_parts: list[str] = []
                 tool_calls: dict[int, dict[str, Any]] = {}
                 usage: ModelUsage | None = None
+                actual_revision: str | None = None
                 async for event in consume_sse_events(response):
+                    if isinstance(event.get("model"), str):
+                        actual_revision = event["model"]
                     for choice in event.get("choices") or []:
                         delta = choice.get("delta") or {}
                         text = delta.get("content")
@@ -208,13 +272,21 @@ class ChatCompletionsModelAdapter(ProviderModelAdapter):
                     content="".join(content_parts) or None,
                     tool_calls=calls,
                     usage=usage,
+                    actual_revision=actual_revision,
                 )
         except (httpx.TransportError, httpx.TimeoutException) as exc:
-            raise transport_error(exc, operation=url) from exc
+            raise transport_error(exc, operation=url) from None
+        except (AttributeError, TypeError, ValueError):
+            raise ModelContractViolationError(
+                "provider response cannot be normalized"
+            ) from None
 
     async def aclose(self) -> None:
         await super().aclose()
 
 
 def _missing_field(url: str, field: str):
-    return invalid_response(url, f"missing field {field!r}")
+    del url, field
+    return ModelContractViolationError(
+        "provider response is missing required protocol structure"
+    )

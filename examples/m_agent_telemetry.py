@@ -1,4 +1,4 @@
-"""M-Agent 本地 JSONL Telemetry 示例（Ticket 09 / ADR 0035）。
+"""M-Agent 本地 JSONL Telemetry 示例（ADR 0035）。
 
 展示 Runtime Integrator 如何把官方 :class:`JsonlTelemetrySink` 附加到
 公开 :class:`Runner`：一次确定性 Run（Context Step + Model Step +
@@ -18,25 +18,33 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     ContextItem,
     DefinitionRegistry,
-    DeterministicContextProvider,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    InMemoryRunStore,
-    JsonlTelemetrySink,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     Runner,
     ToolCall,
     ToolEffect,
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.adapters import (
+    DeterministicContextProvider,
+    DeterministicModelAdapter,
+    DeterministicTool,
+    InMemoryRunStore,
+    JsonlTelemetrySink,
+    PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+)
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 OUTPUT_PATH = Path(__file__).with_name("telemetry-example.jsonl")
 
@@ -46,7 +54,9 @@ class LookupModel(DeterministicModelAdapter):
 
     def __init__(self) -> None:
         super().__init__(
-            capabilities=ModelCapabilities(tool_calling=True)
+            capabilities=ModelCapabilities(
+                tool_calling=ToolCallingMode.NATIVE
+            )
         )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
@@ -85,11 +95,15 @@ def main() -> None:
 
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="telemetry_demo",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=ModelCapabilities(tool_calling=True),
+            model_requirements=ModelRequirements(
+                capabilities=ModelCapabilities(
+                    tool_calling=ToolCallingMode.NATIVE
+                )
+            ),
             model_adapter=LookupModel(),
             context_provider=DeterministicContextProvider(
                 [

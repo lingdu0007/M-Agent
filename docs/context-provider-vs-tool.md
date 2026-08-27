@@ -1,6 +1,6 @@
 # 检索集成：Context Provider 还是 Tool？
 
-本文是 Durable Run 的最小检索示例（Ticket 04 Acceptance criterion 9），
+本文是 Durable Run 的最小检索示例，
 说明独立 RAG 项目如何通过 M-Agent 的稳定边界组合，而**不把 RAG 索引
 或检索策略变成 Runtime Core 的特权子系统**（ADR 0014）。
 
@@ -9,7 +9,7 @@
 | 场景 | 集成方式 | 运行时行为 |
 | --- | --- | --- |
 | 应用选择检索（确定性、与模型无关） | **Context Provider** | 在依赖它的 Model Step 之前执行，形成 Context Step + Step Attempt，结果 checkpoint，崩溃恢复复用 Items、不重复查询外部数据（ADR 0015）。 |
-| 模型选择检索（模型决定何时查什么） | **Tool**（普通工具契约） | 模型在响应中请求工具调用，每次调用形成独立 Tool Step，走工具边界与 Tool Effect 声明（后续 Ticket）。 |
+| 模型选择检索（模型决定何时查什么） | **Tool**（普通工具契约） | 模型在响应中请求工具调用，每次调用形成独立 Tool Step，走工具边界与 Tool Effect 声明（后续版本）。 |
 
 一个检索集成是 **Provider** 还是 **Tool**，取决于由谁做选择：
 
@@ -65,7 +65,7 @@ Context Items 作为 checkpoint 持久化：
 
 ```python
 registry.register(
-    AgentDefinition(
+    AgentDefinition.for_adapter(
         definition_id="assistant",
         version="1.0",
         instructions="Answer using the provided context.",
@@ -107,6 +107,6 @@ instructions 使用 system role，Context Item 使用 user data；Responses 的
 ## 不做什么
 
 - 不把 `KeywordRagIndex`、向量库、Session Memory 或完整 RAG 项目移入
-  `m_agent` runtime core（PRD Out of Scope）；
+  `m_agent` runtime core；
 - 运行时不解释检索分数、不执行 rerank、不决定引用格式（ADR 0016）；
 - 运行时不提供 ingestion、chunking、embedding、索引等 RAG 内部能力。

@@ -1,0 +1,61 @@
+{
+  "baseline_identity": {
+    "artifact_digest": "sha256:4cf648474e6461e0285459a00d4f43ca3f26eff88ffe4c35fdece630bf74cb27",
+    "manifest_digest": "sha256:560156e5ca26cc706c31c7231fbe7329ba56c3f800fd6fc1f0700758a6e6f2be"
+  },
+  "environment": {
+    "cpu": {
+      "logical_count": 14,
+      "machine": "arm64",
+      "processor": "arm"
+    },
+    "os": {
+      "release": "25.2.0",
+      "system": "Darwin",
+      "version": "Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:56 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6041"
+    },
+    "python": {
+      "implementation": "CPython",
+      "version": "3.11.15"
+    }
+  },
+  "measurement": {
+    "definition": "wall clock covering public Runner.start_run for every workload Run; validation and inspection excluded",
+    "elapsed_seconds": 0.5139344590716064,
+    "run_count": 30
+  },
+  "metrics": {
+    "persistence_overhead_ms_per_run": {
+      "definition": "summed create/transition/step/attempt/checkpoint/policy-decision write wall time for each workload Run",
+      "mean": 9.899874761079749,
+      "p50": 9.203666355460882,
+      "p95": 15.894261316861952
+    },
+    "run_latency_ms": {
+      "p50": 14.630521065555513,
+      "p95": 24.488508165813975
+    },
+    "throughput_runs_per_second": 58.37320201138742
+  },
+  "qualification": "Comparative, environment-qualified local evidence only; not production QPS, latency, scalability, or availability proof.",
+  "run_database": {
+    "integrity_check": "ok",
+    "path": "benchmarks/results/rel05-context-workload-local.sqlite",
+    "row_counts": {
+      "runs": 30
+    }
+  },
+  "schema_version": 1,
+  "validation": {
+    "checkpoint_order_clean_runs": 30,
+    "compression_provenance_intact_runs": 30,
+    "problems": [],
+    "runs": 30,
+    "status": "PASS",
+    "succeeded_runs": 30
+  },
+  "warmup": {
+    "definition": "SQLite schema initialization before measurement",
+    "run_count": 0
+  }
+}

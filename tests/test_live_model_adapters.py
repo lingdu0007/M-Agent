@@ -1,6 +1,6 @@
-"""Live Chat Completions / Responses Model Adapter 契约测试（Ticket 10）。
+"""Live Chat Completions / Responses Model Adapter 契约测试。
 
-本文件分两部分，报告语义严格区分（PRD「Provider contract seam」）：
+本文件分两部分，报告语义严格区分：
 
 **离线部分**（无 ``live`` 标记，默认 CI 运行，不触网、不要求凭证）：
 - 两类 Adapter 如实声明 streaming / tool calling / native structured
@@ -43,23 +43,18 @@ httpx = pytest.importorskip(
     "live adapter contract tests skipped",
 )
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    InMemoryRunStore,
-    JsonlTelemetrySink,
     ModelAdapter,
     ModelCapabilities,
     ModelCapabilityError,
     ModelFailure,
-    PlaintextPayloadCodec,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     Runner,
     RunResolution,
     RunStatus,
     RunUpdateType,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     TelemetryEventType,
@@ -67,10 +62,38 @@ from m_agent import (
     ToolOutcome,
     deserialize_model_response,
 )
-from m_agent._model import ModelUsage
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    InMemoryRunStore,
+    JsonlTelemetrySink,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.runtime import (
+    ModelCapabilityCombination,
+    ModelContract,
+    ModelLimits,
+    ModelPurpose,
+    ModelRequirements,
+    ModelUsage,
+    ModelUsageGuarantees,
+    RevisionStability,
+    StreamingMode,
+    StructuredOutputMode,
+    ToolCallingMode,
+    UsageFieldGuarantee,
+    UsageProvenance,
+    UsageReportingMode,
+)
 from m_agent._run import RunRecord
 from m_agent._tools import DeterministicTool
-from m_agent.provider import (
+from m_agent.adapters.provider import (
     CHAT_COMPLETIONS_CAPABILITIES,
     RESPONSES_CAPABILITIES,
     ChatCompletionsModelAdapter,
@@ -145,6 +168,29 @@ def make_answer_tool() -> tuple[DeterministicTool, list[int]]:
     return tool, calls
 
 
+def configure_mock_contract(adapter):
+    """Supply the explicit instance Contract required by Runner mock seams."""
+    if (
+        adapter.capabilities.structured_output
+        is StructuredOutputMode.JSON_SCHEMA_STRICT
+        and adapter.structured_output_schema is None
+    ):
+        adapter.structured_output_schema = STRUCTURED_SCHEMA
+    if getattr(adapter, "_model_contract", None) is None:
+        adapter._model_contract = ModelContract(
+            contract_id=f"mock-{type(adapter).__name__}",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity=adapter.model,
+            capabilities=adapter.capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="mock-provider-sizer-v1",
+            serialization_id="mock-provider-wire-v1",
+            configuration_fingerprint=adapter.definition_contract_fingerprint(),
+        )
+    return adapter
+
+
 async def run_to_terminal(
     testcase: unittest.TestCase,
     adapter,
@@ -161,13 +207,14 @@ async def run_to_terminal(
     测试失败，与普通断言失败在报告中可区分（AC：Test reporting
     distinguishes provider failure from assertion failure）。
     """
+    adapter = configure_mock_contract(adapter)
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="live-contract",
             version="1.0",
             instructions=instructions,
-            required_capabilities=required,
+            model_requirements=ModelRequirements(capabilities=required),
             model_adapter=adapter,
             tools=tools,
         )
@@ -370,6 +417,137 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         adapter = ResponsesModelAdapter()
         self.assertEqual(adapter.capabilities, RESPONSES_CAPABILITIES)
 
+    def test_provider_contract_fingerprint_binds_semantics_not_configuration(
+        self,
+    ) -> None:
+        """Identical endpoints cannot collapse different Contract semantics."""
+
+        def contract(
+            adapter: ChatCompletionsModelAdapter,
+            *,
+            version: str,
+            max_output_tokens: int,
+            input_tokens: UsageFieldGuarantee,
+        ) -> ModelContract:
+            return ModelContract(
+                contract_id="same-deployment",
+                version=version,
+                revision_stability=RevisionStability.PINNED,
+                model_identity=adapter.model,
+                capabilities=adapter.capabilities,
+                limits=ModelLimits(
+                    context_window_tokens=128,
+                    max_output_tokens=max_output_tokens,
+                ),
+                input_sizer_id="provider-sizer-v1",
+                serialization_id="provider-wire-v1",
+                usage_guarantees=ModelUsageGuarantees(
+                    input_tokens=input_tokens
+                ),
+                configuration_fingerprint=(
+                    adapter.definition_contract_fingerprint()
+                ),
+            )
+
+        first_probe = ChatCompletionsModelAdapter(
+            model="model",
+            base_url="https://contract.invalid/v1",
+            structured_output_schema=STRUCTURED_SCHEMA,
+        )
+        second_probe = ChatCompletionsModelAdapter(
+            model="model",
+            base_url="https://contract.invalid/v1",
+            structured_output_schema=STRUCTURED_SCHEMA,
+        )
+        first_contract = contract(
+            first_probe,
+            version="1",
+            max_output_tokens=32,
+            input_tokens=UsageFieldGuarantee.OPTIONAL,
+        )
+        second_contract = contract(
+            second_probe,
+            version="2",
+            max_output_tokens=64,
+            input_tokens=UsageFieldGuarantee.REQUIRED,
+        )
+        first = ChatCompletionsModelAdapter(
+            model="model",
+            base_url="https://contract.invalid/v1",
+            structured_output_schema=STRUCTURED_SCHEMA,
+            model_contract=first_contract,
+        )
+        second = ChatCompletionsModelAdapter(
+            model="model",
+            base_url="https://contract.invalid/v1",
+            structured_output_schema=STRUCTURED_SCHEMA,
+            model_contract=second_contract,
+        )
+        registry = DefinitionRegistry()
+        try:
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="contract-one",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=first,
+                )
+            )
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id="contract-two",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=second,
+                )
+            )
+            self.assertEqual(
+                first_contract.configuration_fingerprint,
+                second_contract.configuration_fingerprint,
+            )
+            self.assertNotEqual(first_contract.fingerprint, second_contract.fingerprint)
+            self.assertEqual(first.requests, [])
+            self.assertEqual(second.requests, [])
+        finally:
+            asyncio.run(first_probe.aclose())
+            asyncio.run(second_probe.aclose())
+            asyncio.run(first.aclose())
+            asyncio.run(second.aclose())
+
+    def test_provider_contract_model_identity_matches_configured_model(self) -> None:
+        probe = ChatCompletionsModelAdapter(
+            model="actual-model", base_url="https://contract.invalid/v1"
+        )
+        contract = ModelContract(
+            contract_id="wrong-model",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity="claimed-model",
+            capabilities=probe.capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="provider-sizer-v1",
+            serialization_id="provider-wire-v1",
+            configuration_fingerprint=probe.definition_contract_fingerprint(),
+        )
+        adapter = ChatCompletionsModelAdapter(
+            model="actual-model",
+            base_url="https://contract.invalid/v1",
+            model_contract=contract,
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "model_identity"):
+                DefinitionRegistry().register(
+                    AgentDefinition.for_adapter(
+                        definition_id="wrong-model",
+                        version="1",
+                        instructions="Never dispatch.",
+                        model_adapter=adapter,
+                    )
+                )
+        finally:
+            asyncio.run(probe.aclose())
+            asyncio.run(adapter.aclose())
+
     def test_live_adapters_visibly_distinct_from_fake(self) -> None:
         # AC：确定性 fake 的成功不可能被误认为 live 兼容性验证。
         fake = DeterministicModelAdapter(responses=("x",))
@@ -402,23 +580,333 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         self.assertNotIn("response_format", chat)
         self.assertNotIn("text", responses)
 
+        structured_request = request.model_copy(
+            update={"structured_output": StructuredOutputMode.JSON_SCHEMA_STRICT}
+        )
         structured_chat = ChatCompletionsModelAdapter(
             structured_output_schema=STRUCTURED_SCHEMA
-        )._build_payload(request)
+        )._build_payload(structured_request)
         structured_responses = ResponsesModelAdapter(
             structured_output_schema=STRUCTURED_SCHEMA
-        )._build_payload(request)
+        )._build_payload(structured_request)
         self.assertIn("response_format", structured_chat)
         self.assertIn("text", structured_responses)
 
     def test_chat_json_object_mode_uses_native_json_output(self) -> None:
         """A Chat-compatible provider can explicitly select JSON-object mode."""
-        payload = ChatCompletionsModelAdapter(
+        adapter = ChatCompletionsModelAdapter(
             structured_output_schema=STRUCTURED_SCHEMA,
             structured_output_mode="json_object",
-        )._build_payload(_request())
+        )
+        payload = adapter._build_payload(
+            _request().model_copy(
+                update={"structured_output": StructuredOutputMode.JSON_OBJECT}
+            )
+        )
 
         self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertIs(
+            adapter.capabilities.structured_output,
+            StructuredOutputMode.JSON_OBJECT,
+        )
+
+    def test_strict_adapters_encode_json_object_requirement(self) -> None:
+        """A strict native ceiling also fulfills the weaker JSON-object mode."""
+        request = _request().model_copy(
+            update={"structured_output": StructuredOutputMode.JSON_OBJECT}
+        )
+
+        chat = ChatCompletionsModelAdapter(
+            structured_output_schema=STRUCTURED_SCHEMA
+        )._build_payload(request)
+        responses = ResponsesModelAdapter(
+            structured_output_schema=STRUCTURED_SCHEMA
+        )._build_payload(request)
+
+        self.assertEqual(chat["response_format"], {"type": "json_object"})
+        self.assertEqual(
+            responses["text"], {"format": {"type": "json_object"}}
+        )
+
+    def test_strict_schema_allows_object_without_required_keyword(self) -> None:
+        from m_agent.runtime import ModelResponse
+
+        adapter = ChatCompletionsModelAdapter(
+            structured_output_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "additionalProperties": False,
+            }
+        )
+        try:
+            response = adapter.validate_response(
+                _request().model_copy(
+                    update={
+                        "structured_output": (
+                            StructuredOutputMode.JSON_SCHEMA_STRICT
+                        )
+                    }
+                ),
+                ModelResponse(content='{"name":"ok"}'),
+            )
+        finally:
+            asyncio.run(adapter.aclose())
+
+        self.assertEqual(response.content, '{"name":"ok"}')
+
+    def test_strict_json_object_requirement_reaches_provider_transport(self) -> None:
+        """Accepted JSON-object Requirements are executable through Runner."""
+
+        async def invoke(adapter_cls, response_payload):
+            payloads: list[dict] = []
+
+            def handler(request):
+                payloads.append(json.loads(request.content))
+                return httpx.Response(200, json=response_payload)
+
+            adapter = adapter_cls(
+                base_url="https://live-contract.invalid/v1",
+                structured_output_schema=STRUCTURED_SCHEMA,
+            )
+            adapter._transport = httpx.MockTransport(handler)
+            try:
+                _, _, status, _ = await run_to_terminal(
+                    self,
+                    adapter,
+                    instructions="Return a JSON object.",
+                    required=ModelCapabilities(
+                        structured_output=StructuredOutputMode.JSON_OBJECT
+                    ),
+                )
+            finally:
+                await adapter.aclose()
+            return status, payloads
+
+        cases = (
+            (
+                ChatCompletionsModelAdapter,
+                {"choices": [{"message": {"content": '{"answer":"ok"}'}}]},
+                lambda payload: payload["response_format"],
+            ),
+            (
+                ResponsesModelAdapter,
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": '{"answer":"ok"}',
+                                }
+                            ],
+                        }
+                    ]
+                },
+                lambda payload: payload["text"]["format"],
+            ),
+        )
+        with credential_environment():
+            for adapter_cls, response_payload, format_from in cases:
+                with self.subTest(adapter=adapter_cls.__name__):
+                    status, payloads = asyncio.run(
+                        invoke(adapter_cls, response_payload)
+                    )
+                    self.assertIs(status, RunStatus.SUCCEEDED)
+                    self.assertEqual(len(payloads), 1)
+                    self.assertEqual(
+                        format_from(payloads[0]), {"type": "json_object"}
+                    )
+
+    def test_strict_tool_call_precedes_final_json_through_runner(self) -> None:
+        """A strict schema applies to the final response, not a tool request."""
+
+        async def invoke(adapter_cls, payloads):
+            requests: list[dict] = []
+
+            def handler(request):
+                requests.append(json.loads(request.content))
+                return httpx.Response(200, json=payloads[len(requests) - 1])
+
+            adapter = adapter_cls(
+                base_url="https://live-contract.invalid/v1",
+                structured_output_schema=STRUCTURED_SCHEMA,
+            )
+            adapter._transport = httpx.MockTransport(handler)
+            tool, calls = make_answer_tool()
+            try:
+                _, _, status, inspection = await run_to_terminal(
+                    self,
+                    adapter,
+                    instructions=(
+                        "Call get_answer before returning the required JSON."
+                    ),
+                    required=ModelCapabilities(
+                        tool_calling=ToolCallingMode.NATIVE,
+                        structured_output=(
+                            StructuredOutputMode.JSON_SCHEMA_STRICT
+                        ),
+                        supported_combinations=(
+                            ModelCapabilityCombination(
+                                tool_calling=ToolCallingMode.NATIVE,
+                                structured_output=(
+                                    StructuredOutputMode.JSON_SCHEMA_STRICT
+                                ),
+                            ),
+                        ),
+                    ),
+                    tools=(tool,),
+                )
+            finally:
+                await adapter.aclose()
+            return status, inspection, requests, calls
+
+        cases = (
+            (
+                ChatCompletionsModelAdapter,
+                (
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "tool_calls": [
+                                        {
+                                            "id": "call-1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "get_answer",
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": (
+                                        '{"answer":"42","confidence":1}'
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                ),
+            ),
+            (
+                ResponsesModelAdapter,
+                (
+                    {
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "name": "get_answer",
+                                "arguments": "{}",
+                            }
+                        ]
+                    },
+                    {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": (
+                                            '{"answer":"42","confidence":1}'
+                                        ),
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                ),
+            ),
+        )
+        with credential_environment():
+            for adapter_cls, payloads in cases:
+                with self.subTest(adapter=adapter_cls.__name__):
+                    status, inspection, requests, calls = asyncio.run(
+                        invoke(adapter_cls, payloads)
+                    )
+
+                    self.assertIs(status, RunStatus.SUCCEEDED)
+                    self.assertEqual(len(requests), 2)
+                    self.assertEqual(calls, [1])
+                    self.assertEqual(
+                        [step.step_type for step in inspection.steps],
+                        [StepType.MODEL, StepType.TOOL, StepType.MODEL],
+                    )
+
+    def test_provider_contract_accepts_split_capability_ceiling(self) -> None:
+        split_capabilities = ModelCapabilities(
+            streaming=StreamingMode.DELTA,
+            tool_calling=ToolCallingMode.NATIVE,
+            supported_combinations=(
+                ModelCapabilityCombination(streaming=StreamingMode.DELTA),
+                ModelCapabilityCombination(tool_calling=ToolCallingMode.NATIVE),
+            ),
+        )
+
+        class SplitCapabilitiesAdapter(ChatCompletionsModelAdapter):
+            capabilities = split_capabilities
+
+        probe = SplitCapabilitiesAdapter(
+            base_url="https://contract.invalid/v1"
+        )
+        contract = ModelContract(
+            contract_id="split-capability-ceiling",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity=probe.model,
+            capabilities=split_capabilities,
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="provider-sizer-v1",
+            serialization_id="provider-wire-v1",
+            configuration_fingerprint=probe.definition_contract_fingerprint(),
+        )
+        adapter = SplitCapabilitiesAdapter(
+            base_url="https://contract.invalid/v1",
+            model_contract=contract,
+        )
+        try:
+            self.assertEqual(adapter.model_contract, contract)
+        finally:
+            asyncio.run(probe.aclose())
+            asyncio.run(adapter.aclose())
+
+    def test_json_object_contract_rejects_strict_schema_requirement(self) -> None:
+        """A weaker native mode never passes a strict schema Requirement."""
+        adapter = configure_mock_contract(
+            ChatCompletionsModelAdapter(
+                structured_output_schema=STRUCTURED_SCHEMA,
+                structured_output_mode="json_object",
+            )
+        )
+        try:
+            with self.assertRaises(ModelCapabilityError):
+                DefinitionRegistry().register(
+                    AgentDefinition.for_adapter(
+                        definition_id="strict-schema-only",
+                        version="1",
+                        instructions="Never dispatch.",
+                        model_requirements=ModelRequirements(
+                            capabilities=ModelCapabilities(
+                                structured_output=(
+                                    StructuredOutputMode.JSON_SCHEMA_STRICT
+                                )
+                            )
+                        ),
+                        model_adapter=adapter,
+                    )
+                )
+            self.assertEqual(adapter.requests, [])
+        finally:
+            asyncio.run(adapter.aclose())
 
     def test_resume_rejects_adapter_configuration_drift_without_network(
         self,
@@ -433,7 +921,8 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_schema=STRUCTURED_SCHEMA,
                 structured_output_mode="json_object",
             )
-            original_definition = AgentDefinition(
+            configure_mock_contract(original)
+            original_definition = AgentDefinition.for_adapter(
                 definition_id="frozen-adapter-contract",
                 version="1.0",
                 instructions="Return JSON.",
@@ -465,9 +954,10 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 timeout=timeout,
             )
             changed._transport = httpx.MockTransport(counter_transport)
+            configure_mock_contract(changed)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="frozen-adapter-contract",
                     version="1.0",
                     instructions="Return JSON.",
@@ -477,14 +967,16 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             runner = Runner(registry=registry, store=store)
             try:
                 with self.assertRaisesRegex(
-                    RuntimeError, "adapter configuration"
+                    RuntimeError, "snapshot Model Contract"
                 ):
                     await runner.resume_run("frozen-adapter-contract-run")
                 restored = await runner.get_run("frozen-adapter-contract-run")
                 return (
                     calls,
                     changed.requests,
-                    restored.snapshot.adapter_contract_fingerprint,
+                    restored.snapshot.model_bindings.for_purpose(
+                        ModelPurpose.PRIMARY
+                    ).contract.fingerprint,
                     restored,
                 )
             finally:
@@ -518,7 +1010,8 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_schema=STRUCTURED_SCHEMA,
                 structured_output_mode="json_object",
             )
-            snapshot = AgentDefinition(
+            configure_mock_contract(original)
+            snapshot = AgentDefinition.for_adapter(
                 definition_id="frozen-resolution-contract",
                 version="1.0",
                 instructions="Return JSON.",
@@ -550,9 +1043,10 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_mode="json_schema",
             )
             changed._transport = httpx.MockTransport(counter_transport)
+            configure_mock_contract(changed)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="frozen-resolution-contract",
                     version="1.0",
                     instructions="Return JSON.",
@@ -562,7 +1056,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             runner = Runner(registry=registry, store=store)
             try:
                 with self.assertRaisesRegex(
-                    RuntimeError, "adapter configuration"
+                RuntimeError, "snapshot Model Contract"
                 ):
                     await runner.resolve_run(
                         "frozen-resolution-contract-run",
@@ -599,9 +1093,9 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 raise AssertionError("must not be dispatched")
 
         registry = DefinitionRegistry()
-        with self.assertRaisesRegex(ValueError, "fingerprint"):
+        with self.assertRaisesRegex(ValueError, "instance ModelContract"):
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="unfrozen-live-adapter",
                     version="1.0",
                     instructions="i",
@@ -634,6 +1128,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 structured_output_mode="json_object",
             )
             adapter._transport = httpx.MockTransport(counter_transport)
+            configure_mock_contract(adapter)
 
             class MutatingSink:
                 def emit(self, event) -> None:
@@ -645,15 +1140,22 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                             adapter.structured_output_mode = "json_schema"
                         else:
                             adapter.capabilities = ModelCapabilities(
-                                streaming=True,
-                                tool_calling=True,
-                                structured_output=False,
-                                usage_reporting=True,
+                                streaming=StreamingMode.DELTA,
+                                tool_calling=ToolCallingMode.NATIVE,
+                                structured_output=StructuredOutputMode.NONE,
+                                usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+                                supported_combinations=(
+                                    ModelCapabilityCombination(
+                                        streaming=StreamingMode.DELTA,
+                                        tool_calling=ToolCallingMode.NATIVE,
+                                        usage_reporting=UsageReportingMode.PROVIDER_REPORTED,
+                                    ),
+                                ),
                             )
 
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="telemetry-mutated-adapter",
                     version="1.0",
                     instructions="Return JSON.",
@@ -720,9 +1222,10 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             adapter._transport = httpx.MockTransport(
                 lambda request: httpx.Response(401)
             )
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="base-url-redaction",
                     version="1.0",
                     instructions="Reply with pong.",
@@ -791,7 +1294,7 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
         # 模拟“声明不完整”的 live adapter，验证注册拒绝发生在任何
         # 网络请求之前。
         class PartialLiveAdapter(ChatCompletionsModelAdapter):
-            capabilities = ModelCapabilities(streaming=True)
+            capabilities = ModelCapabilities(streaming=StreamingMode.DELTA)
 
         calls = 0
 
@@ -802,15 +1305,18 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
 
         adapter = PartialLiveAdapter()
         adapter._transport = httpx.MockTransport(counter_transport)
+        configure_mock_contract(adapter)
         registry = DefinitionRegistry()
         with self.assertRaises(ModelCapabilityError):
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="needs-tool-calling",
                     version="1.0",
                     instructions="i",
-                    required_capabilities=ModelCapabilities(
-                        tool_calling=True
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            tool_calling=ToolCallingMode.NATIVE
+                        )
                     ),
                     model_adapter=adapter,
                 )
@@ -828,18 +1334,78 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             ResponsesModelAdapter,
         ):
             adapter = adapter_cls()
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="assistant",
                     version="1.0",
                     instructions="i",
-                    required_capabilities=adapter.capabilities,
+                    model_requirements=ModelRequirements(
+                        capabilities=adapter.capabilities
+                    ),
                     model_adapter=adapter,
                 )
             )
             self.assertTrue(registry.is_registered("assistant", "1.0"))
             self.assertEqual(adapter.requests, [])
+
+    def test_provider_instance_contract_can_narrow_class_capabilities(self) -> None:
+        """An instance Contract is an intersection, not the protocol ceiling."""
+        adapter = ChatCompletionsModelAdapter(
+            base_url="https://live-contract.invalid/v1",
+        )
+        adapter._model_contract = ModelContract(
+            contract_id="chat-text-only",
+            version="1",
+            revision_stability=RevisionStability.PINNED,
+            model_identity=adapter.model,
+            capabilities=ModelCapabilities(),
+            limits=ModelLimits(context_window_tokens=128, max_output_tokens=32),
+            input_sizer_id="mock-provider-sizer-v1",
+            serialization_id="mock-provider-wire-v1",
+            configuration_fingerprint=adapter.definition_contract_fingerprint(),
+        )
+        registry = DefinitionRegistry()
+        registry.register(
+            AgentDefinition.for_adapter(
+                definition_id="chat-text-only",
+                version="1",
+                instructions="Reply.",
+                model_adapter=adapter,
+            )
+        )
+
+        self.assertTrue(registry.is_registered("chat-text-only", "1"))
+        self.assertEqual(adapter.requests, [])
+        asyncio.run(adapter.aclose())
+
+    def test_provider_contract_fingerprint_must_match_current_configuration(
+        self,
+    ) -> None:
+        """A fresh provider instance cannot reuse another target's Contract."""
+        original = ChatCompletionsModelAdapter(
+            model="model-original",
+            base_url="https://original.invalid/v1",
+        )
+        configure_mock_contract(original)
+        changed = ChatCompletionsModelAdapter(
+            model="model-original",
+            base_url="https://changed.invalid/v1",
+            model_contract=original.model_contract,
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "configuration fingerprint"):
+                AgentDefinition.for_adapter(
+                    definition_id="stale-provider-contract",
+                    version="1",
+                    instructions="Never dispatch.",
+                    model_adapter=changed,
+                )
+            self.assertEqual(changed.requests, [])
+        finally:
+            asyncio.run(original.aclose())
+            asyncio.run(changed.aclose())
 
     def test_missing_credentials_fail_structured_without_key_value(
         self,
@@ -918,9 +1484,10 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     headers={"content-type": "text/event-stream"},
                 )
             )
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="responses-failure",
                     version="1.0",
                     instructions="Reply with pong.",
@@ -968,9 +1535,10 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     },
                 )
             )
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="invalid-sse-content-type",
                     version="1.0",
                     instructions="Reply with pong.",
@@ -1009,20 +1577,90 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
 
     def test_usage_mapping_surfaces_and_represents_absence(self) -> None:
         # AC：provider 返回 usage 时透传；缺失时显式为 None（不伪造）。
-        from m_agent.provider import extract_usage
+        from m_agent.adapters.provider import extract_usage
 
-        self.assertEqual(
-            extract_usage({"usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
-            ModelUsage(input_tokens=10, output_tokens=5),
+        chat_usage = extract_usage(
+            {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
         )
         self.assertEqual(
-            extract_usage({"usage": {"input_tokens": 7, "output_tokens": 3}}),
-            ModelUsage(input_tokens=7, output_tokens=3),
+            chat_usage,
+            ModelUsage(
+                input_tokens=10,
+                output_tokens=5,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:prompt_tokens->input_tokens,"
+                    "completion_tokens->output_tokens"
+                ),
+            ),
+        )
+        assert chat_usage is not None
+        self.assertEqual(chat_usage.raw_unit, "tokens")
+        self.assertEqual(
+            chat_usage.normalization_source,
+            "openai-compatible-usage-v1:prompt_tokens->input_tokens,"
+            "completion_tokens->output_tokens",
+        )
+        responses_usage = extract_usage(
+            {"usage": {"input_tokens": 7, "output_tokens": 3}}
+        )
+        self.assertEqual(
+            responses_usage,
+            ModelUsage(
+                input_tokens=7,
+                output_tokens=3,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                    "output_tokens->output_tokens"
+                ),
+            ),
+        )
+        assert responses_usage is not None
+        self.assertEqual(responses_usage.raw_unit, "tokens")
+        self.assertEqual(
+            responses_usage.normalization_source,
+            "openai-compatible-usage-v1:input_tokens->input_tokens,"
+            "output_tokens->output_tokens",
+        )
+        extended_usage = extract_usage(
+            {
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "cached_input_tokens": 3,
+                    "reasoning_tokens": 2,
+                }
+            }
+        )
+        self.assertEqual(
+            extended_usage,
+            ModelUsage(
+                input_tokens=10,
+                output_tokens=4,
+                cached_input_tokens=3,
+                reasoning_tokens=2,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                    "output_tokens->output_tokens,"
+                    "cached_input_tokens->cached_input_tokens,"
+                    "reasoning_tokens->reasoning_tokens"
+                ),
+            ),
         )
         # 合法的 0 不是缺失；不得被 truthy/falsy 映射吞掉。
         self.assertEqual(
             extract_usage({"usage": {"prompt_tokens": 0, "completion_tokens": 0}}),
-            ModelUsage(input_tokens=0, output_tokens=0),
+            ModelUsage(
+                input_tokens=0,
+                output_tokens=0,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:prompt_tokens->input_tokens,"
+                    "completion_tokens->output_tokens"
+                ),
+            ),
         )
         self.assertEqual(
             extract_usage(
@@ -1035,12 +1673,193 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     }
                 }
             ),
-            ModelUsage(input_tokens=0, output_tokens=0),
+            ModelUsage(
+                input_tokens=0,
+                output_tokens=0,
+                raw_unit="tokens",
+                normalization_source=(
+                    "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                    "output_tokens->output_tokens"
+                ),
+            ),
         )
         # 缺失 usage：显式 None，绝不猜测。
         self.assertIsNone(extract_usage({}))
         self.assertIsNone(extract_usage({"usage": {}}))
         self.assertIsNone(extract_usage({"usage": {"foo": 1}}))
+
+    def test_provider_response_retains_actual_model_revision(self) -> None:
+        """Returned provider revisions survive normalization for inspection."""
+
+        async def invoke(adapter_cls, payload):
+            adapter = adapter_cls(
+                base_url="https://live-contract.invalid/v1",
+            )
+            adapter._transport = httpx.MockTransport(
+                lambda request: httpx.Response(200, json=payload)
+            )
+            try:
+                with credential_environment():
+                    return await adapter.generate(_request())
+            finally:
+                await adapter.aclose()
+
+        cases = (
+            (
+                ChatCompletionsModelAdapter,
+                {
+                    "model": "provider-revision-chat-123",
+                    "choices": [{"message": {"content": "pong"}}],
+                },
+            ),
+            (
+                ResponsesModelAdapter,
+                {
+                    "model": "provider-revision-responses-456",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "pong"}
+                            ],
+                        }
+                    ],
+                },
+            ),
+        )
+        for adapter_cls, payload in cases:
+            with self.subTest(adapter=adapter_cls.__name__):
+                response = asyncio.run(invoke(adapter_cls, payload))
+                self.assertEqual(response.actual_revision, payload["model"])
+
+    def test_chat_streaming_does_not_request_undeclared_usage(self) -> None:
+        """A frozen streaming-only request does not expand its wire protocol."""
+
+        async def invoke() -> tuple[RunStatus, list[dict]]:
+            payloads: list[dict] = []
+
+            def handler(request):
+                payloads.append(json.loads(request.content))
+                return httpx.Response(
+                    200,
+                    content=(
+                        'data: {"choices":[{"delta":{"content":"pong"}}]}\n\n'
+                    ),
+                    headers={"content-type": "text/event-stream"},
+                )
+
+            adapter = ChatCompletionsModelAdapter(
+                base_url="https://live-contract.invalid/v1",
+            )
+            adapter._transport = httpx.MockTransport(handler)
+            try:
+                _, _, status, _ = await run_to_terminal(
+                    self,
+                    adapter,
+                    instructions="Reply with pong.",
+                    required=ModelCapabilities(
+                        streaming=StreamingMode.DELTA
+                    ),
+                )
+            finally:
+                await adapter.aclose()
+            return status, payloads
+
+        with credential_environment():
+            status, payloads = asyncio.run(invoke())
+
+        self.assertIs(status, RunStatus.SUCCEEDED)
+        self.assertEqual(len(payloads), 1)
+        self.assertNotIn("stream_options", payloads[0])
+
+    def test_malformed_provider_payload_is_contract_violation_through_runner(
+        self,
+    ) -> None:
+        """Provider normalization faults retain the stable Contract error code."""
+
+        async def invoke(adapter_cls, response_payload):
+            calls = 0
+
+            def handler(request):
+                nonlocal calls
+                calls += 1
+                return httpx.Response(200, json=response_payload)
+
+            adapter = adapter_cls(base_url="https://live-contract.invalid/v1")
+            adapter._transport = httpx.MockTransport(handler)
+            configure_mock_contract(adapter)
+            registry = DefinitionRegistry()
+            registry.register(
+                AgentDefinition.for_adapter(
+                    definition_id=f"malformed-{adapter_cls.__name__}",
+                    version="1",
+                    instructions="Reply.",
+                    model_adapter=adapter,
+                )
+            )
+            runner = Runner(
+                registry=registry,
+                store=InMemoryRunStore(payload_codec=PlaintextPayloadCodec()),
+            )
+            created = await runner.create_run(
+                f"malformed-{adapter_cls.__name__}", "1", "hi"
+            )
+            try:
+                terminal = await runner.start_run(created.run_id)
+                inspection = await runner.inspect_run(created.run_id)
+            finally:
+                await adapter.aclose()
+            return terminal, inspection, calls
+
+        cases = (
+            (ChatCompletionsModelAdapter, {}),
+            (ResponsesModelAdapter, {}),
+            (
+                ChatCompletionsModelAdapter,
+                {"choices": [{"message": {"tool_calls": {"bad": True}}}]},
+            ),
+            (
+                ResponsesModelAdapter,
+                {"output": ["malformed output item"]},
+            ),
+            (
+                ChatCompletionsModelAdapter,
+                {
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": -1},
+                },
+            ),
+            (
+                ResponsesModelAdapter,
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "ok"}
+                            ],
+                        }
+                    ],
+                    "usage": {"input_tokens": True},
+                },
+            ),
+        )
+        with credential_environment():
+            for adapter_cls, response_payload in cases:
+                with self.subTest(adapter=adapter_cls.__name__):
+                    terminal, inspection, calls = asyncio.run(
+                        invoke(adapter_cls, response_payload)
+                    )
+
+                    self.assertIs(terminal.status, RunStatus.FAILED)
+                    self.assertEqual(
+                        terminal.error_code, "MODEL_CONTRACT_VIOLATION"
+                    )
+                    self.assertEqual(
+                        inspection.attempts[-1].error_code,
+                        "MODEL_CONTRACT_VIOLATION",
+                    )
+                    self.assertEqual(calls, 1)
 
     def test_structured_output_diagnostic_never_echoes_provider_content(
         self,
@@ -1108,7 +1927,9 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                     self,
                     adapter,
                     instructions="Reply with pong.",
-                    required=ModelCapabilities(),
+                    required=ModelCapabilities(
+                        streaming=StreamingMode.DELTA
+                    ),
                     telemetry_sink=sink,
                 )
             finally:
@@ -1127,19 +1948,46 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
             (
                 "complete",
                 {"input_tokens": 7, "output_tokens": 3},
-                ModelUsage(input_tokens=7, output_tokens=3),
+                ModelUsage(
+                    input_tokens=7,
+                    output_tokens=3,
+                    raw_unit="tokens",
+                    normalization_source=(
+                        "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                        "output_tokens->output_tokens"
+                    ),
+                ),
             ),
             (
                 "partial",
                 {"input_tokens": 7},
-                ModelUsage(input_tokens=7, output_tokens=None),
+                ModelUsage(
+                    input_tokens=7,
+                    output_tokens=None,
+                    raw_unit="tokens",
+                    normalization_source=(
+                        "openai-compatible-usage-v1:input_tokens->input_tokens"
+                    ),
+                ),
             ),
             (
                 "all_zero",
                 {"input_tokens": 0, "output_tokens": 0},
-                ModelUsage(input_tokens=0, output_tokens=0),
+                ModelUsage(
+                    input_tokens=0,
+                    output_tokens=0,
+                    raw_unit="tokens",
+                    normalization_source=(
+                        "openai-compatible-usage-v1:input_tokens->input_tokens,"
+                        "output_tokens->output_tokens"
+                    ),
+                ),
             ),
-            ("missing", None, None),
+            (
+                "missing",
+                None,
+                ModelUsage(provenance=UsageProvenance.UNAVAILABLE),
+            ),
         )
         with credential_environment():
             for adapter_cls in (
@@ -1183,9 +2031,10 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 base_url="https://live-contract.invalid/v1",
             )
             adapter._transport = httpx.MockTransport(handler)
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="provider-failure",
                     version="1.0",
                     instructions="Reply with pong.",
@@ -1274,12 +2123,18 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
                 base_url="https://live-contract.invalid/v1",
             )
             adapter._transport = httpx.MockTransport(handler)
+            configure_mock_contract(adapter)
             registry = DefinitionRegistry()
             registry.register(
-                AgentDefinition(
+                AgentDefinition.for_adapter(
                     definition_id="credential-isolation",
                     version="1.0",
                     instructions="Reply with pong.",
+                    model_requirements=ModelRequirements(
+                        capabilities=ModelCapabilities(
+                            streaming=StreamingMode.DELTA
+                        )
+                    ),
                     model_adapter=adapter,
                 )
             )
@@ -1338,13 +2193,13 @@ class LiveAdapterOfflineContractTests(unittest.TestCase):
 
 
 def _request():
-    from m_agent import ModelRequest
+    from m_agent.runtime import ModelRequest
 
     return ModelRequest(input="hi", instructions="say hi")
 
 
 async def _generate_no_credentials(adapter) -> None:
-    from m_agent import ModelRequest
+    from m_agent.runtime import ModelRequest
 
     request = ModelRequest(input="hi", instructions="say hi")
     try:
@@ -1411,11 +2266,15 @@ class _LiveAdapterContractMixin:
     async def test_streaming_deltas_through_runner(self) -> None:
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="live-contract",
                 version="1.0",
                 instructions="Say 'hello live streaming'.",
-                required_capabilities=ModelCapabilities(streaming=True),
+                model_requirements=ModelRequirements(
+                    capabilities=ModelCapabilities(
+                        streaming=StreamingMode.DELTA
+                    )
+                ),
                 model_adapter=self.adapter,
             )
         )
@@ -1476,7 +2335,7 @@ class _LiveAdapterContractMixin:
             self,
             self.adapter,
             instructions=TOOL_INSTRUCTIONS,
-            required=ModelCapabilities(tool_calling=True),
+            required=ModelCapabilities(tool_calling=ToolCallingMode.NATIVE),
             tools=(tool,),
         )
         self.assertEqual(status, RunStatus.SUCCEEDED)
@@ -1505,7 +2364,9 @@ class _LiveAdapterContractMixin:
                     "Return a JSON object with an 'answer' string and a "
                     "'confidence' number between 0 and 1."
                 ),
-                required=ModelCapabilities(structured_output=True),
+                required=ModelCapabilities(
+                    structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT
+                ),
             )
         finally:
             await adapter.aclose()

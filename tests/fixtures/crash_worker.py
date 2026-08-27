@@ -3,7 +3,7 @@
 在指定 CrashPoint 通过 ``os._exit`` 硬终止进程，模拟真实进程崩溃：
 不运行 finally / atexit、不回滚已提交的 SQLite 事务、不留存任何
 Python 对象供后续进程复用。已提交的 checkpoint 落盘，Run 终态尚未
-写入——这正是 Ticket 02 / 04 的确定性崩溃点。
+写入——这正是跨进程恢复窗口的确定性崩溃点。
 
 用法：``python tests/fixtures/crash_worker.py <db_path> <model_log_path>
 <crash_point> [<provider_log_path>]``
@@ -13,7 +13,7 @@ Python 对象供后续进程复用。已提交的 checkpoint 落盘，Run 终态
   ``after_model_checkpoint`` / ``none``（对应 :class:`CrashPoint`）。
 - 每次模型调用向 ``model_log_path`` 追加一行（跨进程调用计数证据）；
   传入 ``provider_log_path`` 时注册 Context Provider，每次 provider
-  调用也追加一行（Ticket 04 跨进程复用证据）。
+  调用也追加一行。
 - 崩溃前向 stdout 输出 ``RUN_ID=<run_id>``；正常完成时输出
   ``RUN_ID=`` / ``ATTEMPT_ID=`` / ``STATUS=`` 三行。
 """
@@ -30,20 +30,28 @@ _SRC = os.path.abspath(
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from m_agent import (  # noqa: E402
+from m_agent.runtime import (
     AgentDefinition,
     ContextItem,
     ContextRequest,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicContextProvider,
-    DeterministicModelAdapter,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     Runner,
+)
+from m_agent.adapters import (
+    DeterministicContextProvider,
+    DeterministicModelAdapter,
+    PlaintextPayloadCodec,
     SQLiteRunStore,
 )
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+)
+from m_agent.runtime import ModelExecutionBudget, RetryPolicy
 
 _CRASH_EXIT_CODE = 17
 
@@ -115,15 +123,24 @@ def main() -> None:
     )
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
+            model_execution_budget=ModelExecutionBudget(
+                run_max_attempts=int(os.environ.get("M_AGENT_TEST_MODEL_BUDGET", "8")),
+                primary_max_attempts=int(
+                    os.environ.get("M_AGENT_TEST_MODEL_BUDGET", "8")
+                ),
+                context_compression_max_attempts=0,
+                output_repair_max_attempts=0,
+            ),
             model_adapter=LoggingModelAdapter(
                 log_path=log_path,
                 responses=("crash-safe answer",),
             ),
             context_provider=context_provider,
+            retry_policy=RetryPolicy(max_attempts=2),
         )
     )
 

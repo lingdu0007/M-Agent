@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Sequence
 from concurrent.futures import Future
 from typing import Any, TypeVar
 
 from ._resolution import RunResolution
+from ._history import ConversationMessage
 from ._run import RunInspection, RunRecord
 from ._runner import Runner
 
@@ -59,8 +60,24 @@ class SyncRunner:
     def owner(self) -> str:
         return self._runner.owner
 
-    def create_run(self, definition_id: str, version: str, input: str) -> RunRecord:
-        return self._call(self._runner.create_run(definition_id, version, input))
+    def create_run(
+        self,
+        definition_id: str,
+        version: str,
+        input: str,
+        *,
+        run_id: str | None = None,
+        history: Sequence[ConversationMessage] = (),
+    ) -> RunRecord:
+        return self._call(
+            self._runner.create_run(
+                definition_id,
+                version,
+                input,
+                run_id=run_id,
+                history=history,
+            )
+        )
 
     def start_run(self, run_id: str) -> RunRecord:
         return self._call(self._runner.start_run(run_id))

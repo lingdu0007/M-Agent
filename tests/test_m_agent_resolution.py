@@ -1,4 +1,4 @@
-"""Ticket 07：裁决不确定的非幂等通知副作用（ADR 0008 / PRD US 13, 37-42）。
+"""裁决不确定的非幂等通知副作用（ADR 0008）。
 
 核心安全故事：NON_IDEMPOTENT 通知的外部效果已经发生（journal 证据，
 独立于 RunStore），但 Tool Step checkpoint 未提交；第二进程恢复时
@@ -30,22 +30,17 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    FakeClock,
     FailureClassification,
     IllegalRunTransitionError,
-    InMemoryRunStore,
     LeaseNotHeldError,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     REASON_DEFINITION_UNAVAILABLE,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     ResolutionAction,
@@ -53,7 +48,6 @@ from m_agent import (
     Runner,
     RunResolution,
     RunStatus,
-    SQLiteRunStore,
     StaleRunVersionError,
     StepStatus,
     StepType,
@@ -64,8 +58,23 @@ from m_agent import (
     allowed_resolutions,
     deserialize_tool_outcome,
 )
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
-_TOOL_CALLING = ModelCapabilities(tool_calling=True)
+_TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 _WORKER = Path(__file__).parent / "fixtures" / "notification_worker.py"
 _CRASH_EXIT_CODE = 17
@@ -156,11 +165,11 @@ def build_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="support_agent",
             version="1.0",
             instructions="Notify the customer deterministically.",
-            required_capabilities=_TOOL_CALLING,
+            model_requirements=ModelRequirements(capabilities=_TOOL_CALLING),
             model_adapter=model,
             tools=(tool,),
         )

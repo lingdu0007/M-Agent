@@ -1,6 +1,6 @@
 # Live Model Adapter Contracts（Chat Completions 与 Responses）
 
-Ticket 10（Durable Run PRD User Stories 60–62）为 OpenAI 兼容的
+为 OpenAI 兼容的
 Chat Completions 与 Responses 风格 API 提供清晰的 live Model Adapter
 与凭证门控契约测试。本文档说明两个 Adapter 的**如实能力声明**、
 与确定性 fake 的区分、如何运行 live 契约测试，以及凭证安全边界。
@@ -13,35 +13,66 @@ Chat Completions 与 Responses 风格 API 提供清晰的 live Model Adapter
 
 | Adapter | 端点 | streaming | tool calling | native structured output | usage reporting |
 | --- | --- | --- | --- | --- | --- |
-| `ChatCompletionsModelAdapter` | `{base_url}/chat/completions` | ✅ | ✅ | ✅（`response_format` json_schema / json_object） | ✅（`prompt_tokens`/`completion_tokens`） |
-| `ResponsesModelAdapter` | `{base_url}{responses_path}`（默认 `/responses`） | ✅ | ✅ | ✅（`text.format` json_schema） | ✅（`input_tokens`/`output_tokens`） |
+| `ChatCompletionsModelAdapter` | `{base_url}/chat/completions` | ✅ | ✅ | ✅（`JSON_SCHEMA_STRICT`；显式配置可为 `JSON_OBJECT`） | ✅（`prompt_tokens`/`completion_tokens`） |
+| `ResponsesModelAdapter` | `{base_url}{responses_path}`（默认 `/responses`） | ✅ | ✅ | ✅（`JSON_SCHEMA_STRICT`，`text.format` json_schema） | ✅（`input_tokens`/`output_tokens`） |
 
 普通 text、streaming、tool calling 请求不携带 structured-output 参数。只有
-构造 Adapter 时显式提供 JSON Schema 才请求原生 structured output。Chat
-Completions 默认使用严格的 `json_schema`；仅支持原生 JSON object 的兼容
-端点必须显式配置
+冻结 Binding 的 Requirements 显式选择 `structured_output=JSON_SCHEMA_STRICT`
+或 `JSON_OBJECT`，才会发送原生 structured output；严格 schema 请求缺 Schema
+会在 dispatch 中以 `MODEL_CONTRACT_VIOLATION` 失败。Chat
+Completions 默认使用严格的 `json_schema`；仅支持原生 JSON object 的兼容端点必须显式配置
 `M_AGENT_OPENAI_CHAT_STRUCTURED_OUTPUT_MODE=json_object`（或构造器的同名
-`structured_output_mode`），这不是静默降级。
+`structured_output_mode`），它只满足 `JSON_OBJECT` Requirement，不能满足
+`JSON_SCHEMA_STRICT`，这不是静默降级。
 
-Adapter 的 model、净化后的 endpoint、timeout、structured-output schema 与
-Chat mode 只会形成不可逆的 configuration fingerprint，随
-`DefinitionSnapshot` 冻结。恢复时重新注册同一 definition/version 若
-fingerprint 不一致，会在任何网络或工具调用前失败，不能静默改变既有 Run
-的模型语义；fingerprint 不保存凭证、URL 或 schema 正文。所有 live
-adapter 都必须声明非空、稳定的 fingerprint，注册时会被校验。
+每个官方 Adapter 实例必须由集成者在构造时传入准确的
+`model_contract=ModelContract(...)`；在缺少该实例事实时，读取
+`model_contract` 或注册 Definition 会失败且不会发出网络请求。类能力仅是
+协议上限，不能被伪装成 deployment 的事实。这样未知 deployment 的 limits、
+revision stability、能力组合、Sizer 与 usage guarantee 不会被硬编码猜测，
+也不做 endpoint 自动探测或 live 验证。
+
+Contract 声明 model/deployment identity、limits、Sizer、serialization、字段级
+usage guarantee 和非敏感 `configuration_fingerprint`；Adapter 类的 capability
+常量只是协议上限，不能替代实例事实。`fingerprint` 是由 Contract
+identity/version、修订稳定性、能力组合、Limits、Sizer、serialization 与 usage
+guarantee 规范化计算的语义摘要，提供不相等的手写值会被拒绝。Contract 能力必须
+是 Adapter 类协议上限的真实交集，可以比类的能力更窄；Adapter 的 model、净化后
+的 endpoint、timeout、structured-output schema 与 Chat mode 形成的非敏感
+configuration fingerprint 必须等于实例 Contract 的
+`configuration_fingerprint`。不匹配或之后变化都会在 dispatch 前失败，不能静默
+改变既有 Run 的模型语义。
 
 能力声明（`capabilities`）是**如实声明**（ADR 0030）：声明为支持的能力
 才有契约案例；未声明的能力（本版本两者均无）绝不做静默降级。Runner
-只在声明支持时调用对应路径（如 `streaming=True` 才走 `stream()`），
+只在声明支持时调用对应路径（如 `streaming=DELTA` 才走 `stream()`），
 定义注册在**发出任何网络请求前**校验 required capabilities
-（`DefinitionRegistry.register` 抛 `ModelCapabilityError`）。
+（`DefinitionRegistry.register` 抛 `ModelCapabilityError`）。同时启用两个
+或以上 mode 的 Contract 必须在 `supported_combinations` 中逐项列出允许
+并发的组合；仅分别声明 mode 不表示它们可以一起 dispatch。注册和
+dispatch 都把未声明组合拒绝为零 provider request。
+
+Definition Snapshot 总是持久化完整的 `PRIMARY`、`CONTEXT_COMPRESSION` 与
+`OUTPUT_REPAIR` Model Binding Set。非 PRIMARY purpose 只有以
+`source_purpose=PRIMARY` 的显式引用才能复用 primary 的 Contract 和
+Requirements；缺少 purpose 不是隐式 reuse。Definition 顶层的 minimum
+requirements 会与 PRIMARY binding 的 requirements 取更严格的并集，显式
+binding 因此不能绕过 Agent 声明的能力或 Limits。
+
+直接构造 `AgentDefinition` 必须传入完整 `model_bindings`。只想复用同一
+Adapter 时，调用方必须在代码中明确选择
+`AgentDefinition.for_adapter(...)` 或 `ModelBindingSet.reuse_primary(...)`；
+两者都会冻结完整、可检查的 Binding Set。`streaming` 与 native structured
+output 都由该冻结 Requirements 决定，Contract 支持某一模式本身不会让
+Runner 隐式选择它。
 
 ## 与确定性 fake 的区分（禁止混淆）
 
-- `m_agent.DeterministicModelAdapter` / `DeterministicStreamingModelAdapter`
+- `m_agent.adapters.DeterministicModelAdapter` /
+  `DeterministicStreamingModelAdapter`
   是确定性 fake：`deterministic=True`，响应由构造参数决定，不访问任何
   网络，只用于测试、演示与离线示例。
-- `m_agent.provider.ChatCompletionsModelAdapter` /
+- `m_agent.adapters.provider.ChatCompletionsModelAdapter` /
   `ResponsesModelAdapter` 是 live 实现：`deterministic=False`，只有
   在调用方显式提供凭证后才会发出真实网络请求。
 - 契约测试通过 `m_agent` 公开 `Runner` seam（`create_run` →
@@ -60,8 +91,9 @@ adapter 都必须声明非空、稳定的 fingerprint，注册时会被校验。
 - Adapter 的错误是结构化 `m_agent.ModelFailure`（分类 +
   稳定错误码），消息只含 HTTP 状态 / 传输层类型，**不包含 provider
   错误 body**，从机制上杜绝凭证回显与内容审计。
-- 未配置凭证时 Adapter 可以构造与注册；任何网络请求都会以
-  `ModelFailure(PERMANENT, provider_credentials_missing)` 失败。
+- 未配置凭证时 Adapter 可以构造；提供显式实例 Contract 后可注册。任何
+  网络请求都会以 `ModelFailure(PERMANENT, provider_credentials_missing)`
+  失败。
 
 ## 安装与运行
 
@@ -78,6 +110,22 @@ uv pip install -e ".[dev,provider]"   # 或 pip install -e ".[dev,provider]"
 通过 `conftest.py` 排除 `@pytest.mark.live`；live TestCase 自身的
 `setUp` 还要求 `M_AGENT_RUN_LIVE_TESTS=1`，因此不依赖 pytest 才能保持
 安全。默认 CI 只运行离线测试。
+
+### 公共离线 fixture 与第三方 Adapter kit
+
+`m_agent.adapters.provider` 提供 `chat_completion_fixture`、`responses_fixture`、
+`chat_stream_fixture`、`responses_stream_fixture` 与
+`provider_error_fixture` / `malformed_response_fixture`。它们返回可显式注入 Adapter 构造器 `transport=` 的
+`OfflineProviderTransport`，覆盖正常、stream、provider error 和 malformed
+response 等确定性路径；fixture 本身不读取凭证、endpoint 或网络。其可观察
+request log 只保留 HTTP method，绝不保留 Authorization header、URL 或 request
+body，因此 credential/end-point/payload canary 的明文扫描能够检测回归。
+
+第三方 Adapter 可只依赖 `m_agent.runtime` 与
+`m_agent.testing.run_model_adapter_contract` 运行公共 Model Contract kit，
+不需要导入官方 provider Adapter 或其私有 HTTP 代码。该 kit 验证实例
+Contract/fingerprint 与一次可归一化响应，不把离线成功表述为 live provider
+验证。
 
 ### 显式运行 live 契约测试
 
@@ -122,7 +170,14 @@ compatibility 已验证。
 - **native structured output**：配置 JSON Schema，断言输出是符合
   Schema 的 JSON；
 - **usage reporting**：provider 返回 usage 时透传为 `ModelUsage`
-  （缺失时显式为 `None`，绝不伪造）；
+  （Adapter 缺失时显式为 `None`；Runner 将每个缺失 optional 字段持久化为
+  `UNAVAILABLE`，绝不伪造）。provider 映射还保留 `raw_unit` 与版本化
+  `normalization_source`（包括实际使用的 provider-field alias），使历史
+  用量可说明其标准化来源；Provider-reported 值缺少任一项会是
+  `MODEL_CONTRACT_VIOLATION`；
+- **actual revision**：每次成功响应中 provider 返回的 `model`/revision
+  会作为 `ModelResponse.actual_revision` 持久化为可检查的 Run 事实，尤其
+  用于标记为 `PROVIDER_ALIAS` 的 Contract；
 - **凭证隔离**：离线 `MockTransport` 的成功与 provider-failure case 使用
   sentinel 检查 SQLite 原始 bytes、Snapshot、Attempt、Checkpoint、Run
   Update 与 Telemetry 均不含凭证；真实 live 测试只检查环境是否已配置，

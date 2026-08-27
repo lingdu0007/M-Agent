@@ -1,6 +1,6 @@
-"""Ticket 02/04 跨进程崩溃恢复测试。
+"""跨进程崩溃恢复测试。
 
-Ticket 02 验收要求：
+验收要求：
 
 - 崩溃测试启动真实子进程（``os._exit`` 硬退出），不以同进程异常冒充
   进程状态丢失；
@@ -11,9 +11,10 @@ Ticket 02 验收要求：
 - 模型实际调用次数以跨进程日志文件为硬证据；
 - 精确 Definition 缺失 -> WAITING / DEFINITION_UNAVAILABLE，绝不使用
   最新版本；
-- 恢复语义记录并验证为 at-least-once（checkpoint 前崩溃会重新执行）。
+- Context、Model 与可安全重放 Tool 的 checkpoint 前中断保持
+  at-least-once；Model 重放创建新的、受冻结预算约束的 Attempt。
 
-Ticket 04 追加验收（:class:`ContextCrossProcessResumeTests`）：
+追加验收（:class:`ContextCrossProcessResumeTests`）：
 
 - Context Step checkpoint 后崩溃：第二进程复用原始 Context Items，
   provider 不再被调用（跨进程日志为硬证据）、外部数据变化不重写；
@@ -35,23 +36,31 @@ _TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from m_agent import (
+from m_agent.runtime import (
     DEFAULT_LEASE_TTL,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    FakeClock,
     IllegalRunTransitionError,
-    InMemoryRunStore,
-    PlaintextPayloadCodec,
     REASON_DEFINITION_UNAVAILABLE,
     RunNotFoundError,
     Runner,
     RunStatus,
-    SQLiteRunStore,
     StepType,
     deserialize_model_response,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
 )
 
 from fixtures.crash_worker import LoggingContextProvider, LoggingModelAdapter
@@ -67,7 +76,7 @@ def build_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version=version,
             instructions=f"Answer deterministically ({version}).",
@@ -90,7 +99,7 @@ async def open_resume_store(
 ) -> tuple[SQLiteRunStore, FakeClock]:
     """重开数据库并返回恢复 store + 已越过崩溃遗留租约过期点的时钟。
 
-    Ticket 03 语义（ADR 0013）：崩溃进程的租约在 TTL 内仍有效，恢复
+    语义（ADR 0013）：崩溃进程的租约在 TTL 内仍有效，恢复
     Runner 必须等租约过期才能接管。本 helper 读取崩溃后持久化的
     ``lease_expires_at``，把 :class:`FakeClock` 确定性推进到过期之后，
     避免用真实 sleep 等待。
@@ -201,7 +210,7 @@ class CrashAfterCheckpointResumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(inspection.steps), 1)
                 self.assertEqual(len(inspection.attempts), 1)
                 self.assertEqual(len(inspection.checkpoints), 1)
-                # Ticket 05：checkpoint 携带完整序列化响应，内容可还原。
+                # checkpoint 携带完整序列化响应，内容可还原。
                 self.assertEqual(
                     deserialize_model_response(
                         inspection.checkpoints[0].output
@@ -211,11 +220,11 @@ class CrashAfterCheckpointResumeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
-    async def test_crash_before_checkpoint_reinvokes_model_at_least_once(
+    async def test_crash_before_checkpoint_replays_model_with_budget(
         self,
     ) -> None:
-        # at-least-once：模型结果落盘前崩溃 -> 恢复时重新执行模型。
-        # 绝不宣称 exactly-once。
+        # Model reservation 已落盘但 checkpoint 缺失：恢复保留未确认
+        # Attempt 的 machine-readable evidence，并以新的 Attempt 重放。
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "run.db")
             log = os.path.join(tmp, "model_calls.log")
@@ -232,9 +241,12 @@ class CrashAfterCheckpointResumeTests(unittest.IsolatedAsyncioTestCase):
                 runner = Runner(registry=registry, store=store)
                 terminal = await runner.resume_run(run_id)
                 self.assertEqual(terminal.status, RunStatus.SUCCEEDED)
-                # 第一次执行无 checkpoint 可复用 -> 重新执行（第二次调用）。
+                self.assertEqual(terminal.output, "crash-safe answer")
                 self.assertEqual(adapter.call_count, 1)
                 self.assertEqual(count_model_calls(log), 2)
+                inspection = await runner.inspect_run(run_id)
+                self.assertEqual(len(inspection.attempts), 2)
+                self.assertEqual(len(inspection.checkpoints), 1)
             finally:
                 store.close()
 
@@ -278,7 +290,7 @@ class DefinitionUnavailableTests(unittest.IsolatedAsyncioTestCase):
                 # 应用恢复精确旧版本后，普通公开 resume 才重新进入
                 # recovery 路径；无需也不得通过 resolution 伪造 Tool 处置。
                 registry.register(
-                    AgentDefinition(
+                    AgentDefinition.for_adapter(
                         definition_id="assistant",
                         version="1.0",
                         instructions="Answer deterministically (1.0).",
@@ -374,7 +386,7 @@ class ResumeContractTests(unittest.IsolatedAsyncioTestCase):
     ) -> tuple[Runner, DefinitionRegistry, InMemoryRunStore]:
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="Answer deterministically.",
@@ -458,7 +470,7 @@ class ResumeContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ContextCrossProcessResumeTests(unittest.IsolatedAsyncioTestCase):
-    """Ticket 04 跨进程：Context Step checkpoint 后崩溃，恢复复用 Items。
+    """跨进程：Context Step checkpoint 后崩溃，恢复复用 Items。
 
     第一进程带 Context Provider 执行并在 ``after_context_checkpoint``
     确定性崩溃；第二进程打开同一 SQLite、解析同一精确 Definition，

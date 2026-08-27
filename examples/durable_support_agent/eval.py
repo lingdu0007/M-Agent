@@ -1,4 +1,4 @@
-"""Durable Support Agent 确定性 Eval（Ticket 11 / ADR 0029，离线可重复）。
+"""Durable Support Agent 确定性 Eval（ADR 0029，离线可重复）。
 
 Eval 是 **Runtime Companion**：它不参与 Runner 核心循环，只通过公开
 产物（``Runner.inspect_run`` 等只读查询路径读取权威 RunStore）与 fake
@@ -6,7 +6,7 @@ external evidence（notify / ticket-update journal、model_request.log、
 provider.log、recovery_evidence.json）验证旗舰场景的确定性验收，报告
 写入 **RunStore 之外的独立目录**。
 
-验收检查（对照 Ticket 11 Acceptance criteria）：
+验收检查（对照 Acceptance criteria）：
 
 1. ``context_items_checkpointed``：ticket 与 policy Context Item 以带
    身份 / 内容 / 来源 / 元数据的结构保留在 Context Step checkpoint；
@@ -56,22 +56,30 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from m_agent import (
+from m_agent.runtime import (
     ALLOWED_FOR_UNCERTAIN_NON_IDEMPOTENT,
     ERROR_EFFECT_UNCONFIRMED,
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     ContextItem,
     DefinitionRegistry,
     FailureClassification,
-    PlaintextPayloadCodec,
     RunNotFoundError,
     RunStatus,
-    Runner,
+Runner,
+StepStatus,
+StepType,
+ToolEffect,
+context_items_from_payload,
+deserialize_tool_outcome,
+)
+from m_agent.adapters import (
+    PlaintextPayloadCodec,
     SQLiteRunStore,
-    StepStatus,
-    StepType,
-    ToolEffect,
-    deserialize_tool_outcome,
+)
+from m_agent import (
+    DefinitionRegistry,
+    RunStatus,
+    Runner,
 )
 
 from support_agent import (
@@ -84,7 +92,7 @@ from support_agent import (
     journal_count,
 )
 
-#: 期望的 Step 类型轨迹（对照 Ticket 11 AC 4）。
+#: 期望的 Step 类型轨迹（对照 AC 4）。
 EXPECTED_TRAJECTORY = [
     "CONTEXT",
     "MODEL",
@@ -350,10 +358,11 @@ async def evaluate(
             )
         else:
             try:
-                checkpointed_context_items = [
-                    ContextItem.model_validate(obj)
-                    for obj in json.loads(context_ckpts[0].output)
-                ]
+                # T14（ADR 0040）：Checkpoint 载荷是 ContextStageResult
+                # envelope；公开 seam 同时兼容 0.3 裸 Item 列表载荷。
+                checkpointed_context_items = list(
+                    context_items_from_payload(context_ckpts[0].output)
+                )
             except (json.JSONDecodeError, TypeError, ValueError):
                 checkpointed_context_items = []
             item_ids = [i.item_id for i in checkpointed_context_items]
@@ -405,7 +414,7 @@ async def evaluate(
             )
         )
 
-        # -- 3. Provider not refetched on resume（AC 6 / Ticket 04） --
+        # -- 3. Provider not refetched on resume（AC 6） --
         provider_lines = _read_lines(os.path.join(logs_dir, "provider.log"))
         checks.append(
             Check(
@@ -488,7 +497,7 @@ async def evaluate(
 
         # -- 7. Uncertain non-idempotent effect recorded（AC 5/9） -----
         # ERROR_EFFECT_UNCONFIRMED 是 Tool Step 专属的机器可读错误标识
-        # （Ticket 07：恢复时未确认的 NON_IDEMPOTENT 调用）。
+        # 。
         uncertain = [
             a for a in attempts if a.error_code == ERROR_EFFECT_UNCONFIRMED
         ]

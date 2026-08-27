@@ -1,4 +1,4 @@
-"""Ticket 02 的受保护 Payload 跨进程测试 worker。"""
+"""的受保护 Payload 跨进程测试 worker。"""
 
 from __future__ import annotations
 
@@ -13,34 +13,41 @@ _SRC = os.path.abspath(
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from m_agent import (  # noqa: E402
+from m_agent.runtime import (
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    FakeClock,
     ModelRequest,
     ModelResponse,
     PayloadCodec,
     Runner,
+)
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    FakeClock,
     SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
 )
 
 _CRASH_EXIT_CODE = 17
-_PREFIX = b"ticket02-sentinel:"
+_PREFIX = b"protected-payload-sentinel:"
 
 
 class SentinelPayloadCodec(PayloadCodec):
     """可逆但非恒等的测试 Codec，避免 sentinel 以原样进入 SQLite。"""
 
-    name = "ticket02-sentinel"
+    name = "protected-payload-sentinel"
 
     def encode(self, payload: str) -> bytes:
         return _PREFIX + bytes(byte ^ 0xA5 for byte in payload.encode("utf-8"))
 
     def decode(self, encoded: bytes) -> str:
         if not encoded.startswith(_PREFIX):
-            raise ValueError("unexpected Ticket 02 test payload encoding")
+            raise ValueError("unexpected test payload encoding")
         return bytes(byte ^ 0xA5 for byte in encoded[len(_PREFIX) :]).decode(
             "utf-8"
         )
@@ -62,7 +69,7 @@ class LoggingModelAdapter(DeterministicModelAdapter):
 def _registry(log_path: str, instructions: str, response: str) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="sentinel-assistant",
             version="1.0",
             instructions=instructions,

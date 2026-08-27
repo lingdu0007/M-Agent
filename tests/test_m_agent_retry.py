@@ -1,4 +1,4 @@
-"""Ticket 06 主行为测试：结构化失败分类与有界 Retry Policy 恢复。
+"""主行为测试：结构化失败分类与有界 Retry Policy 恢复。
 
 验收要求（.scratch/durable-run/issues/06-bounded-retry.md）：
 
@@ -17,8 +17,8 @@
 - 所有断言通过公开 Runner API（inspect_run / get_run）检查 attempt
   identifiers 与 stored outcomes，不断言私有循环细节（AC 9）。
 
-不在本 Ticket 实现四种应用 resolution；UNCERTAIN NON_IDEMPOTENT
-路径只安全停住（WAITING + 机器可读 reason），为 Ticket 07 留状态。
+不在本版本 实现四种应用 resolution；UNCERTAIN NON_IDEMPOTENT
+路径只安全停住（WAITING + 机器可读 reason），为 留状态。
 """
 
 from __future__ import annotations
@@ -28,26 +28,20 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-from m_agent import (
+from m_agent.runtime import (
     REASON_UNCERTAIN_NON_IDEMPOTENT,
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
     FailureClassification,
-    FakeClock,
-    InMemoryRunStore,
     ModelCapabilities,
     ModelFailure,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RetryPolicy,
     Runner,
     RunRecord,
     RunStatus,
-    SQLiteRunStore,
     StepStatus,
     StepType,
     ToolCall,
@@ -56,8 +50,24 @@ from m_agent import (
     ToolOutcome,
     ToolRequest,
 )
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunRecord,
+    RunStatus,
+)
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
-TOOL_CALLING = ModelCapabilities(tool_calling=True)
+TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 
 # -- fake 模型（确定性，结构化失败分类） --------------------------------
@@ -161,7 +171,7 @@ class RequestToolModel(DeterministicModelAdapter):
         self.call_count += 1
         self._last_request = request
         self.requests.append(request)
-        if self.call_count == 1:
+        if not request.tool_outcomes:
             return ModelResponse(
                 tool_calls=(
                     ToolCall(
@@ -277,11 +287,13 @@ def make_runner(
 ) -> tuple[Runner, DefinitionRegistry, InMemoryRunStore | SQLiteRunStore]:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=(TOOL_CALLING if tools else ModelCapabilities()),
+            model_requirements=ModelRequirements(
+                capabilities=(TOOL_CALLING if tools else ModelCapabilities())
+            ),
             model_adapter=model,
             tools=tools,
             retry_policy=retry_policy,
@@ -425,11 +437,10 @@ class ModelRetryTests(unittest.IsolatedAsyncioTestCase):
 
         # "运行中修改 Agent Definition"：注册同 id 新版本，策略改为 1 次。
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="2.0",
                 instructions="changed",
-                required_capabilities=ModelCapabilities(),
                 model_adapter=DeterministicModelAdapter(responses=("x",)),
                 retry_policy=RetryPolicy(max_attempts=1),
             )
@@ -502,7 +513,7 @@ class ToolRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_uncertain_non_idempotent_never_replayed(self) -> None:
         # AC 7：UNCERTAIN + NON_IDEMPOTENT Tool Step 绝不自动重放——
         # 即使配置了策略也进入 WAITING，工具只调用一次，等待应用处置
-        # （Ticket 07）；无自动重放 = 无重复外部副作用。
+        # ；无自动重放 = 无重复外部副作用。
         tool = UncertainTool(effect=ToolEffect.NON_IDEMPOTENT)
         model = RequestUncertainToolModel()
         runner, _, _ = make_runner(
@@ -517,7 +528,7 @@ class ToolRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool.call_count, 1)  # 无自动重放证据
         self.assertEqual(model.call_count, 1)  # 无后续模型调用
         inspection = await runner.inspect_run(created.run_id)
-        # WAITING 时 Step 未完成（无 StepRecord，Ticket 07 处置后补齐），
+        # WAITING 时 Step 未完成（无 StepRecord，处置后补齐），
         # 失败证据直接来自 Attempt 记录。
         failed = [a for a in inspection.attempts if a.status is StepStatus.FAILED]
         self.assertEqual(len(failed), 1)
@@ -879,7 +890,10 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             try:
-                recovered_model = TransientThenSuccessModel(transient_failures=0)
+                recovered_model = TransientThenSuccessModel(transient_failures=1)
+                # The fake's configured behavior is frozen; only its
+                # test-observation counter reflects the prior process call.
+                recovered_model.call_count = 1
                 recovered_runner, _, _ = make_runner(
                     recovered_model,
                     retry_policy=RetryPolicy(max_attempts=2),
@@ -888,7 +902,7 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 terminal = await recovered_runner.resume_run(created.run_id)
 
                 self.assertEqual(terminal.status, RunStatus.SUCCEEDED)
-                self.assertEqual(first_model.call_count + recovered_model.call_count, 2)
+                self.assertEqual(len(recovered_model.requests), 1)
                 recovered = await recovered_runner.inspect_run(created.run_id)
                 recovered_steps = [
                     step for step in recovered.steps if step.step_type is StepType.MODEL
@@ -1023,7 +1037,7 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 clock=FakeClock(start=lease_expires_at + timedelta(seconds=1)),
             )
             try:
-                recovered_model = TransientThenSuccessModel(transient_failures=0)
+                recovered_model = TransientThenSuccessModel(transient_failures=1)
                 runner, _, _ = make_runner(
                     recovered_model,
                     # 第二进程试图放宽策略也不能影响原 Run。
@@ -1058,7 +1072,10 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 clock=FakeClock(start=lease_expires_at + timedelta(seconds=1)),
             )
             try:
-                recovered_model = TransientThenSuccessModel(transient_failures=0)
+                recovered_model = TransientThenSuccessModel(transient_failures=1)
+                # Preserve the fake's first-process observation without
+                # changing its frozen behavior configuration.
+                recovered_model.call_count = 1
                 runner, _, _ = make_runner(
                     recovered_model,
                     retry_policy=RetryPolicy(max_attempts=1),
@@ -1067,7 +1084,7 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                 terminal = await runner.resume_run(run_id)
 
                 self.assertEqual(terminal.status, RunStatus.SUCCEEDED)
-                self.assertEqual(recovered_model.call_count, 1)
+                self.assertEqual(len(recovered_model.requests), 1)
                 inspection = await runner.inspect_run(run_id)
                 attempts = [
                     attempt
@@ -1145,7 +1162,7 @@ class RetryWithSQLiteTests(unittest.IsolatedAsyncioTestCase):
                     effect=ToolEffect.READ_ONLY,
                 )
                 recovered_runner, _, _ = make_runner(
-                    TransientThenSuccessModel(transient_failures=0),
+                    RequestToolModel(),
                     tools=(recovered_tool,),
                     retry_policy=RetryPolicy(max_attempts=1),
                     store=recovered_store,

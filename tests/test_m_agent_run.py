@@ -1,4 +1,4 @@
-"""Ticket 01 主行为测试：只通过公开异步 Runner 的注册、创建、启动与
+"""主行为测试：只通过公开异步 Runner 的注册、创建、启动与
 查询路径驱动，断言外部可观测的 Run 记录、状态、Step Attempt 与
 Checkpoint，不触碰内部实现细节。
 """
@@ -7,20 +7,17 @@ from __future__ import annotations
 
 import unittest
 
-from m_agent import (
+from m_agent.runtime import (
     AgentDefinition,
     DefinitionConflictError,
     DefinitionNotFoundError,
     DefinitionRegistry,
-    DeterministicModelAdapter,
     IllegalRunTransitionError,
-    InMemoryRunStore,
     ModelAdapter,
     ModelCapabilities,
     ModelCapabilityError,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     RunNotFoundError,
     Runner,
     RunStatus,
@@ -29,16 +26,34 @@ from m_agent import (
     deserialize_model_response,
     is_terminal,
 )
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    InMemoryRunStore,
+    PlaintextPayloadCodec,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+    RunStatus,
+)
+from m_agent.runtime import (
+    ModelCapabilityCombination,
+    ModelPurpose,
+    ModelRequirements,
+    StreamingMode,
+    StructuredOutputMode,
+    ToolCallingMode,
+)
 
 
 def make_registry() -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="Answer deterministically.",
-            required_capabilities=ModelCapabilities(),
             model_adapter=DeterministicModelAdapter(
                 responses=("deterministic answer",)
             ),
@@ -111,7 +126,7 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
     def test_register_and_resolve_by_exact_id_and_version(self) -> None:
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="v1 instructions",
@@ -119,7 +134,7 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="2.0",
                 instructions="v2 instructions",
@@ -143,7 +158,7 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         registry = DefinitionRegistry()
-        definition = AgentDefinition(
+        definition = AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="v1",
@@ -159,12 +174,21 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
         adapter = DeterministicModelAdapter(
             responses=("a",), capabilities=ModelCapabilities()
         )
-        definition = AgentDefinition(
+        definition = AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="v1",
-            required_capabilities=ModelCapabilities(
-                streaming=True, tool_calling=True
+            model_requirements=ModelRequirements(
+                capabilities=ModelCapabilities(
+                    streaming=StreamingMode.DELTA,
+                    tool_calling=ToolCallingMode.NATIVE,
+                    supported_combinations=(
+                        ModelCapabilityCombination(
+                            streaming=StreamingMode.DELTA,
+                            tool_calling=ToolCallingMode.NATIVE,
+                        ),
+                    ),
+                )
             ),
             model_adapter=adapter,
         )
@@ -178,15 +202,33 @@ class DefinitionRegistryTests(unittest.IsolatedAsyncioTestCase):
         adapter = DeterministicModelAdapter(
             responses=("a",),
             capabilities=ModelCapabilities(
-                streaming=True, tool_calling=True, structured_output=True
+                streaming=StreamingMode.DELTA,
+                tool_calling=ToolCallingMode.NATIVE,
+                structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+                supported_combinations=(
+                    ModelCapabilityCombination(
+                        streaming=StreamingMode.DELTA,
+                        tool_calling=ToolCallingMode.NATIVE,
+                        structured_output=StructuredOutputMode.JSON_SCHEMA_STRICT,
+                    ),
+                ),
             ),
         )
-        definition = AgentDefinition(
+        definition = AgentDefinition.for_adapter(
             definition_id="assistant",
             version="1.0",
             instructions="v1",
-            required_capabilities=ModelCapabilities(
-                streaming=True, tool_calling=True
+            model_requirements=ModelRequirements(
+                capabilities=ModelCapabilities(
+                    streaming=StreamingMode.DELTA,
+                    tool_calling=ToolCallingMode.NATIVE,
+                    supported_combinations=(
+                        ModelCapabilityCombination(
+                            streaming=StreamingMode.DELTA,
+                            tool_calling=ToolCallingMode.NATIVE,
+                        ),
+                    ),
+                )
             ),
             model_adapter=adapter,
         )
@@ -207,7 +249,8 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         created = await runner.create_run("assistant", "1.0", input="hi")
         self.assertEqual(created.status, RunStatus.CREATED)
         self.assertFalse(created.status.is_terminal)
-        self.assertIsNone(created.snapshot)  # 启动时才冻结
+        self.assertIsNotNone(created.snapshot) # 创建时冻结
+        self.assertEqual(created.snapshot.definition_id, "assistant")
         self.assertEqual(adapter.call_count, 0)
 
         stored = await runner.get_run(created.run_id)
@@ -238,11 +281,14 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
             terminal.snapshot.instructions, definition.instructions
         )
         self.assertEqual(
-            terminal.snapshot.required_capabilities,
-            definition.required_capabilities,
+            terminal.snapshot.model_bindings.for_purpose(ModelPurpose.PRIMARY).requirements,
+            definition.model_requirements,
         )
         self.assertEqual(
-            terminal.snapshot.adapter_capabilities, adapter.capabilities
+            terminal.snapshot.model_bindings.for_purpose(
+                ModelPurpose.PRIMARY
+            ).contract.capabilities,
+            adapter.model_contract.capabilities,
         )
         self.assertEqual(adapter.call_count, 1)
         # 模型请求携带 Definition 的 Agent Instruction。
@@ -267,7 +313,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         attempt = inspection.attempts[0]
         self.assertEqual(attempt.step_id, step.step_id)
         self.assertEqual(attempt.status, StepStatus.SUCCEEDED)
-        # Ticket 05：Model Step 的 Attempt/Checkpoint 携带完整序列化
+        # Model Step 的 Attempt/Checkpoint 携带完整序列化
         # 响应（含 tool_calls），供恢复精确重建执行位置；内容可还原。
         self.assertEqual(
             deserialize_model_response(attempt.output).content,
@@ -308,7 +354,7 @@ class RunnerLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         registry = DefinitionRegistry()
         registry.register(
-            AgentDefinition(
+            AgentDefinition.for_adapter(
                 definition_id="assistant",
                 version="1.0",
                 instructions="x",

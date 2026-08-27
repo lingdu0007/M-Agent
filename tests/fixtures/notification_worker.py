@@ -1,4 +1,4 @@
-"""Ticket 07 确定性崩溃 / 恢复 / resolution 子进程（仅测试用）。
+"""确定性崩溃 / 恢复 / resolution 子进程（仅测试用）。
 
 核心场景：NON_IDEMPOTENT 通知工具把外部效果写入**独立于 RunStore 的
 journal 文件**（副作用证据，重复执行即可观测），进程在 Tool Step
@@ -36,29 +36,37 @@ _SRC = os.path.abspath(
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from m_agent import (  # noqa: E402
+from m_agent.runtime import (
     AgentDefinition,
     CrashPoint,
     DefinitionRegistry,
-    DeterministicModelAdapter,
-    DeterministicTool,
-    FakeClock,
     ModelCapabilities,
     ModelRequest,
     ModelResponse,
-    PlaintextPayloadCodec,
     ResolutionAction,
     RunResolution,
     Runner,
-    SQLiteRunStore,
     ToolCall,
     ToolEffect,
     ToolOutcome,
     allowed_resolutions,
 )
+from m_agent.adapters import (
+    DeterministicModelAdapter,
+    DeterministicTool,
+    FakeClock,
+    PlaintextPayloadCodec,
+    SQLiteRunStore,
+)
+from m_agent import (
+    AgentDefinition,
+    DefinitionRegistry,
+    Runner,
+)
+from m_agent.runtime import ModelRequirements, ToolCallingMode
 
 _CRASH_EXIT_CODE = 17
-_TOOL_CALLING = ModelCapabilities(tool_calling=True)
+_TOOL_CALLING = ModelCapabilities(tool_calling=ToolCallingMode.NATIVE)
 
 
 def journal_count(path: str) -> int:
@@ -78,7 +86,7 @@ class JournalNotifier(DeterministicTool):
     """NON_IDEMPOTENT fake 通知：把效果追加到外部 journal 文件。
 
     副作用证据存在 RunStore 之外的 journal（每次调用追加一行），
-    因此重复执行可被确定性观测——这正是 Ticket 07 的核心证据。
+    因此重复执行可被确定性观测——这正是 的核心证据。
     """
 
     deterministic: bool = True
@@ -133,11 +141,11 @@ def build_registry(
 ) -> DefinitionRegistry:
     registry = DefinitionRegistry()
     registry.register(
-        AgentDefinition(
+        AgentDefinition.for_adapter(
             definition_id="support_agent",
             version="1.0",
             instructions="Notify the customer deterministically.",
-            required_capabilities=_TOOL_CALLING,
+            model_requirements=ModelRequirements(capabilities=_TOOL_CALLING),
             model_adapter=NotifyThenAnswerModel(model_journal_path),
             tools=(JournalNotifier(journal_path),),
         )
