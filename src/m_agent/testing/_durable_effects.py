@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
 from ..adapters import (
@@ -170,7 +170,12 @@ def _hard_exit_child(
             runner = Runner(
                 _registry(window, journal_path, sentinel_path, crash=True),
                 store,
-                lease_ttl=timedelta(milliseconds=500),
+                # Short enough that the parent's takeover wait stays brief,
+                # yet long enough that a loaded CI runner cannot outlive it
+                # between two guarded operations inside ``start_run``: a
+                # 500 ms lease raced and aborted the child with
+                # LeaseNotHeldError before it ever reached its crash window.
+                lease_ttl=timedelta(seconds=5),
             )
             created = await runner.create_run("durable-effects", "0.3", "recover")
             Path(run_id_file).write_text(created.run_id, encoding="utf-8")
@@ -205,6 +210,35 @@ def reconcile_recovery_window(
     return problems
 
 
+async def _await_lease_expiry(database: Path, run_id: str) -> None:
+    """阻塞到崩溃子进程的租约真正过期（接管的前置条件）。
+
+    接管语义要求旧 owner 的租约过期后才允许公共路径接管；轮询权威
+    Store 里的真实过期时刻取代对时序的固定 sleep 猜测，因此子进程
+    自身的租约可以放宽到慢 CI runner 也安全，而不必把每一次重复
+    都拖满整个 TTL。
+    """
+    store = SQLiteRunStore(database, payload_codec=PlaintextPayloadCodec())
+    try:
+        deadline = time.monotonic() + 30.0
+        while True:
+            run = await store.get_run(run_id)
+            expires = run.lease_expires_at if run is not None else None
+            if expires is None:
+                return
+            remaining = (expires - datetime.now(timezone.utc)).total_seconds()
+            if remaining <= 0:
+                time.sleep(0.05)
+                return
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"run {run_id} lease did not expire within 30s"
+                )
+            time.sleep(min(remaining + 0.05, 0.25))
+    finally:
+        store.close()
+
+
 async def _recover_once(window: str, repetition: int, directory: Path) -> tuple[dict, dict]:
     database = directory / f"{window}-{repetition}.sqlite3"
     journal = directory / f"{window}-{repetition}.journal.jsonl"
@@ -230,11 +264,16 @@ async def _recover_once(window: str, repetition: int, directory: Path) -> tuple[
         text=True,
     )
     if child.returncode != _CHILD_EXIT or not sentinel.is_file() or not run_id_file.is_file():
-        raise RuntimeError(f"recovery child did not reach {window}")
-    # The child owns a short real lease.  Reopen only after it has expired so
-    # recovery demonstrates the normal public takeover path.
-    time.sleep(0.6)
+        raise RuntimeError(
+            f"recovery child did not reach {window} "
+            f"(exit={child.returncode}, "
+            f"stderr tail: {child.stderr[-2000:]!r})"
+        )
     run_id = run_id_file.read_text(encoding="utf-8")
+    # The child owns a real lease; only its authoritative expiry authorizes
+    # the public takeover below, so wait for the store's own expiry instant
+    # instead of guessing a fixed sleep that assumes a fixed runner speed.
+    await _await_lease_expiry(database, run_id)
     store = SQLiteRunStore(database, payload_codec=PlaintextPayloadCodec())
     try:
         runner = Runner(
