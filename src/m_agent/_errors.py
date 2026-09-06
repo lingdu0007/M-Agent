@@ -39,6 +39,12 @@ class DuplicateRunError(MAgentError):
     """run_id 已存在，禁止重复创建。"""
 
 
+class RunStoreIntegrityError(MAgentError):
+    """Persisted Run ownership is inconsistent or its schema is unsupported."""
+
+    code = "RUN_STORE_INTEGRITY_ERROR"
+
+
 class IllegalRunTransitionError(MAgentError):
     """请求的 Run 生命周期转换在当前状态下不合法。"""
 

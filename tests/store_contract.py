@@ -272,6 +272,46 @@ class RunStoreContractMixin:
         self.assertEqual([c.step_id for c in checkpoints], ["step-1"])
         self.assertEqual(checkpoints[0].output, "deterministic answer")
 
+    async def test_equal_step_and_attempt_ids_are_isolated_by_run(self) -> None:
+        store = self.make_store()
+        originals = {}
+        for run_id in ("run-a", "run-b"):
+            run = await store.create_run(created_record(run_id))
+            step = StepRecord(
+                run_id=run_id,
+                step_id="shared-step",
+                step_type=StepType.CONTEXT,
+                status=StepStatus.SUCCEEDED,
+            )
+            attempt = StepAttempt(
+                run_id=run_id,
+                step_id=step.step_id,
+                attempt_id="shared-attempt",
+                status=StepStatus.SUCCEEDED,
+                output=f"context for {run_id}",
+                error=f"diagnostic for {run_id}",
+            )
+            checkpoint = StepCheckpoint(
+                run_id=run_id,
+                step_id=step.step_id,
+                attempt_id=attempt.attempt_id,
+                step_type=StepType.CONTEXT,
+                output=attempt.output,
+            )
+            await store.record_step(step, expected_version=run.version)
+            await store.record_attempt(attempt, expected_version=run.version)
+            await store.record_checkpoint(checkpoint, expected_version=run.version)
+            originals[run_id] = ([step], [attempt], [checkpoint])
+        for run_id, expected in originals.items():
+            self.assertEqual(
+                (
+                    await store.get_steps(run_id),
+                    await store.get_attempts(run_id),
+                    await store.get_checkpoints(run_id),
+                ),
+                expected,
+            )
+
     async def test_inflight_step_and_attempt_update_by_stable_identity(
         self,
     ) -> None:

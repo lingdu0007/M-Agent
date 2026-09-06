@@ -37,6 +37,7 @@ from .._errors import (
     DuplicateRunError,
     LeaseNotHeldError,
     RunNotFoundError,
+    RunStoreIntegrityError,
     StaleRunVersionError,
 )
 from .._run import RunRecord
@@ -93,33 +94,6 @@ CREATE TABLE IF NOT EXISTS run_payloads (
     encoded BLOB NOT NULL,
     PRIMARY KEY (run_id, field)
 );
-CREATE TABLE IF NOT EXISTS steps (
-    step_id    TEXT PRIMARY KEY,
-    run_id     TEXT NOT NULL,
-    step_type  TEXT NOT NULL,
-    status     TEXT NOT NULL,
-    error_code TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS step_attempts (
-    attempt_id TEXT PRIMARY KEY,
-    step_id    TEXT NOT NULL,
-    run_id     TEXT NOT NULL,
-    status     TEXT NOT NULL,
-    error      TEXT,
-    classification TEXT,
-    error_code TEXT,
-    model_purpose TEXT,
-    usage_json TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS step_checkpoints (
-    step_id    TEXT PRIMARY KEY,
-    run_id     TEXT NOT NULL,
-    attempt_id TEXT NOT NULL,
-    step_type  TEXT NOT NULL DEFAULT 'MODEL',
-    created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS policy_decisions (
     run_id TEXT NOT NULL,
     gate TEXT NOT NULL,
@@ -132,6 +106,41 @@ CREATE TABLE IF NOT EXISTS policy_decisions (
     created_at TEXT NOT NULL
 );
 """
+
+_STEP_SCHEMAS = {
+    "steps": """CREATE TABLE IF NOT EXISTS steps (
+    step_id    TEXT NOT NULL,
+    run_id     TEXT NOT NULL,
+    step_type  TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, step_id)
+);""",
+    "step_attempts": """CREATE TABLE IF NOT EXISTS step_attempts (
+    attempt_id TEXT NOT NULL,
+    step_id    TEXT NOT NULL,
+    run_id     TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    error      TEXT,
+    classification TEXT,
+    error_code TEXT,
+    model_purpose TEXT,
+    usage_json TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, attempt_id)
+);""",
+    "step_checkpoints": """CREATE TABLE IF NOT EXISTS step_checkpoints (
+    step_id    TEXT NOT NULL,
+    run_id     TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    step_type  TEXT NOT NULL DEFAULT 'MODEL',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, step_id)
+);""",
+}
+
+_SCHEMA_VERSION = 1
 
 
 def _run_from_row(row: sqlite3.Row) -> _StoredRun:
@@ -210,9 +219,118 @@ class SQLiteRunStore:
         self._clock = clock if clock is not None else SystemClock()
         self._conn = sqlite3.connect(self._path, timeout=30)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._migrate()
-        self._conn.commit()
+        try:
+            # executescript commits any existing transaction; begin inside the
+            # script so schema creation, validation and migration stay atomic.
+            self._conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA)
+            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, _SCHEMA_VERSION):
+                raise RunStoreIntegrityError(
+                    "SQLite RunStore integrity: unsupported schema version"
+                )
+            for schema in _STEP_SCHEMAS.values():
+                self._conn.execute(schema)
+            self._migrate()
+            self._migrate_run_scoped_identities()
+            if version != _SCHEMA_VERSION:
+                self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            self._conn.close()
+            raise
+
+    def _migrate_run_scoped_identities(self) -> None:
+        legacy_tables = []
+        for table in _STEP_SCHEMAS:
+            columns = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            primary_key = tuple(
+                row["name"]
+                for row in sorted(columns, key=lambda row: row["pk"])
+                if row["pk"]
+            )
+            identity = "attempt_id" if table == "step_attempts" else "step_id"
+            if primary_key == (identity,):
+                legacy_tables.append(table)
+            elif primary_key != ("run_id", identity):
+                raise RunStoreIntegrityError(
+                    "SQLite RunStore integrity: unsupported identity schema"
+                )
+        if not legacy_tables:
+            return
+        self._validate_legacy_ownership()
+        for table in legacy_tables:
+            custom_objects = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE tbl_name=? "
+                "AND type='trigger'",
+                (table,),
+            ).fetchone()
+            custom_indexes = any(
+                row["origin"] != "pk"
+                for row in self._conn.execute(f"PRAGMA index_list({table})")
+            )
+            if custom_objects is not None or custom_indexes:
+                raise RunStoreIntegrityError(
+                    "SQLite RunStore integrity: custom indexes/triggers "
+                    "require an explicit migration"
+                )
+            old_columns = self._conn.execute(
+                f"PRAGMA table_xinfo({table})"
+            ).fetchall()
+            if any(row["hidden"] for row in old_columns):
+                raise RunStoreIntegrityError(
+                    "SQLite RunStore integrity: generated/hidden columns "
+                    "require an explicit migration"
+                )
+            legacy = f"_legacy_{table}"
+            self._conn.execute(f"ALTER TABLE {table} RENAME TO {legacy}")
+            self._conn.execute(_STEP_SCHEMAS[table])
+            columns = [
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            ]
+            if set(columns) != {row["name"] for row in old_columns}:
+                raise RunStoreIntegrityError(
+                    "SQLite RunStore integrity: custom columns require "
+                    "an explicit migration"
+                )
+            fields = ", ".join(columns)
+            self._conn.execute(
+                f"INSERT INTO {table} (rowid, {fields}) "
+                f"SELECT rowid, {fields} FROM {legacy} ORDER BY rowid"
+            )
+            self._conn.execute(f"DROP TABLE {legacy}")
+
+    def _validate_legacy_ownership(self) -> None:
+        """Never manufacture a Step lost to a historical cross-Run REPLACE."""
+        invalid = self._conn.execute(
+            "SELECT 1 FROM step_attempts a LEFT JOIN steps s "
+            "ON s.run_id=a.run_id AND s.step_id=a.step_id "
+            "WHERE s.step_id IS NULL "
+            "UNION ALL "
+            "SELECT 1 FROM step_checkpoints c LEFT JOIN steps s "
+            "ON s.run_id=c.run_id AND s.step_id=c.step_id "
+            "LEFT JOIN step_attempts a ON a.run_id=c.run_id "
+            "AND a.attempt_id=c.attempt_id AND a.step_id=c.step_id "
+            "WHERE s.step_id IS NULL OR a.attempt_id IS NULL "
+            "OR s.step_type != c.step_type "
+            "UNION ALL "
+            "SELECT 1 FROM steps s LEFT JOIN runs r ON r.run_id=s.run_id "
+            "WHERE r.run_id IS NULL "
+            "UNION ALL "
+            "SELECT 1 FROM run_payloads p LEFT JOIN runs r ON r.run_id=p.run_id "
+            "WHERE r.run_id IS NULL "
+            "UNION ALL "
+            "SELECT 1 FROM step_checkpoints c LEFT JOIN run_payloads p "
+            "ON p.run_id=c.run_id AND p.field='checkpoint:' || c.step_id || ':output' "
+            "WHERE p.run_id IS NULL LIMIT 1"
+        ).fetchone()
+        if invalid is not None:
+            raise RunStoreIntegrityError(
+                "SQLite RunStore integrity: inconsistent historical Run/Step/"
+                "Attempt/Checkpoint ownership or missing payload; migration "
+                "refused and database unchanged"
+            )
 
     def _migrate(self) -> None:
         """幂等迁移旧数据库的 metadata/payload 边界。
@@ -282,22 +400,23 @@ class SQLiteRunStore:
                 self._codec.encode(redact_failure_message(row["error"])),
             )
             self._conn.execute(
-                "UPDATE step_attempts SET error=NULL WHERE attempt_id=?",
-                (row["attempt_id"],),
+                "UPDATE step_attempts SET error=NULL WHERE run_id=? AND attempt_id=?",
+                (row["run_id"], row["attempt_id"]),
             )
         # ``error_code`` is queryable metadata. Older databases may have
         # accepted arbitrary Adapter-provided strings before the shared
         # failure boundary was introduced, so normalize them on open too.
         codes = self._conn.execute(
-            "SELECT attempt_id, error_code FROM step_attempts "
+            "SELECT run_id, attempt_id, error_code FROM step_attempts "
             "WHERE error_code IS NOT NULL"
         ).fetchall()
         for row in codes:
             safe_code = sanitize_error_code(row["error_code"])
             if safe_code != row["error_code"]:
                 self._conn.execute(
-                    "UPDATE step_attempts SET error_code=? WHERE attempt_id=?",
-                    (safe_code, row["attempt_id"]),
+                    "UPDATE step_attempts SET error_code=? "
+                    "WHERE run_id=? AND attempt_id=?",
+                    (safe_code, row["run_id"], row["attempt_id"]),
                 )
 
     def close(self) -> None:

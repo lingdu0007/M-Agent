@@ -76,6 +76,7 @@ from .._errors import (
     ResolutionNotAllowedError,
     RunNotFoundError,
     StaleRunVersionError,
+    RunStoreIntegrityError,
 )
 from .._failure import ModelFailure, StepFailure, ToolFailure
 from .._model import (
@@ -260,6 +261,7 @@ __all__ = [
     "RevisionStability",
     "StreamingMode",
     "StaleRunVersionError",
+    "RunStoreIntegrityError",
     "StepAttempt",
     "StepCheckpoint",
     "StepFailure",

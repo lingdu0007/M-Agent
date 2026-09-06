@@ -178,6 +178,10 @@ class RunStore(Protocol):
     配置的 :class:`PayloadCodec` 存取；调用方看到的一律是解码后的
     字符串，本协议不暴露编码字节。
 
+    Step and Checkpoint identity is ``(run_id, step_id)``; Attempt identity is
+    ``(run_id, attempt_id)``. Identifiers may repeat across independent Runs.
+    Updating one Run must never replace another Run's metadata or payload.
+
     租约原语（ADR 0013）：``acquire_lease`` 是排他的——只有无有效
     租约或原 owner 续约时成功。Lease、Step、Attempt、Checkpoint 与
     Run transition 的每个权威 mutation 都必须携带 ``expected_version``；
