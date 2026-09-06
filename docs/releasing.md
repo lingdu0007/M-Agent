@@ -11,6 +11,8 @@ The build job uses a clean checkout, pinned build backend and an isolated
 wheel installation. It uploads one wheel/sdist pair, its SHA256SUMS and a
 build Manifest. Later jobs download those exact bytes; prerequisite sdist
 rebuilds do not replace the candidate.
+Prerequisite warming uses uv's default cache, matching the acceptance
+subprocess environment that intentionally excludes ambient cache overrides.
 
 Linux Python 3.11-3.14 and macOS Python 3.11/3.14 each run all six frozen
 `foundation-release-0-5` Scenarios outside the checkout, using the installed

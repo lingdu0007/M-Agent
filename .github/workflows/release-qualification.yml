@@ -124,6 +124,8 @@ jobs:
       - name: Install the candidate and warm only offline build prerequisites
         shell: bash
         run: |
+          # Acceptance children intentionally discard UV_CACHE_DIR.
+          unset UV_CACHE_DIR
           uv venv --no-project --python "$(command -v python)" "$RUNNER_TEMP/subject"
           uv pip install --python "$RUNNER_TEMP/subject/bin/python" "$RUNNER_TEMP/candidate/m_agent-${VERSION}-py3-none-any.whl[testing]"
           uv build --wheel "$RUNNER_TEMP/candidate/m_agent-${VERSION}.tar.gz" \
