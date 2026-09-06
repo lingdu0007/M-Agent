@@ -1,0 +1,241 @@
+name: Release Qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  M_AGENT_RUN_LIVE_TESTS: "0"
+  M_AGENT_OPENAI_API_KEY: ambient-credential-must-not-be-used
+  OPENAI_API_KEY: ambient-credential-must-not-be-used
+  PYTHONPATH: ""
+
+jobs:
+  build:
+    name: Build and identify the candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      wheel_digest: ${{ steps.identity.outputs.wheel_digest }}
+      sdist_digest: ${{ steps.identity.outputs.sdist_digest }}
+      fixture_digest: ${{ steps.identity.outputs.fixture_digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Build one clean candidate and measure its installed identity
+        id: identity
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/candidate"
+          exec > >(tee "$RUNNER_TEMP/candidate/build.log") 2>&1
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          uv build --build-constraints tools/release-build-constraints.txt --out-dir "$RUNNER_TEMP/candidate"
+          test -z "$(git status --porcelain)"
+          uv venv --no-project --python "$(command -v python)" "$RUNNER_TEMP/build-subject"
+          uv pip install --python "$RUNNER_TEMP/build-subject/bin/python" "$RUNNER_TEMP/candidate/m_agent-${VERSION}-py3-none-any.whl[testing]"
+          "$RUNNER_TEMP/build-subject/bin/python" tools/release_qualification.py prepare \
+            --source-commit "$GITHUB_SHA" --version "$VERSION" \
+            --wheel "$RUNNER_TEMP/candidate/m_agent-${VERSION}-py3-none-any.whl" \
+            --sdist "$RUNNER_TEMP/candidate/m_agent-${VERSION}.tar.gz" \
+            --directory "$RUNNER_TEMP/build-identity"
+          cp "$RUNNER_TEMP/build-identity/manifest.json" "$RUNNER_TEMP/candidate/build-manifest.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "candidate"
+          manifest = json.loads((root / "build-manifest.json").read_text())
+          version = manifest["environment"]["version"]
+          outputs = {
+              "version": version,
+              "wheel_digest": manifest["artifact_digest"],
+              "sdist_digest": manifest["sdist_digest"],
+              "fixture_digest": manifest["fixture_digest"],
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for key, value in outputs.items():
+                  print(f"{key}={value}", file=output)
+          (root / "SHA256SUMS").write_text(
+              f'{manifest["artifact_digest"][7:]}  m_agent-{version}-py3-none-any.whl\n'
+              f'{manifest["sdist_digest"][7:]}  m_agent-{version}.tar.gz\n'
+          )
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: warn
+          retention-days: 90
+
+  qualify:
+    needs: build
+    name: ${{ matrix.platform }} Python ${{ matrix.python }} wheel qualification
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, platform: linux, python: "3.11"}
+          - {os: ubuntu-latest, platform: linux, python: "3.12"}
+          - {os: ubuntu-latest, platform: linux, python: "3.13"}
+          - {os: ubuntu-latest, platform: linux, python: "3.14"}
+          - {os: macos-latest, platform: darwin, python: "3.11"}
+          - {os: macos-latest, platform: darwin, python: "3.14"}
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      WHEEL_DIGEST: ${{ needs.build.outputs.wheel_digest }}
+      SDIST_DIGEST: ${{ needs.build.outputs.sdist_digest }}
+      FIXTURE_DIGEST: ${{ needs.build.outputs.fixture_digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Verify downloaded bytes
+        working-directory: ${{ runner.temp }}/candidate
+        run: shasum -a 256 -c SHA256SUMS
+      - name: Install the candidate and warm only offline build prerequisites
+        shell: bash
+        run: |
+          uv venv --no-project --python "$(command -v python)" "$RUNNER_TEMP/subject"
+          uv pip install --python "$RUNNER_TEMP/subject/bin/python" "$RUNNER_TEMP/candidate/m_agent-${VERSION}-py3-none-any.whl[testing]"
+          uv build --wheel "$RUNNER_TEMP/candidate/m_agent-${VERSION}.tar.gz" \
+            --build-constraints tools/release-build-constraints.txt \
+            --out-dir "$RUNNER_TEMP/build-prerequisite"
+      - name: Prepare a Manifest from the installed subject
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/subject/bin/python" "$GITHUB_WORKSPACE/tools/release_qualification.py" prepare \
+            --source-commit "$GITHUB_SHA" --version "$VERSION" \
+            --wheel "$RUNNER_TEMP/candidate/m_agent-${VERSION}-py3-none-any.whl" \
+            --sdist "$RUNNER_TEMP/candidate/m_agent-${VERSION}.tar.gz" \
+            --directory "$RUNNER_TEMP/cell"
+      - name: Run all six frozen Scenarios against the supplied wheel
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/subject/bin/python" -m m_agent.testing run \
+            --manifest "$RUNNER_TEMP/cell/manifest.json" \
+            --wheel "$RUNNER_TEMP/candidate/m_agent-${VERSION}-py3-none-any.whl" \
+            --sdist "$RUNNER_TEMP/candidate/m_agent-${VERSION}.tar.gz" \
+            --output-dir "$RUNNER_TEMP/cell/bundles" \
+            2>&1 | tee "$RUNNER_TEMP/cell/pack.log"
+      - name: Verify the entire Scenario set against the build-job identity
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/subject/bin/python" "$GITHUB_WORKSPACE/tools/release_qualification.py" verify-cell \
+            --directory "$RUNNER_TEMP/cell" --source-commit "$GITHUB_SHA" \
+            --version "$VERSION" --wheel-digest "$WHEEL_DIGEST" \
+            --sdist-digest "$SDIST_DIGEST" --fixture-digest "$FIXTURE_DIGEST" \
+            > "$RUNNER_TEMP/cell/qualification.json"
+      - name: Run shared-SQLite regressions against the installed wheel
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/installed-regression/tests"
+          cp "$GITHUB_WORKSPACE/tests/test_m_agent_run_isolation.py" "$RUNNER_TEMP/installed-regression/tests/"
+          cp "$GITHUB_WORKSPACE/tests/test_m_agent_store_migration.py" "$RUNNER_TEMP/installed-regression/tests/"
+          cp -R "$GITHUB_WORKSPACE/tests/fixtures" "$RUNNER_TEMP/installed-regression/tests/fixtures"
+          test ! -e "$RUNNER_TEMP/installed-regression/src"
+          "$RUNNER_TEMP/subject/bin/python" -m unittest discover \
+            -s "$RUNNER_TEMP/installed-regression/tests" -v \
+            2>&1 | tee "$RUNNER_TEMP/cell/shared-sqlite.log"
+      - name: Run correctness-first benchmark attachments on the primary host
+        if: matrix.platform == 'linux' && matrix.python == '3.11'
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/subject/bin/python" "$GITHUB_WORKSPACE/tools/release_qualification.py" benchmarks \
+            --directory "$RUNNER_TEMP/cell" --source-commit "$GITHUB_SHA" \
+            --version "$VERSION" --wheel-digest "$WHEEL_DIGEST" \
+            --sdist-digest "$SDIST_DIGEST" --fixture-digest "$FIXTURE_DIGEST" \
+            2>&1 | tee "$RUNNER_TEMP/cell/benchmarks.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cell-${{ matrix.platform }}-${{ matrix.python }}
+          path: ${{ runner.temp }}/cell
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  aggregate:
+    name: Verify the complete release matrix
+    needs: [build, qualify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      WHEEL_DIGEST: ${{ needs.build.outputs.wheel_digest }}
+      SDIST_DIGEST: ${{ needs.build.outputs.sdist_digest }}
+      FIXTURE_DIGEST: ${{ needs.build.outputs.fixture_digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: cell-*
+          path: ${{ runner.temp }}/cells
+      - name: Verify downloaded bytes
+        working-directory: ${{ runner.temp }}/candidate
+        run: shasum -a 256 -c SHA256SUMS
+      - name: Reverify every Bundle and require the full platform matrix
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/aggregation"
+          exec > >(tee "$RUNNER_TEMP/aggregation/aggregate.log") 2>&1
+          uv venv --no-project --python "$(command -v python)" "$RUNNER_TEMP/subject"
+          uv pip install --python "$RUNNER_TEMP/subject/bin/python" "$RUNNER_TEMP/candidate/m_agent-${VERSION}-py3-none-any.whl[testing]"
+          "$RUNNER_TEMP/subject/bin/python" "$GITHUB_WORKSPACE/tools/release_qualification.py" aggregate \
+            --directory "$RUNNER_TEMP/cells" --source-commit "$GITHUB_SHA" \
+            --version "$VERSION" --wheel-digest "$WHEEL_DIGEST" \
+            --sdist-digest "$SDIST_DIGEST" --fixture-digest "$FIXTURE_DIGEST" \
+            --output "$RUNNER_TEMP/aggregation/summary"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: release-qualification
+          path: ${{ runner.temp }}/aggregation
+          if-no-files-found: warn
+          retention-days: 90
