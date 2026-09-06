@@ -931,9 +931,9 @@ class EvalWorkloadBenchmarkTests(unittest.TestCase):
 class Release05MaterialConsistencyTests(unittest.TestCase):
     """0.5 release material agrees with the actual candidate."""
 
-    def test_distribution_version_is_0_5_0(self) -> None:
+    def test_distribution_version_is_0_5_1(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-        self.assertEqual(project["version"], "0.5.0")
+        self.assertEqual(project["version"], "0.5.1")
 
     def test_coverage_matrix_documents_the_0_5_release_rows(self) -> None:
         matrix = (ROOT / "docs/acceptance-coverage-matrix.md").read_text()
@@ -978,7 +978,7 @@ class Release05MaterialConsistencyTests(unittest.TestCase):
 
     def test_readme_documents_the_0_5_candidate(self) -> None:
         readme = (ROOT / "README.md").read_text()
-        self.assertIn("0.5.0", readme)
+        self.assertIn("0.5.1", readme)
         self.assertIn("model routing", readme.lower())
         self.assertIn("eval", readme.lower())
 

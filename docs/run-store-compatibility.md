@@ -2,8 +2,10 @@
 
 ## Scope And Release Status
 
-The shared-Run identity repair is a source change, not a published package
-release. It does not change the package version or claim a new release.
+The shared-Run identity repair is included in source version 0.5.1. A source
+checkout or local build alone does not establish a published release: verify
+the release tag, source commit and wheel checksum before selecting a
+distribution artifact. Earlier release evidence is not evidence for 0.5.1.
 
 The defect was reproduced against both source baseline
 `309ca6a05f355f7c132a3d51ee02a02ed5292455` and the published

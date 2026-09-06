@@ -1,6 +1,6 @@
 # M-Agent
 
-M-Agent 0.5.0 is an embeddable Agent Application Runtime for Python. Install
+M-Agent 0.5.1 is an embeddable Agent Application Runtime for Python. Install
 the `m-agent` distribution and import `m_agent`.
 
 ```bash
@@ -30,6 +30,10 @@ other three layers. See [the 0.3 migration table](docs/migrating-to-0.3.md).
 `Runner` is async-first and executes one explicit Agent Run. The embedding
 application owns workers, queues, scheduling, credentials, definition
 registration, and resolution decisions. See [the Durable Run guide](docs/durable-run.md).
+
+Version 0.5.1 fixes deterministic Context and compression identity collisions
+between independent Runs sharing a SQLiteRunStore. Before upgrading an existing
+database, read [the SQLite migration and recovery policy](docs/run-store-compatibility.md).
 
 For scripts and synchronous applications, `SyncRunner` delegates every command
 to the same async state machine:
